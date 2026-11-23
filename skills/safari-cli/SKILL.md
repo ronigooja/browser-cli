@@ -9,7 +9,7 @@ Controls the user's real Safari via AppleScript. Command reference, options, and
 
 ## Preconditions
 
-- macOS only. `safari-cli` must be on PATH; if not, run `/Users/zhuwei/Terminal/safari-cli/safari-cli` directly.
+- macOS only. The script ships with this skill: below, `safari-cli` means `./safari-cli`, relative to the directory containing this file (the skill base directory given when the skill loads).
 - Run `safari-cli status` first.
   - `on`: proceed.
   - `off`: stop and ask the user to enable Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password). Never change this setting, and never quit or restart Safari.
