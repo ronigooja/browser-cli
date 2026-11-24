@@ -63,7 +63,7 @@ EOF
 
 # ---- option parsing: sets BROWSER, TAB, TIMEOUT and ARGS (positional) ----
 BROWSER=""
-TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; TRUSTED=0; JSON=0; ARGS=()
+TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; TRUSTED=0; TRUSTED_SENDING=0; JSON=0; ARGS=()
 SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
 TO=""; TO_SET=0; BY=""; BY_SET=0
 OUT=""; OUT_SET=0
@@ -132,7 +132,16 @@ osa() {
         code="${BASH_REMATCH[1]}"
         message="${message% (*}"
       fi
-      printf 'browser-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
+      if [ "$TRUSTED" = 1 ] && [[ "$message" == *"the target "*" tab is no longer in front"* || "$message" == *"the target tab was closed or changed"* ]]; then
+        # Our own guard fired: report it plainly, without the AppleScript wrapper.
+        message="${message#*Error: }"; message="${message#Error: }"
+        printf 'browser-cli: %s\n' "$message" >&2
+      elif [ "$TRUSTED" = 1 ] && [ "$TRUSTED_SENDING" = 1 ] && { [ "$code" = -1719 ] || [ "$code" = -1728 ]; }; then
+        # The window or tab disappeared while input was being sent (macOS words this per locale).
+        printf 'browser-cli: the target tab was closed or changed during the action; nothing more was sent\n' >&2
+      else
+        printf 'browser-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
+      fi
     fi
   fi
   [ "$rc" -eq 0 ] || return 1
@@ -193,7 +202,7 @@ resolve_handler() {
 on resolve(spec)
   tell application "$APP"
     if (count of windows) = 0 then error "no $APP window is open"
-    if spec is "" then return {1, $AS_ACTIVE_INDEX}
+    if spec is "" then return {1, $AS_ACTIVE_INDEX, ""}
   end tell
   try
     set AppleScript's text item delimiters to ":"
@@ -204,7 +213,7 @@ on resolve(spec)
       set ti to (item 2 of parts) as integer
       tell application "$APP"
         if wi > 0 and wi ≤ (count of windows) then
-          if ti > 0 and ti ≤ (count of tabs of window wi) then return {wi, ti}
+          if ti > 0 and ti ≤ (count of tabs of window wi) then return {wi, ti, ""}
         end if
       end tell
     end if
@@ -213,7 +222,7 @@ on resolve(spec)
   tell application "$APP"
     repeat with w from 1 to count of windows
       repeat with t from 1 to count of tabs of window w
-        if URL of tab t of window w contains spec then return {w, t}
+        if URL of tab t of window w contains spec then return {w, t, spec}
       end repeat
     end repeat
   end tell
@@ -589,19 +598,32 @@ function run(argv) {
   const se = Application('System Events');
   if (argv[0] === 'permission') return $.AXIsProcessTrusted() && se.uiElementsEnabled();
   const [action, windowID, tabIndex, geometry, text, appName, tabID] = argv;
+  const GONE = 'the target tab was closed or changed during the action; nothing more was sent';
   const codes = {Enter: 36, Escape: 53, Tab: 48, ArrowUp: 126, ArrowDown: 125,
                  ArrowLeft: 123, ArrowRight: 124, Backspace: 51, Space: 49, ' ': 49};
   const app = Application(appName);
   const process = se.processes.byName(appName);
   const chrome = appName === 'Google Chrome';
   const browser = chrome ? 'Chrome' : 'Safari';
+  // Safari tabs have no id, so a URL+title fingerprint stands in: if the target tab is closed and a
+  // neighbour slides into its index, the fingerprint differs and nothing is sent to the neighbour.
+  function fingerprint(win) {
+    const tab = win.currentTab;
+    return String(tab.url()) + '\n' + String(tab.name());
+  }
   function frontWindow() {
-    const win = app.windows[0];
-    const inFront = chrome
-      ? win.id() === windowID && win.activeTabIndex() === Number(tabIndex) && String(win.activeTab.id()) === tabID && process.frontmost()
-      : process.frontmost() && win.id() === Number(windowID) && win.currentTab.index() === Number(tabIndex);
-    if (!inFront) throw new Error('the target ' + browser + ' tab is no longer in front');
-    return win;
+    let inFront;
+    try {
+      const win = app.windows[0];
+      inFront = chrome
+        ? win.id() === windowID && win.activeTabIndex() === Number(tabIndex) && String(win.activeTab.id()) === tabID && process.frontmost()
+        : process.frontmost() && win.id() === Number(windowID) && win.currentTab.index() === Number(tabIndex) && fingerprint(win) === tabID;
+      if (inFront) return win;
+    } catch (_) {
+      // The window or tab vanished while it was being read.
+      throw new Error(GONE);
+    }
+    throw new Error(process.frontmost() ? GONE : 'the target ' + browser + ' tab is no longer in front; nothing more was sent');
   }
 
   const win = frontWindow();
@@ -780,31 +802,51 @@ JS
   [ "$access" = true ] || die '--trusted needs Accessibility permission for your terminal (System Settings > Privacy & Security > Accessibility)'
 
   local unminimize='set miniaturized of window id wi to false'
-  local select_tab='set current tab of window id wi to tab ti of window id wi' identify_tab=''
+  local select_tab='set current tab of window id wi to tab ti of window id wi'
+  local tab_identity='my fingerprintOf(tab ti of window id wi)'
   if [ "$BROWSER" = chrome ]; then
     unminimize='set minimized of window id wi to false'
     select_tab='set active tab index of window id wi to ti'
-    identify_tab='set target to target & space & (id of tab ti of window id wi as text)'
+    tab_identity='(id of tab ti of window id wi as text)'
   fi
+  # Resolving --tab to an index and reading the tab's identity are separate steps. If the user closes
+  # the target between them, a neighbour takes its index and its identity would be read instead, so
+  # after reading it the launcher re-checks that the tab at that index still matches the --tab text.
+  # A tab that vanishes later is caught by the identity checks made before every send.
+  TRUSTED_SENDING=1
   cat >"$launcher" <<AS
+on fingerprintOf(t)
+  tell application "$APP"
+    set u to URL of t
+    if u is missing value then set u to ""
+    return u & linefeed & (name of t)
+  end tell
+end fingerprintOf
 on run argv
   set r to resolve(item 1 of argv)
   set ti to item 2 of r
   tell application "$APP"
     set wi to id of window (item 1 of r)
+    set identity to $tab_identity
+    if (item 3 of r) is not "" then
+      set cur to URL of tab ti of window id wi
+      if cur is missing value then set cur to ""
+      if cur does not contain (item 3 of r) then error "the target tab was closed or changed during the action; nothing more was sent"
+    end if
     $unminimize
     $select_tab
     set index of window id wi to 1
     activate
-    set target to (wi as text) & space & (ti as text)
-    $identify_tab
+    return (wi as text) & (ASCII character 9) & (ti as text) & (ASCII character 9) & identity
   end tell
-  return target
 end run
 $RESOLVE
 AS
   target="$(osa "$TIMEOUT" "$launcher" "$TAB")" || return 1
-  read -r window_id tab_index tab_id <<<"$target"
+  local rest
+  window_id="${target%%$'\t'*}"; rest="${target#*$'\t'}"
+  tab_index="${rest%%$'\t'*}"; tab_id="${rest#*$'\t'}"
+  tab_id="${tab_id%$'\n'}"
   if [ "$cmd" != press ] || [ "$SELECTOR_SET" = 1 ]; then
     js_string "$selector"; local sel_js="$JS_STRING"
     code="(function(){ const element = document.querySelector($sel_js); const action = '$cmd';"

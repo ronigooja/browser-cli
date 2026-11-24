@@ -133,6 +133,21 @@ example `trusted clicked button "Go"`. Details:
 - `press` supports the named keys and printable ASCII only; use `fill` for Unicode text.
 - Use it only when a site ignores synthetic events.
 
+**Do not use the browser while a `--trusted` command runs** (it takes about a second). Before each
+click, paste, or key it checks that the browser is frontmost and that the target window and tab are
+still the ones it selected. If you switch app, switch tab, or close the tab or window, it stops with
+`browser-cli: the target Safari tab is no longer in front; nothing more was sent` or
+`browser-cli: the target tab was closed or changed during the action; nothing more was sent`
+(exit 1). The clipboard is restored.
+
+Known gap: the target tab is first found by URL substring and its identity is read a moment later.
+If the user closes the target in that instant and a neighbouring tab takes its position, input can
+go to the neighbour while the command reports success. The launcher re-checks the tab's URL against
+the `--tab` text to narrow this. It was confirmed to stop the case on Safari. It was not confirmed on
+Chrome, where it occurred before the re-check was added. It cannot help when `--tab` is an index
+such as `1:2` or omitted, or when the neighbour's URL also contains the same text. Prefer a specific
+URL substring and avoid closing tabs while the command runs.
+
 ## Screenshots
 
 `screenshot` requires Screen Recording permission for the terminal. It can capture only the
