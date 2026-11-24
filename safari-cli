@@ -32,6 +32,7 @@ safari-cli <command> [options]
   text [--tab T]                print page text
   links [--tab T]               print link text and absolute URLs
   html [--tab T]                print sanitized page HTML
+  snapshot [--tab T] [--selector CSS] [--max-chars N]  list interactive elements
   wait [--tab T] <js>           poll until the expression is truthy
   status                        probe JavaScript permission: on, off, or unknown (no window)
 
@@ -39,8 +40,8 @@ safari-cli <command> [options]
 --background open only: do not activate Safari, raise a window or switch tabs; launches Safari in the background if not running
 --json      tabs only: output a JSON array
 --timeout N positive integer seconds before commands give up (default 30)
---selector CSS scope text, links, or html to the first matching element
---max-chars N limit output characters for text, links, html, eval, or file
+--selector CSS scope text, links, html, or snapshot to the first matching element
+--max-chars N limit output characters for text, links, html, snapshot, eval, or file
 --raw       html only: return unmodified outerHTML
 Enable JavaScript from Apple Events once by hand in Safari > Settings > Developer.
 This tool never changes that setting and never restarts Safari.
@@ -364,7 +365,11 @@ cmd_read() {
     }
     return 'safari-cli-result:' + result;
   })()"
-  run_js "$code" "$TIMEOUT" >"$WORK/read-output" || return 1
+  output_read "$code"
+}
+
+output_read() {
+  run_js "$1" "$TIMEOUT" >"$WORK/read-output" || return 1
   local out total limit="${MAX_CHARS:-20000}"
   out="$(cat "$WORK/read-output"; printf '.')"; out="${out%.}"
   if [ "$out" = 'safari-cli-no-match:' ]; then
@@ -377,6 +382,77 @@ cmd_read() {
   else
     printf '%s' "$out"
   fi
+}
+
+cmd_snapshot() {
+  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  local selector="$SELECTOR" code
+  selector="${selector//\\/\\\\}"
+  selector="${selector//\"/\\\"}"
+  selector="${selector//$'\n'/\\n}"
+  selector="${selector//$'\r'/\\r}"
+  selector="${selector//$'\t'/\\t}"
+  code="(function(){ var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector("%s")' "$selector" || printf 'document.documentElement');"
+  cat >"$WORK/snapshot.js" <<'JS'
+    if (!root) return 'safari-cli-no-match:';
+    var query = 'a,button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[role="checkbox"],[role="tab"],[role="menuitem"],[role="switch"],[role="option"],[role="combobox"],[role="textbox"],[contenteditable],[onclick],[tabindex]';
+    var elements = Array.from(root.querySelectorAll(query));
+    if (root.matches(query)) elements.unshift(root);
+    function clean(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
+    function cut(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+    function unique(s) { try { return document.querySelectorAll(s).length === 1; } catch (_) { return false; } }
+    function selectorFor(e) {
+      var tag = e.localName, s, value;
+      if (e.id && unique(s = '#' + CSS.escape(e.id))) return s;
+      for (var attr of ['data-testid', 'name']) {
+        value = e.getAttribute(attr);
+        if (value && unique(s = tag + '[' + attr + '="' + CSS.escape(value) + '"]')) return s;
+      }
+      var parts = [], node = e;
+      while (node && node.nodeType === 1) {
+        if (node.id && unique(s = '#' + CSS.escape(node.id))) {
+          parts.unshift(s);
+          break;
+        }
+        var index = 1, sibling = node;
+        while (sibling = sibling.previousElementSibling) if (sibling.localName === node.localName) index++;
+        parts.unshift(node.localName + ':nth-of-type(' + index + ')');
+        node = node.parentElement;
+      }
+      s = parts.join(' > ');
+      return unique(s) ? s : '';
+    }
+    var lines = [];
+    elements.forEach(function(e) {
+      if (e.matches('[tabindex]') && !e.matches('a,button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[role="checkbox"],[role="tab"],[role="menuitem"],[role="switch"],[role="option"],[role="combobox"],[role="textbox"],[contenteditable],[onclick]') && e.tabIndex < 0) return;
+      if (!e.getClientRects().length || e.closest('[aria-hidden="true"]')) return;
+      var style = getComputedStyle(e);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return;
+      var tag = e.localName, type = tag;
+      if (tag === 'input') type += '[' + (e.type || 'text') + ']';
+      else if (!/^(a|button|select|textarea|summary)$/.test(tag) && e.getAttribute('role')) type += '[role=' + e.getAttribute('role') + ']';
+      if (e.checked || e.getAttribute('aria-checked') === 'true') type += ':checked';
+      if (e.disabled || e.getAttribute('aria-disabled') === 'true' || e.matches(':disabled')) type += ':disabled';
+      var label = clean(e.getAttribute('aria-label')) || clean(e.innerText) || clean(e.getAttribute('placeholder'));
+      if (!label && tag !== 'input') label = clean(e.value);
+      label = label || clean(e.title) || clean(e.getAttribute('alt')) || clean(e.labels && Array.from(e.labels).map(function(l){ return l.innerText; }).join(' '));
+      label = cut(label, 60);
+      if (tag === 'select') {
+        var selected = clean(Array.from(e.selectedOptions).map(function(o){ return o.label; }).join(', '));
+        if (selected && label !== selected) label += (label ? ' = ' : '') + cut(selected, 30);
+      } else if (tag === 'input' && e.type !== 'password') {
+        var value = clean(e.value);
+        if (value) label += (label ? ' = ' : '') + cut(value, 30);
+      }
+      label = cut(label, 60);
+      var selector = selectorFor(e);
+      if (selector) lines.push((lines.length + 1) + '\t' + type + '\t' + label + '\t' + selector);
+    });
+    return 'safari-cli-result:' + lines.join('\n');
+  })()
+JS
+  code+="$(cat "$WORK/snapshot.js")"
+  output_read "$code"
 }
 
 cmd_wait() {
@@ -438,16 +514,16 @@ cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
-  tabs|open|close|eval|file|wait|status|info|text|links|html)
+  tabs|open|close|eval|file|wait|status|info|text|links|html|snapshot)
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'safari-cli: --json only applies to tabs' >&2; exit 2; }
-    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html)$ ]] || { echo 'safari-cli: --selector only applies to text, links, and html' >&2; exit 2; }
+    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot)$ ]] || { echo 'safari-cli: --selector only applies to text, links, html, and snapshot' >&2; exit 2; }
     [ "$RAW" = 0 ] || [ "$cmd" = html ] || { echo 'safari-cli: --raw only applies to html' >&2; exit 2; }
     if [ "$MAX_CHARS_SET" = 1 ]; then
       [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: max-chars must be a positive integer' >&2; exit 2; }
-      [[ "$cmd" =~ ^(text|links|html|eval|file)$ ]] || { echo 'safari-cli: --max-chars only applies to text, links, html, eval, and file' >&2; exit 2; }
+      [[ "$cmd" =~ ^(text|links|html|snapshot|eval|file)$ ]] || { echo 'safari-cli: --max-chars only applies to text, links, html, snapshot, eval, and file' >&2; exit 2; }
     fi
     case "$cmd" in
       text|links|html) cmd_read ;;
