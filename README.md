@@ -44,7 +44,7 @@ lookup failures, timeout, or status off/unknown), 2 usage error.
 
 | Feature | Safari | Chrome |
 | --- | --- | --- |
-| `--browser safari|chrome screenshot` and `--trusted` | Supported | Not supported yet (exit 1: `browser-cli: <cmd> is not supported for chrome yet`) |
+| `screenshot` and `--trusted` | Supported | Not supported yet (exit 1: `browser-cli: <cmd> is not supported for chrome yet`) |
 | Screenshot window capture | Safari must be the active app; Stage Manager can cause a thumbnail capture. | Not applicable |
 
 ## Options and results
