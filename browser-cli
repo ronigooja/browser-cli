@@ -569,7 +569,7 @@ JS
 }
 
 cmd_trusted() {
-  local selector="$1" arg="$2" f target window_id tab_index code result point='' output=''
+  local selector="$1" arg="$2" f target window_id tab_index tab_id code result point='' output=''
   if [ "$cmd" = press ]; then
     local LC_ALL=C
     local printable='^[ -~]$'
@@ -579,7 +579,7 @@ cmd_trusted() {
     esac
   fi
 
-  # Check through both the APIs used to send input before activating Safari.
+  # Check through both APIs used to send input before activating the browser.
   f="$WORK/trusted.js"
   cat >"$f" <<'JS'
 ObjC.import('ApplicationServices');
@@ -587,15 +587,19 @@ ObjC.import('AppKit');
 function run(argv) {
   const se = Application('System Events');
   if (argv[0] === 'permission') return $.AXIsProcessTrusted() && se.uiElementsEnabled();
-  const [action, windowID, tabIndex, geometry, text] = argv;
+  const [action, windowID, tabIndex, geometry, text, appName, tabID] = argv;
   const codes = {Enter: 36, Escape: 53, Tab: 48, ArrowUp: 126, ArrowDown: 125,
                  ArrowLeft: 123, ArrowRight: 124, Backspace: 51, Space: 49, ' ': 49};
-  const safari = Application('Safari');
-  const process = se.processes.byName('Safari');
+  const app = Application(appName);
+  const process = se.processes.byName(appName);
+  const chrome = appName === 'Google Chrome';
+  const browser = chrome ? 'Chrome' : 'Safari';
   function frontWindow() {
-    const win = safari.windows[0];
-    if (!process.frontmost() || win.id() !== Number(windowID) || win.currentTab.index() !== Number(tabIndex))
-      throw new Error('the target Safari tab is no longer in front');
+    const win = app.windows[0];
+    const inFront = chrome
+      ? win.id() === windowID && win.activeTabIndex() === Number(tabIndex) && String(win.activeTab.id()) === tabID && process.frontmost()
+      : process.frontmost() && win.id() === Number(windowID) && win.currentTab.index() === Number(tabIndex);
+    if (!inFront) throw new Error('the target ' + browser + ' tab is no longer in front');
     return win;
   }
 
@@ -603,15 +607,17 @@ function run(argv) {
   if (geometry) {
     const [x, y, sx, sy, ow, oh, iw, ih, zoom] = JSON.parse(geometry);
     const bounds = win.bounds();
-    const axWindow = process.windows[0];
+    // Chrome's zoom bubble and other transient windows can precede the actual
+    // browser window in System Events, even while the browser window is main.
+    const axWindow = chrome ? chromeMainWindow(process) : process.windows[0];
     const [wx, wy] = axWindow.position();
     const [ww, wh] = axWindow.size();
-    const web = webViewport(axWindow, 0);
+    const web = chrome ? chromeViewport(axWindow, [wx, wy, ww, wh], iw, ih) : webViewport(axWindow, 0);
     if (!web || Math.abs(wx - bounds.x) > 2 || Math.abs(wy - bounds.y) > 2 ||
         Math.abs(ww - bounds.width) > 2 || Math.abs(wh - bounds.height) > 2 ||
         Math.abs(sx - wx) > 2 || Math.abs(sy - wy) > 2 ||
         Math.abs(ow - ww) > 2 || Math.abs(oh - wh) > 2)
-      throw new Error('could not verify Safari viewport position');
+      throw new Error('could not verify ' + browser + ' viewport position');
     const [[vx, vy], [vw, vh]] = web;
     // AX measures the actual content area, including the toolbar/sidebar insets
     // from the window bounds. The width ratio converts CSS px (page zoom) to
@@ -619,11 +625,18 @@ function run(argv) {
     const scale = vw / iw;
     if (!(scale > 0 && zoom > 0 && Math.abs(ih * scale - vh) <= 3 &&
           vx >= wx - 2 && vy >= wy - 2 && vx + vw <= wx + ww + 2 && vy + vh <= wy + wh + 2))
-      throw new Error('could not calibrate Safari viewport dimensions');
+      throw new Error('could not calibrate ' + browser + ' viewport dimensions');
     const px = vx + x * scale * zoom, py = vy + y * scale * zoom;
     if (!(px >= vx && px < vx + vw && py >= vy && py < vy + vh && onScreen(px, py)))
-      throw new Error('element center is outside the visible Safari viewport');
-    frontWindow();
+      throw new Error('element center is outside the visible ' + browser + ' viewport');
+    const current = frontWindow();
+    if (chrome) {
+      const b = current.bounds();
+      if (b.x !== bounds.x || b.y !== bounds.y || b.width !== bounds.width || b.height !== bounds.height)
+        throw new Error('Chrome window moved or resized during viewport calibration');
+      checkChromeWindowAtPoint(process, px, py);
+      frontWindow();
+    }
     const point = $.CGPointMake(px, py);
     [$.kCGEventMouseMoved, $.kCGEventLeftMouseDown, $.kCGEventLeftMouseUp].forEach(type => {
       $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateMouseEvent(null, type, point, $.kCGMouseButtonLeft));
@@ -655,6 +668,73 @@ function webViewport(element, depth) {
   return null;
 }
 
+function chromeMainWindow(process) {
+  try {
+    const window = process.attributes.byName('AXMainWindow').value();
+    if (window && window.subrole() === 'AXStandardWindow') return window;
+  } catch (_) {}
+  throw new Error('could not verify Chrome viewport position');
+}
+
+function chromeViewport(window, [wx, wy, ww, wh], iw, ih) {
+  function valid(element) {
+    const pos = element.position(), size = element.size();
+    const [vx, vy] = pos, [vw, vh] = size;
+    const scale = vw / iw;
+    if (scale > 0 && vh > 0 && Math.abs(ih * scale - vh) <= 3 &&
+        vx >= wx - 2 && vy >= wy - 2 && vx + vw <= wx + ww + 2 && vy + vh <= wy + wh + 2)
+      return [pos, size];
+    return null;
+  }
+  function find(element, depth) {
+    const role = element.role();
+    if (role === 'AXWebArea') return valid(element);
+    if (depth > 12 || !['AXWindow', 'AXSplitGroup', 'AXTabGroup', 'AXGroup', 'AXScrollArea'].includes(role)) return null;
+    const children = element.uiElements();
+    // Use the scroll area's frame when it owns the document, including scrollbars.
+    if (role === 'AXScrollArea' && children.some(child => child.role() === 'AXWebArea')) {
+      const viewport = valid(element);
+      if (viewport) return viewport;
+    }
+    for (const child of children) {
+      const viewport = find(child, depth + 1);
+      if (viewport) return viewport;
+    }
+    return null;
+  }
+  // An AX client query can wake Chrome's lazy accessibility tree. Do not infer
+  // the viewport origin from outer/inner sizes alone: UI can inset both edges.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) $.NSThread.sleepForTimeInterval(0.15);
+    try {
+      const viewport = find(window, 0);
+      if (viewport) return viewport;
+    } catch (_) {} // The tree may be rebuilt while the target tab becomes active.
+  }
+  return null;
+}
+
+function checkChromeWindowAtPoint(process, px, py) {
+  // Query just before posting, since a transient bubble can close while the AX
+  // tree is being read. Only consider windows in front of the main window.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let covered = false, found = false;
+    try {
+      for (const window of process.windows()) {
+        if (window.subrole() === 'AXStandardWindow' && window.attributes.byName('AXMain').value()) {
+          found = true;
+          break;
+        }
+        const [x, y] = window.position(), [w, h] = window.size();
+        covered = covered || (px >= x && px < x + w && py >= y && py < y + h);
+      }
+    } catch (_) { continue; }
+    if (covered) throw new Error('element center is covered by another Chrome window');
+    if (found) return;
+  }
+  throw new Error('could not verify Chrome viewport position');
+}
+
 function onScreen(x, y) {
   const screens = $.NSScreen.screens;
   for (let i = 0; i < screens.count; i++) {
@@ -683,7 +763,7 @@ function paste(se, text, frontWindow) {
     if (!board.setStringForType(text, $.NSPasteboardTypeString)) throw new Error('could not write clipboard text');
     change = board.changeCount;
     se.keystroke('v', {using: 'command down'});
-    // System Events returns after queuing input, before Safari has read the pasteboard.
+    // System Events returns after queuing input, before the browser has read the pasteboard.
     $.NSThread.sleepForTimeInterval(0.3);
   } finally {
     if (board.changeCount === change) {
@@ -698,23 +778,32 @@ JS
   access="$(osa "$TIMEOUT" "$f" permission)" || return 1
   [ "$access" = true ] || die '--trusted needs Accessibility permission for your terminal (System Settings > Privacy & Security > Accessibility)'
 
+  local unminimize='set miniaturized of window id wi to false'
+  local select_tab='set current tab of window id wi to tab ti of window id wi' identify_tab=''
+  if [ "$BROWSER" = chrome ]; then
+    unminimize='set minimized of window id wi to false'
+    select_tab='set active tab index of window id wi to ti'
+    identify_tab='set target to target & space & (id of tab ti of window id wi as text)'
+  fi
   cat >"$launcher" <<AS
 on run argv
   set r to resolve(item 1 of argv)
   set ti to item 2 of r
-  tell application "Safari"
+  tell application "$APP"
     set wi to id of window (item 1 of r)
-    set miniaturized of window id wi to false
-    set current tab of window id wi to tab ti of window id wi
+    $unminimize
+    $select_tab
     set index of window id wi to 1
     activate
+    set target to (wi as text) & space & (ti as text)
+    $identify_tab
   end tell
-  return (wi as text) & space & (ti as text)
+  return target
 end run
 $RESOLVE
 AS
   target="$(osa "$TIMEOUT" "$launcher" "$TAB")" || return 1
-  read -r window_id tab_index <<<"$target"
+  read -r window_id tab_index tab_id <<<"$target"
   if [ "$cmd" != press ] || [ "$SELECTOR_SET" = 1 ]; then
     js_string "$selector"; local sel_js="$JS_STRING"
     code="(function(){ const element = document.querySelector($sel_js); const action = '$cmd';"
@@ -746,7 +835,7 @@ JS
     point="${result%%$'\n'*}"
     output="${result#*$'\n'}"
   fi
-  osa "$TIMEOUT" "$f" "$cmd" "$window_id" "$tab_index" "$point" "$arg" >/dev/null || return 1
+  osa "$TIMEOUT" "$f" "$cmd" "$window_id" "$tab_index" "$point" "$arg" "$APP" "$tab_id" >/dev/null || return 1
   case "$cmd" in
     fill) output="filled $output (${#arg} chars)" ;;
     press) output="pressed $arg" ;;
@@ -1068,9 +1157,6 @@ case "$cmd" in
     if [ "$MAX_CHARS_SET" = 1 ]; then
       [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: max-chars must be a positive integer' >&2; exit 2; }
       [[ "$cmd" =~ ^(text|links|html|snapshot|eval|file)$ ]] || { echo 'browser-cli: --max-chars only applies to text, links, html, snapshot, eval, and file' >&2; exit 2; }
-    fi
-    if [ "$BROWSER" = chrome ] && [ "$TRUSTED" = 1 ]; then
-      die "$cmd is not supported for chrome yet"
     fi
     browser_setup
     case "$cmd" in
