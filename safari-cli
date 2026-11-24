@@ -24,7 +24,7 @@ usage() {
 safari-cli <command> [options]
 
   tabs                          list tabs: <window>:<tab> <TAB> title <TAB> url
-  open <url>                    focus the tab whose URL starts with <url>, else open a new tab; prints <window>:<tab>
+  open <url>                    focus or create a tab; prints <window>:<tab> <TAB> reused|created
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
@@ -33,6 +33,7 @@ safari-cli <command> [options]
 
 --tab T     <window>:<tab> as printed by `tabs`, or a substring of the URL; default: front window's current tab
 --background open only: do not activate Safari, raise a window or switch tabs; launches Safari in the background if not running
+--json      tabs only: output a JSON array
 --timeout N positive integer seconds before commands give up (default 30)
 Enable JavaScript from Apple Events once by hand in Safari > Settings > Developer.
 This tool never changes that setting and never restarts Safari.
@@ -41,12 +42,13 @@ EOF
 }
 
 # ---- option parsing: sets TAB, TIMEOUT and ARGS (positional) ----
-TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; BACKGROUND=0; ARGS=()
+TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; BACKGROUND=0; JSON=0; ARGS=()
 parse() {
   ARGS=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --background) BACKGROUND=1; shift ;;
+      --json) JSON=1; shift ;;
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; shift 2 ;;
       --) shift; ARGS+=("$@"); break ;;
@@ -84,7 +86,11 @@ osa() {
     elif grep -q "Allow JavaScript from Apple Events" "$err"; then
       blocked_message
     else
-      sed 's/^[^ ]*: //' "$err" >&2
+      local message code
+      message="$(cat "$err")"
+      code=unknown
+      if [[ "$message" =~ \((-?[0-9]+)\)$ ]]; then code="${BASH_REMATCH[1]}"; fi
+      printf 'safari-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
     fi
   fi
   [ "$rc" -eq 0 ] || return 1
@@ -128,23 +134,61 @@ end resolve
 cmd_tabs() {
   [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
   local f; f="$(script tabs <<'AS'
-on run
+on run argv
+  set jsonOutput to item 1 of argv is "1"
   set out to ""
   tell application "Safari"
     repeat with w from 1 to count of windows
       repeat with t from 1 to count of tabs of window w
         set u to URL of tab t of window w
         if u is missing value then set u to ""
-        set out to out & w & ":" & t & (ASCII character 9) & (name of tab t of window w) & (ASCII character 9) & u & linefeed
+        set tabTitle to name of tab t of window w
+        if tabTitle is missing value then set tabTitle to ""
+        if jsonOutput then
+          if out is not "" then set out to out & ","
+          set out to out & "{\"window\":" & w & ",\"tab\":" & t & ",\"title\":\"" & my jsonEscape(tabTitle) & "\",\"url\":\"" & my jsonEscape(u) & "\"}"
+        else
+          set out to out & w & ":" & t & (ASCII character 9) & my cleanField(tabTitle) & (ASCII character 9) & my cleanField(u) & linefeed
+        end if
       end repeat
     end repeat
   end tell
+  if jsonOutput then return "[" & out & "]"
   if out is not "" then return text 1 thru -2 of out
   return ""
 end run
+
+on cleanField(valueText)
+  set resultText to ""
+  repeat with c in characters of valueText
+    if c is tab or c is return or c is linefeed then
+      set resultText to resultText & " "
+    else
+      set resultText to resultText & c
+    end if
+  end repeat
+  return resultText
+end cleanField
+
+on jsonEscape(valueText)
+  set resultText to ""
+  set hexDigits to "0123456789abcdef"
+  set slash to ASCII character 92
+  repeat with c in characters of valueText
+    set n to id of c
+    if n < 32 then
+      set resultText to resultText & slash & "u00" & character ((n div 16) + 1) of hexDigits & character ((n mod 16) + 1) of hexDigits
+    else if n is 34 or n is 92 then
+      set resultText to resultText & slash & c
+    else
+      set resultText to resultText & c
+    end if
+  end repeat
+  return resultText
+end jsonEscape
 AS
 )"
-  osa "$TIMEOUT" "$f"
+  osa "$TIMEOUT" "$f" "$JSON"
 }
 
 cmd_open() {
@@ -162,16 +206,16 @@ on run argv
       repeat with t from 1 to count of tabs of window w
         set tu to URL of tab t of window w
         if tu is not missing value and tu starts with u then
-          if bg then return (w as text) & ":" & t
+          if bg then return (w as text) & ":" & t & (ASCII character 9) & "reused"
           set current tab of window w to tab t of window w
           set index of window w to 1
-          return "1:" & t
+          return "1:" & t & (ASCII character 9) & "reused"
         end if
       end repeat
     end repeat
     if (count of windows) = 0 then
       make new document with properties {URL:u}
-      return "1:1"
+      return "1:1" & (ASCII character 9) & "created"
     end if
     tell window 1
       set prev to current tab
@@ -182,7 +226,7 @@ on run argv
         set current tab to newTab
       end if
     end tell
-    return "1:" & (count of tabs of window 1)
+    return "1:" & (count of tabs of window 1) & (ASCII character 9) & "created"
   end tell
 end run
 AS
@@ -314,6 +358,7 @@ case "$cmd" in
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
+    [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'safari-cli: --json only applies to tabs' >&2; exit 2; }
     "cmd_${cmd//-/_}"
     ;;
   *) usage >&2; exit 2 ;;
