@@ -1,6 +1,6 @@
 #!/bin/bash
 # Drive the real, logged-in Safari from the shell: list/open/close tabs, run JavaScript in a tab.
-# Usage: see `safari-cli help` or README.md. Needs macOS and Safari > Settings > Developer >
+# Usage: see `browser-cli help` or README.md. Needs macOS and Safari > Settings > Developer >
 # "Allow JavaScript from Apple Events" enabled manually by the user.
 set -euo pipefail
 export LC_ALL=en_US.UTF-8
@@ -17,11 +17,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-die() { echo "safari-cli: $*" >&2; exit 1; }
+die() { echo "browser-cli: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-safari-cli <command> [options]
+browser-cli <command> [options]
 
   tabs                          list tabs: <window>:<tab> <TAB> title <TAB> url
   open <url>                    focus or create a tab; prints <window>:<tab> <TAB> reused|created
@@ -88,7 +88,7 @@ parse() {
 }
 
 blocked_message() {
-  echo 'safari-cli: JavaScript from Apple Events is off. Turn it on in Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password), then retry.' >&2
+  echo 'browser-cli: JavaScript from Apple Events is off. Turn it on in Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password), then retry.' >&2
 }
 
 # ---- AppleScript runner with a timeout; stderr hints for the common failure ----
@@ -111,7 +111,7 @@ osa() {
   wait "$watcher" 2>/dev/null || true
   if [ "$rc" -ne 0 ]; then
     if [ -e "$WORK/timed-out" ]; then
-      echo "safari-cli: timed out after ${limit}s" >&2
+      echo "browser-cli: timed out after ${limit}s" >&2
     elif grep -q "Allow JavaScript from Apple Events" "$err"; then
       blocked_message
     else
@@ -122,7 +122,7 @@ osa() {
         code="${BASH_REMATCH[1]}"
         message="${message% (*}"
       fi
-      printf 'safari-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
+      printf 'browser-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
     fi
   fi
   [ "$rc" -eq 0 ] || return 1
@@ -332,8 +332,8 @@ AS
   case "$out" in
     str:*) printf '%s' "${out#str:}" ;;
     ok:*) printf '%s\n' "${out#ok:}" ;;
-    err:*) echo "safari-cli: ${3-JavaScript error: }${out#err:}" >&2; return 1 ;;
-    *) echo "safari-cli: unexpected result: $out" >&2; return 1 ;;
+    err:*) echo "browser-cli: ${3-JavaScript error: }${out#err:}" >&2; return 1 ;;
+    *) echo "browser-cli: unexpected result: $out" >&2; return 1 ;;
   esac
 }
 
@@ -361,7 +361,7 @@ output_js() {
   total=${#out}
   if [ "$total" -gt "$limit" ]; then
     printf '%s' "${out:0:limit}"
-    echo "safari-cli: truncated to $limit of $total chars" >&2
+    echo "browser-cli: truncated to $limit of $total chars" >&2
   else
     printf '%s' "$out"
   fi
@@ -398,7 +398,7 @@ cmd_read() {
   js_string "$SELECTOR"; selector="$JS_STRING"
   code="(function(){
     var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector(%s)' "$selector" || printf 'document.documentElement');
-    if (!root) return 'safari-cli-no-match:';
+    if (!root) return 'browser-cli-no-match:';
     var result;
     if ('$cmd' === 'text') {
       result = (root.matches('script, style') ? '' : (root.innerText || '')).replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n');
@@ -419,7 +419,7 @@ cmd_read() {
       comments.forEach(function(e){ e.remove(); });
       result = clone.outerHTML;
     }
-    return 'safari-cli-result:' + result;
+    return 'browser-cli-result:' + result;
   })()"
   output_read "$code"
 }
@@ -428,13 +428,13 @@ output_read() {
   run_js "$1" "$TIMEOUT" >"$WORK/read-output" || return 1
   local out total limit="${MAX_CHARS:-20000}"
   out="$(cat "$WORK/read-output"; printf '.')"; out="${out%.}"
-  if [ "$out" = 'safari-cli-no-match:' ]; then
-    echo "safari-cli: no element matches: $SELECTOR" >&2; return 1
+  if [ "$out" = 'browser-cli-no-match:' ]; then
+    echo "browser-cli: no element matches: $SELECTOR" >&2; return 1
   fi
-  out="${out#safari-cli-result:}"; total=${#out}
+  out="${out#browser-cli-result:}"; total=${#out}
   if [ "$total" -gt "$limit" ]; then
     printf '%s' "${out:0:limit}"
-    echo "safari-cli: truncated to $limit of $total chars" >&2
+    echo "browser-cli: truncated to $limit of $total chars" >&2
   else
     printf '%s' "$out"
   fi
@@ -451,7 +451,7 @@ cmd_snapshot() {
   selector="${selector//$'\t'/\\t}"
   code="(function(){ var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector("%s")' "$selector" || printf 'document.documentElement');"
   cat >"$WORK/snapshot.js" <<'JS'
-    if (!root) return 'safari-cli-no-match:';
+    if (!root) return 'browser-cli-no-match:';
     var query = 'a,button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[role="checkbox"],[role="tab"],[role="menuitem"],[role="switch"],[role="option"],[role="combobox"],[role="textbox"],[contenteditable],[onclick],[tabindex]';
     var elements = Array.from(root.querySelectorAll(query));
     if (root.matches(query)) elements.unshift(root);
@@ -505,7 +505,7 @@ cmd_snapshot() {
       var selector = selectorFor(e);
       if (selector) lines.push((lines.length + 1) + '\t' + type + '\t' + label + '\t' + selector);
     });
-    return 'safari-cli-result:' + lines.join('\n');
+    return 'browser-cli-result:' + lines.join('\n');
   })()
 JS
   code+="$(cat "$WORK/snapshot.js")"
@@ -663,7 +663,7 @@ AS
     js_string "$selector"; local sel_js="$JS_STRING"
     code="(function(){ const element = document.querySelector($sel_js); const action = '$cmd';"
     cat >"$WORK/trusted-page.js" <<'JS'
-      if (!element) return 'safari-cli-no-match:';
+      if (!element) return 'browser-cli-no-match:';
       if (action === 'fill') {
         const input = element instanceof HTMLInputElement && /^(text|search|tel|url|email|password|number)$/.test(element.type);
         if (!(input || element instanceof HTMLTextAreaElement || element.isContentEditable) || element.readOnly || element.matches(':disabled'))
@@ -686,7 +686,7 @@ AS
 JS
     code+="$(cat "$WORK/trusted-page.js")"
     result="$(TAB="$tab_index" run_js "$code" "$TIMEOUT" '' "$window_id")" || return 1
-    [ "$result" != 'safari-cli-no-match:' ] || die "no element matches: $selector"
+    [ "$result" != 'browser-cli-no-match:' ] || die "no element matches: $selector"
     point="${result%%$'\n'*}"
     output="${result#*$'\n'}"
   fi
@@ -722,7 +722,7 @@ cmd_action() {
     var hasSelector = $SELECTOR_SET, element;
     if (command !== 'press' && command !== 'scroll' || hasSelector) {
       element = document.querySelector(selector);
-      if (!element) return 'safari-cli-no-match:';
+      if (!element) return 'browser-cli-no-match:';
     }
     if (command === 'click') {
       if (!element.getClientRects().length) throw new Error('element is not visible');
@@ -777,8 +777,8 @@ cmd_action() {
   })()"
   run_js "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
   out="$(cat "$WORK/action-output"; printf '.')"; out="${out%.}"
-  if [ "$out" = 'safari-cli-no-match:' ]; then
-    printf 'safari-cli: no element matches: %s\n' "$selector" >&2; return 1
+  if [ "$out" = 'browser-cli-no-match:' ]; then
+    printf 'browser-cli: no element matches: %s\n' "$selector" >&2; return 1
   fi
   printf '%s' "$out"
 }
@@ -864,7 +864,7 @@ JS
     cp "$WORK/crop.png" "$out" || die "cannot write screenshot: $out"
   else
     dir="$(cd "${TMPDIR:-/tmp}" && pwd -P)" || die 'cannot access system temp directory'
-    base="safari-cli-$(date +%s)"; out="$dir/$base.png"
+    base="browser-cli-$(date +%s)"; out="$dir/$base.png"
     local n=0
     until (set -o noclobber; : >"$out") 2>/dev/null; do
       [ "$n" -lt 100 ] && [ -e "$out" ] || die 'cannot create output file'
@@ -917,9 +917,9 @@ cmd_wait_challenge() {
         return 0
       fi
       if [ "$state" = needs-human ] && [ "$notified" = 0 ]; then
-        printf 'safari-cli: human verification needed on %s; waiting for you to complete it\n' "$host" >&2
+        printf 'browser-cli: human verification needed on %s; waiting for you to complete it\n' "$host" >&2
         # Pass the host as an argument, not interpolated AppleScript source.
-        osascript -e 'on run argv' -e 'display notification ((item 1 of argv) & " needs verification — please complete it in Safari") with title "safari-cli"' -e 'end run' "$host" >/dev/null 2>&1 || true
+        osascript -e 'on run argv' -e 'display notification ((item 1 of argv) & " needs verification — please complete it in Safari") with title "browser-cli"' -e 'end run' "$host" >/dev/null 2>&1 || true
         notified=1
       fi
     elif grep -q 'JavaScript from Apple Events is off' "$WORK/challenge-error"; then
@@ -966,24 +966,24 @@ case "$cmd" in
   --version|version) echo "$VERSION" ;;
   tabs|open|close|eval|file|wait|wait-challenge|status|info|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
     parse "$@"
-    [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
-    [ "$TRUSTED$BACKGROUND" != 11 ] || { echo 'safari-cli: --trusted cannot be used with --background' >&2; exit 2; }
-    [ "$TRUSTED" = 0 ] || [[ "$cmd" =~ ^(click|fill|press)$ ]] || { echo 'safari-cli: --trusted only applies to click, fill, and press' >&2; exit 2; }
-    [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
-    [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'safari-cli: --json only applies to tabs' >&2; exit 2; }
-    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'safari-cli: --selector only applies to text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
-    [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'safari-cli: --out only applies to screenshot' >&2; exit 2; }
+    [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: timeout must be a positive integer' >&2; exit 2; }
+    [ "$TRUSTED$BACKGROUND" != 11 ] || { echo 'browser-cli: --trusted cannot be used with --background' >&2; exit 2; }
+    [ "$TRUSTED" = 0 ] || [[ "$cmd" =~ ^(click|fill|press)$ ]] || { echo 'browser-cli: --trusted only applies to click, fill, and press' >&2; exit 2; }
+    [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'browser-cli: --background only applies to open' >&2; exit 2; }
+    [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'browser-cli: --json only applies to tabs' >&2; exit 2; }
+    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'browser-cli: --selector only applies to text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
+    [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'browser-cli: --out only applies to screenshot' >&2; exit 2; }
     if [ "$cmd" = scroll ]; then
-      [ "$((TO_SET + BY_SET))" = 1 ] || { echo 'safari-cli: scroll requires exactly one of --to or --by' >&2; exit 2; }
-      [ "$TO_SET" = 0 ] || [[ "$TO" =~ ^(top|bottom)$ ]] || { echo 'safari-cli: --to must be top or bottom' >&2; exit 2; }
-      [ "$BY_SET" = 0 ] || [[ "$BY" =~ ^-?[0-9]+$ ]] || { echo 'safari-cli: --by must be an integer' >&2; exit 2; }
+      [ "$((TO_SET + BY_SET))" = 1 ] || { echo 'browser-cli: scroll requires exactly one of --to or --by' >&2; exit 2; }
+      [ "$TO_SET" = 0 ] || [[ "$TO" =~ ^(top|bottom)$ ]] || { echo 'browser-cli: --to must be top or bottom' >&2; exit 2; }
+      [ "$BY_SET" = 0 ] || [[ "$BY" =~ ^-?[0-9]+$ ]] || { echo 'browser-cli: --by must be an integer' >&2; exit 2; }
     else
-      [ "$((TO_SET + BY_SET))" = 0 ] || { echo 'safari-cli: --to and --by only apply to scroll' >&2; exit 2; }
+      [ "$((TO_SET + BY_SET))" = 0 ] || { echo 'browser-cli: --to and --by only apply to scroll' >&2; exit 2; }
     fi
-    [ "$RAW" = 0 ] || [ "$cmd" = html ] || { echo 'safari-cli: --raw only applies to html' >&2; exit 2; }
+    [ "$RAW" = 0 ] || [ "$cmd" = html ] || { echo 'browser-cli: --raw only applies to html' >&2; exit 2; }
     if [ "$MAX_CHARS_SET" = 1 ]; then
-      [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: max-chars must be a positive integer' >&2; exit 2; }
-      [[ "$cmd" =~ ^(text|links|html|snapshot|eval|file)$ ]] || { echo 'safari-cli: --max-chars only applies to text, links, html, snapshot, eval, and file' >&2; exit 2; }
+      [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: max-chars must be a positive integer' >&2; exit 2; }
+      [[ "$cmd" =~ ^(text|links|html|snapshot|eval|file)$ ]] || { echo 'browser-cli: --max-chars only applies to text, links, html, snapshot, eval, and file' >&2; exit 2; }
     fi
     case "$cmd" in
       text|links|html) cmd_read ;;

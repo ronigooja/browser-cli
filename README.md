@@ -1,4 +1,4 @@
-# safari-cli
+# browser-cli
 
 A dependency-free Bash tool for the user's real, logged-in macOS Safari through AppleScript.
 The user logs in themselves; the tool stores no credentials or page markers.
@@ -11,11 +11,11 @@ Turn on Safari > Settings > Developer > **Allow JavaScript from Apple Events** o
 and never quits or restarts Safari. The first run may prompt macOS to let the calling
 program control Safari; allow it.
 
-Copy `safari-cli` to a directory on your PATH and make it executable.
+Copy `browser-cli` to a directory on your PATH and make it executable.
 
 ## Commands
 
-Syntax: `safari-cli <command> [options]`; `help` prints the reference, `version` the version.
+Syntax: `browser-cli <command> [options]`; `help` prints the reference, `version` the version.
 
 | Command | Behavior |
 | --- | --- |
@@ -49,7 +49,7 @@ lookup failures, timeout, or status off/unknown), 2 usage error.
   default is the front window's current tab. Indexes may change; prefer URL substrings.
 - `--selector CSS`: `text`, `links`, and `html` restrict output to the first matching element;
   `snapshot` filters the elements listed; `press` and `scroll` target the matching element.
-  A missing match prints `safari-cli: no element matches: <css>` to stderr and exits 1.
+  A missing match prints `browser-cli: no element matches: <css>` to stderr and exits 1.
 - `--max-chars N`: `text`, `links`, `html`, and `snapshot` default to 20000 characters. `eval` and `file`
   truncate only when this option is explicitly supplied. Truncation reports the emitted and
   total character counts to stderr and succeeds (exit 0).
@@ -62,16 +62,16 @@ lookup failures, timeout, or status off/unknown), 2 usage error.
   Safari not running: launch it in the background. No windows: a new window is still created.
 - `--timeout N`: positive integer seconds for a command, default 30; wait polls share one deadline.
   `wait-challenge` defaults to 600 seconds.
-- `--out PATH`: `screenshot` only; save to this path. By default, save as `safari-cli-<epoch>.png` in the temp directory.
+- `--out PATH`: `screenshot` only; save to this path. By default, save as `browser-cli-<epoch>.png` in the temp directory.
 - `--`: end option parsing.
 
 Strings are printed exactly, including trailing newlines; other values print JSON plus a
 newline, and `undefined` prints an empty line. Shell command substitution strips trailing
 newlines, so redirect to a file for exact comparisons.
 In `tabs` output, titles have embedded tabs and newlines replaced with spaces. Other
-AppleScript failures print `safari-cli: AppleScript error <code>: <message>` to stderr
+AppleScript failures print `browser-cli: AppleScript error <code>: <message>` to stderr
 (`unknown` is used when no error code is available). A selector miss prints
-`safari-cli: no element matches: <css>` to stderr.
+`browser-cli: no element matches: <css>` to stderr.
 Clicking a hidden element is an error (exit 1). Default page actions run inside the page via
 JavaScript, so dispatched events are synthetic (`isTrusted` is false). They do not activate
 Safari, switch tabs, or require extra permissions, and work with `--background`. Some sites
@@ -83,7 +83,7 @@ supported. Use it only when a site ignores synthetic events.
 
 `screenshot` requires Screen Recording permission for the terminal. It can capture only the
 currently displayed tab of a non-minimized window; it never activates Safari or switches tabs.
-Background tabs fail with `safari-cli: tab is not currently displayed; switch to it first
+Background tabs fail with `browser-cli: tab is not currently displayed; switch to it first
 (screenshot cannot capture background tabs)`. A selector captures its first matching element,
 clipped to the viewport; a fully offscreen element fails. Safari must also be the active app:
 with Stage Manager on, an inactive window is captured as a thumbnail and the command fails
@@ -95,10 +95,10 @@ presence, not inspected. Invisible reCAPTCHA badges count as `none`. `cloudflare
 a self-clearing interstitial (such as “Just a moment...”) and is waited out silently.
 `needs-human` means an interactive Turnstile/reCAPTCHA/hCaptcha widget or Cloudflare block page;
 `wait-challenge` reports this to stderr, sends one macOS notification, and waits without touching
-the page. On timeout it reports `safari-cli: challenge not cleared after Ns (state: <state>)` and
+the page. On timeout it reports `browser-cli: challenge not cleared after Ns (state: <state>)` and
 exits 1.
 
-**Human verification policy:** safari-cli never clicks, types into, reads, or solves CAPTCHA or
+**Human verification policy:** browser-cli never clicks, types into, reads, or solves CAPTCHA or
 human-verification widgets. Agents must not attempt this with `click`, `eval`, `--trusted`, or any
 other command. When `needs-human` appears, stop, tell the user, and use `wait-challenge` to resume
 after they complete it. Prefer official APIs; in the user's own test environments, use vendor
@@ -110,11 +110,11 @@ Evaluation is synchronous (promises are not awaited), in the page world and main
 ## Examples
 
 ```sh
-safari-cli status
-safari-cli open https://example.com/
-safari-cli wait --timeout 20 --tab example.com 'document.querySelector("h1") !== null'
-safari-cli eval --tab example.com '({url: location.href, title: document.title})'
-safari-cli file --tab 1:2 ./inspect.js
+browser-cli status
+browser-cli open https://example.com/
+browser-cli wait --timeout 20 --tab example.com 'document.querySelector("h1") !== null'
+browser-cli eval --tab example.com '({url: location.href, title: document.title})'
+browser-cli file --tab 1:2 ./inspect.js
 ```
 
 ## Security
