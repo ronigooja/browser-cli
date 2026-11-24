@@ -33,6 +33,7 @@ safari-cli <command> [options]
   links [--tab T]               print link text and absolute URLs
   html [--tab T]                print sanitized page HTML
   snapshot [--tab T] [--selector CSS] [--max-chars N]  list interactive elements
+  screenshot [--tab T] [--selector CSS] [--out PATH]  capture the visible viewport or element as PNG
   click <css>                   click the first matching element
   fill <css> <text>             fill an input, textarea, or editable element
   select <css> <value>          select an option by value or label
@@ -46,7 +47,8 @@ safari-cli <command> [options]
 --background open only: do not activate Safari, raise a window or switch tabs; launches Safari in the background if not running
 --json      tabs only: output a JSON array
 --timeout N positive integer seconds before commands give up (default 30)
---selector CSS scope text, links, html, snapshot, press, or scroll to the first matching element
+--selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
+--out PATH  screenshot only: output PNG path (default: a new file in the system temp directory)
 --to top|bottom, --by N scroll only: choose destination or integer distance
 --max-chars N limit output characters for text, links, html, snapshot, eval, or file
 --raw       html only: return unmodified outerHTML
@@ -60,6 +62,7 @@ EOF
 TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; BACKGROUND=0; JSON=0; ARGS=()
 SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
 TO=""; TO_SET=0; BY=""; BY_SET=0
+OUT=""; OUT_SET=0
 parse() {
   ARGS=()
   while [ $# -gt 0 ]; do
@@ -69,6 +72,7 @@ parse() {
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; shift 2 ;;
       --selector) [ $# -ge 2 ] || { usage >&2; exit 2; }; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
+      --out) [ $# -ge 2 ] || { usage >&2; exit 2; }; OUT="$2"; OUT_SET=1; shift 2 ;;
       --to) [ $# -ge 2 ] || { usage >&2; exit 2; }; TO="$2"; TO_SET=1; shift 2 ;;
       --by) [ $# -ge 2 ] || { usage >&2; exit 2; }; BY="$2"; BY_SET=1; shift 2 ;;
       --max-chars) [ $# -ge 2 ] || { usage >&2; exit 2; }; MAX_CHARS="$2"; MAX_CHARS_SET=1; shift 2 ;;
@@ -561,6 +565,97 @@ cmd_action() {
   printf '%s' "$out"
 }
 
+cmd_screenshot() {
+  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  local f window selector geometry width height crop out dir base
+  f="$(script screenshot-window <<AS
+on run argv
+  set r to resolve(item 1 of argv)
+  tell application "Safari"
+    set w to window (item 1 of r)
+    if miniaturized of w or (index of current tab of w) is not (item 2 of r) then return "not-displayed"
+    return id of w
+  end tell
+end run
+$RESOLVE
+AS
+)"
+  window="$(osa "$TIMEOUT" "$f" "$TAB")" || return 1
+  [ "$window" != not-displayed ] || die 'tab is not currently displayed; switch to it first (screenshot cannot capture background tabs)'
+  js_string "$SELECTOR"; selector="$JS_STRING"
+  geometry="$(run_js "(function(){
+    var w=innerWidth,h=innerHeight,d=devicePixelRatio, l=0,t=0,r=w,b=h;
+    if ($SELECTOR_SET) {
+      var e=document.querySelector($selector); if (!e) return 'no-match';
+      var q=e.getBoundingClientRect(); l=Math.max(0,q.left); t=Math.max(0,q.top); r=Math.min(w,q.right); b=Math.min(h,q.bottom);
+      if (r<=l || b<=t) return 'outside';
+    }
+    return [w,h,d,l,t,r,b].join(' ');
+  })()" "$TIMEOUT")" || return 1
+  [ "$geometry" != no-match ] || die "no element matches: $SELECTOR"
+  [ "$geometry" != outside ] || die 'element is outside the viewport'
+  if ! screencapture -x -o -l"$window" "$WORK/capture.png" >/dev/null 2>&1 || [ ! -s "$WORK/capture.png" ]; then
+    die 'screen capture failed; check System Settings > Privacy & Security > Screen Recording'
+  fi
+  # A nonblack pixel distinguishes an accessible image from a denied black capture.
+  cat >"$WORK/image.js" <<'JS'
+ObjC.import('AppKit');
+function run(argv) {
+  var image = $.NSBitmapImageRep.imageRepWithContentsOfFile($(argv[0]));
+  if (!image) return 'invalid';
+  var w=Number(image.pixelsWide), h=Number(image.pixelsHigh), nonblack=false;
+  for (var y=0; y<h && !nonblack; y+=Math.max(1,Math.floor(h/100)))
+    for (var x=0; x<w; x+=Math.max(1,Math.floor(w/100))) {
+      var c=image.colorAtXY(x,y).colorUsingColorSpace($.NSColorSpace.deviceRGBColorSpace);
+      if (c && (Number(c.redComponent)>0.01 || Number(c.greenComponent)>0.01 || Number(c.blueComponent)>0.01)) { nonblack=true; break; }
+    }
+  return nonblack ? w+' '+h : 'black';
+}
+JS
+  local dimensions
+  dimensions="$(osascript -l JavaScript "$WORK/image.js" "$WORK/capture.png" 2>/dev/null)" || dimensions=invalid
+  case "$dimensions" in black|invalid|'') die 'screen capture is empty or black; check System Settings > Privacy & Security > Screen Recording' ;; esac
+  read -r width height <<<"$dimensions"
+  crop="$(awk -v g="$geometry" -v iw="$width" -v ih="$height" 'BEGIN {
+    split(g,a," "); vw=a[1]; vh=a[2]; d=a[3];
+    if (vw<=0 || vh<=0 || d<=0 || iw < vw*d-2 || ih < vh*d-2 || iw > vw*d+2) exit 1;
+    x=int(a[4]*d+0.5); y=int(ih-vh*d+a[5]*d+0.5);
+    right=int(a[6]*d+0.5); bottom=int(ih-vh*d+a[7]*d+0.5);
+    if (right<=x || bottom<=y || y<0 || right>iw || bottom>ih) exit 1;
+    print bottom-y, right-x, y, x;
+  }')" || die 'Safari window capture dimensions do not match the viewport; ensure the window is fully displayed'
+  local ch cw cy cx
+  read -r ch cw cy cx <<<"$crop"
+  cat >"$WORK/crop.js" <<'JS'
+ObjC.import('AppKit'); ObjC.import('CoreGraphics');
+function run(a) {
+  var image=$.NSBitmapImageRep.imageRepWithContentsOfFile($(a[0]));
+  var cg=image.CGImage;
+  var cropped=$.CGImageCreateWithImageInRect(cg, $.CGRectMake(Number(a[2]),Number(a[3]),Number(a[4]),Number(a[5])));
+  var bitmap=$.NSBitmapImageRep.alloc.initWithCGImage(cropped);
+  if (!bitmap.representationUsingTypeProperties($.NSPNGFileType,$.NSDictionary.alloc.init).writeToFileAtomically($(a[1]),true)) throw Error('write failed');
+}
+JS
+  osascript -l JavaScript "$WORK/crop.js" "$WORK/capture.png" "$WORK/crop.png" "$cx" "$cy" "$cw" "$ch" >/dev/null 2>&1 || die 'failed to crop screenshot'
+  if [ "$OUT_SET" = 1 ]; then
+    [ -n "$OUT" ] || die 'output path must not be empty'
+    dir="$(dirname "$OUT")"; base="$(basename "$OUT")"
+    dir="$(cd "$dir" && pwd -P)" || die "cannot access output directory: $dir"
+    out="$dir/$base"
+    cp "$WORK/crop.png" "$out" || die "cannot write screenshot: $out"
+  else
+    dir="$(cd "${TMPDIR:-/tmp}" && pwd -P)" || die 'cannot access system temp directory'
+    base="safari-cli-$(date +%s)"; out="$dir/$base.png"
+    local n=0
+    until (set -o noclobber; : >"$out") 2>/dev/null; do
+      [ "$n" -lt 100 ] && [ -e "$out" ] || die 'cannot create output file'
+      n=$((n + 1)); out="$dir/$base-$n.png"
+    done
+    cp "$WORK/crop.png" "$out" || die "cannot write screenshot: $out"
+  fi
+  printf '%s\n' "$out"
+}
+
 cmd_wait() {
   [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
   local deadline=$((SECONDS + TIMEOUT)) out remaining last_error=""
@@ -620,12 +715,13 @@ cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
-  tabs|open|close|eval|file|wait|status|info|text|links|html|snapshot|click|fill|select|press|scroll|submit)
+  tabs|open|close|eval|file|wait|status|info|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'safari-cli: --json only applies to tabs' >&2; exit 2; }
-    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|press|scroll)$ ]] || { echo 'safari-cli: --selector only applies to text, links, html, snapshot, press, and scroll' >&2; exit 2; }
+    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'safari-cli: --selector only applies to text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
+    [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'safari-cli: --out only applies to screenshot' >&2; exit 2; }
     if [ "$cmd" = scroll ]; then
       [ "$((TO_SET + BY_SET))" = 1 ] || { echo 'safari-cli: scroll requires exactly one of --to or --by' >&2; exit 2; }
       [ "$TO_SET" = 0 ] || [[ "$TO" =~ ^(top|bottom)$ ]] || { echo 'safari-cli: --to must be top or bottom' >&2; exit 2; }
