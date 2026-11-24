@@ -149,9 +149,12 @@ Known gaps (input going to a neighbouring tab if the target is closed at the wro
   neighbour has the same URL and title.
 - **Chrome** reads each candidate's URL and tab id together in one call and then uses the id, not
   the index, for selection and for every check before input. This removes the separate
-  "find by URL, then read the id" step where input once reached a neighbour. The new code path was
-  checked with one normal `click` and one `fill` per browser; the closing race itself was **not
-  reproduced or verified** after the change, so treat the fix as unproven.
+  "find by URL, then read the id" step where input once reached a neighbour. Tested once with a
+  deterministic pause right after the id was read: the target tab was closed, its neighbour took its
+  position, and `fill --trusted` exited 1 with `the target tab was closed or changed during the
+  action; nothing more was sent` while the neighbour's input stayed empty. Not tested: closing the
+  tab during the single call that matches the URL and reads the id (the code has no separable step
+  there, so this rests on reading it, not on a test), and `--tab` given as an index or omitted.
 - Both: a very short window remains between the last identity check and the operating system
   delivering the event; it cannot be removed.
 
