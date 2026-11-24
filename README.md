@@ -44,8 +44,8 @@ lookup failures, timeout, or status off/unknown), 2 usage error.
 
 | Feature | Safari | Chrome |
 | --- | --- | --- |
-| `screenshot` and `--trusted` | Supported | Not supported yet (exit 1: `browser-cli: <cmd> is not supported for chrome yet`) |
-| Screenshot window capture | Safari must be the active app; Stage Manager can cause a thumbnail capture. | Not applicable |
+| Developer setting path | Settings > Developer | View > Developer |
+| `Allow JavaScript from Apple Events` | Turn on the setting in Settings > Developer. | Turn on the setting from View > Developer. |
 
 ## Options and results
 
@@ -82,16 +82,16 @@ JavaScript, so dispatched events are synthetic (`isTrusted` is false). They do n
 the browser, switch tabs, or require extra permissions, and work with `--background`. Some sites
 ignore synthetic events; verify with `text`, `snapshot`, or `wait`. If needed, `--trusted` on
 `click`, `fill`, or `press` sends real OS-level input (`isTrusted=true`), requires Accessibility
-permission, activates Safari, selects the tab, and raises its window. It is incompatible with
+permission, activates the selected browser, selects the tab, and raises its window. It is incompatible with
 `--background`; successful output is prefixed `trusted `. Text is typed as real input, Unicode
 supported. Use it only when a site ignores synthetic events.
 
 `screenshot` requires Screen Recording permission for the terminal. It can capture only the
-currently displayed tab of a non-minimized window; it never activates Safari or switches tabs.
+currently displayed tab of a non-minimized window; it never activates the browser or switches tabs.
 Background tabs fail with `browser-cli: tab is not currently displayed; switch to it first
 (screenshot cannot capture background tabs)`. A selector captures its first matching element,
-clipped to the viewport; a fully offscreen element fails. Safari must also be the active app:
-with Stage Manager on, an inactive window is captured as a thumbnail and the command fails
+clipped to the viewport; a fully offscreen element fails. The browser must be the active app:
+with Stage Manager on, an inactive browser window is captured as a thumbnail and the command fails
 with a "capture does not match the viewport" error instead of returning a wrong image. Use screenshots sparingly because
 images cost tokens; prefer text or `snapshot`.
 
