@@ -17,7 +17,7 @@ Controls the user's real Safari via AppleScript. Command reference, options, and
 
 ## Workflow
 
-1. `safari-cli open <url>` focuses an existing tab or opens a new one.
+1. `safari-cli open <url>` focuses an existing tab or opens a new one. Add `--background` to avoid stealing focus or switching the user's visible tab.
 2. `safari-cli wait --tab <url-substring> '<js condition>'` until the page is ready.
 3. `safari-cli eval --tab <url-substring> '<js expression>'` to read data. Use `file` for long scripts.
 4. `safari-cli close --tab <url-substring>` only for tabs you opened.

@@ -34,6 +34,9 @@ lookup failures, timeout, or status off/unknown), 2 usage error.
 
 - `--tab T`: 1-based `<window>:<tab>` or a URL substring (first match across windows);
   default is the front window's current tab. Indexes may change; prefer URL substrings.
+- `--background`: `open` only. Do not activate Safari, raise a window, or switch the visible tab.
+  Existing match: print its index. Otherwise add a tab in window 1 and restore the previous current tab.
+  Safari not running: launch it in the background. No windows: a new window is still created.
 - `--timeout N`: positive integer seconds for a command, default 30; wait polls share one deadline.
 - `--`: end option parsing.
 

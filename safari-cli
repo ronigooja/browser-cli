@@ -32,6 +32,7 @@ safari-cli <command> [options]
   status                        probe JavaScript permission: on, off, or unknown (no window)
 
 --tab T     <window>:<tab> as printed by `tabs`, or a substring of the URL; default: front window's current tab
+--background open only: do not activate Safari, raise a window or switch tabs; launches Safari in the background if not running
 --timeout N positive integer seconds before commands give up (default 30)
 Enable JavaScript from Apple Events once by hand in Safari > Settings > Developer.
 This tool never changes that setting and never restarts Safari.
@@ -40,11 +41,12 @@ EOF
 }
 
 # ---- option parsing: sets TAB, TIMEOUT and ARGS (positional) ----
-TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; ARGS=()
+TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; BACKGROUND=0; ARGS=()
 parse() {
   ARGS=()
   while [ $# -gt 0 ]; do
     case "$1" in
+      --background) BACKGROUND=1; shift ;;
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; shift 2 ;;
       --) shift; ARGS+=("$@"); break ;;
@@ -147,15 +149,20 @@ AS
 
 cmd_open() {
   [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
+  if [ "$BACKGROUND" = 1 ] && ! pgrep -qx Safari; then
+    open -g -a Safari || die "cannot launch Safari"
+  fi
   local f; f="$(script open <<'AS'
 on run argv
   set u to item 1 of argv
+  set bg to (item 2 of argv) is "1"
   tell application "Safari"
-    activate
+    if not bg then activate
     repeat with w from 1 to count of windows
       repeat with t from 1 to count of tabs of window w
         set tu to URL of tab t of window w
         if tu is not missing value and tu starts with u then
+          if bg then return (w as text) & ":" & t
           set current tab of window w to tab t of window w
           set index of window w to 1
           return "1:" & t
@@ -166,13 +173,21 @@ on run argv
       make new document with properties {URL:u}
       return "1:1"
     end if
-    tell window 1 to set current tab to (make new tab with properties {URL:u})
+    tell window 1
+      set prev to current tab
+      set newTab to make new tab with properties {URL:u}
+      if bg then
+        set current tab to prev
+      else
+        set current tab to newTab
+      end if
+    end tell
     return "1:" & (count of tabs of window 1)
   end tell
 end run
 AS
 )"
-  osa "$TIMEOUT" "$f" "${ARGS[0]}"
+  osa "$TIMEOUT" "$f" "${ARGS[0]}" "$BACKGROUND"
 }
 
 cmd_close() {
@@ -298,6 +313,7 @@ case "$cmd" in
   tabs|open|close|eval|file|wait|status)
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
+    [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
     "cmd_${cmd//-/_}"
     ;;
   *) usage >&2; exit 2 ;;
