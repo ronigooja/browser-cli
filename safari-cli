@@ -28,6 +28,10 @@ safari-cli <command> [options]
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
+  info [--tab T]                show page metadata and character counts
+  text [--tab T]                print page text
+  links [--tab T]               print link text and absolute URLs
+  html [--tab T]                print sanitized page HTML
   wait [--tab T] <js>           poll until the expression is truthy
   status                        probe JavaScript permission: on, off, or unknown (no window)
 
@@ -35,6 +39,9 @@ safari-cli <command> [options]
 --background open only: do not activate Safari, raise a window or switch tabs; launches Safari in the background if not running
 --json      tabs only: output a JSON array
 --timeout N positive integer seconds before commands give up (default 30)
+--selector CSS scope text, links, or html to the first matching element
+--max-chars N limit output characters for text, links, html, eval, or file
+--raw       html only: return unmodified outerHTML
 Enable JavaScript from Apple Events once by hand in Safari > Settings > Developer.
 This tool never changes that setting and never restarts Safari.
 Exit status: 0 ok, 1 error (JS exception, no matching tab, timeout), 2 usage.
@@ -43,6 +50,7 @@ EOF
 
 # ---- option parsing: sets TAB, TIMEOUT and ARGS (positional) ----
 TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; BACKGROUND=0; JSON=0; ARGS=()
+SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
 parse() {
   ARGS=()
   while [ $# -gt 0 ]; do
@@ -51,6 +59,9 @@ parse() {
       --json) JSON=1; shift ;;
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; shift 2 ;;
+      --selector) [ $# -ge 2 ] || { usage >&2; exit 2; }; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
+      --max-chars) [ $# -ge 2 ] || { usage >&2; exit 2; }; MAX_CHARS="$2"; MAX_CHARS_SET=1; shift 2 ;;
+      --raw) RAW=1; shift ;;
       --) shift; ARGS+=("$@"); break ;;
       --*) usage >&2; exit 2 ;;
       *) ARGS+=("$1"); shift ;;
@@ -87,9 +98,12 @@ osa() {
       blocked_message
     else
       local message code
-      message="$(cat "$err")"
+      message="$(sed -E 's/^[^ ]*: //; s/^execution error: //' "$err")"
       code=unknown
-      if [[ "$message" =~ \((-?[0-9]+)\)$ ]]; then code="${BASH_REMATCH[1]}"; fi
+      if [[ "$message" =~ \((-?[0-9]+)\)$ ]]; then
+        code="${BASH_REMATCH[1]}"
+        message="${message% (*}"
+      fi
       printf 'safari-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
     fi
   fi
@@ -284,7 +298,7 @@ AS
 
 cmd_eval() {
   [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
-  run_js "${ARGS[0]}" "$TIMEOUT"
+  output_js "${ARGS[0]}" "$MAX_CHARS"
 }
 
 cmd_file() {
@@ -292,7 +306,77 @@ cmd_file() {
   [ -r "${ARGS[0]}" ] || die "cannot read ${ARGS[0]}"
   local code
   code="$(cat "${ARGS[0]}"; printf '.')"
-  run_js "${code%.}" "$TIMEOUT"
+  output_js "${code%.}" "$MAX_CHARS"
+}
+
+output_js() {
+  local code="$1" limit="$2" out total
+  if [ -z "$limit" ]; then
+    run_js "$code" "$TIMEOUT"
+    return
+  fi
+  run_js "$code" "$TIMEOUT" >"$WORK/output" || return 1
+  out="$(cat "$WORK/output"; printf '.')"; out="${out%.}"
+  total=${#out}
+  if [ "$total" -gt "$limit" ]; then
+    printf '%s' "${out:0:limit}"
+    echo "safari-cli: truncated to $limit of $total chars" >&2
+  else
+    printf '%s' "$out"
+  fi
+}
+
+cmd_info() {
+  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  run_js '(function(){ return "title: " + document.title + "\nurl: " + location.href + "\nreadyState: " + document.readyState + "\ninnerText characters: " + (document.body ? document.body.innerText.length : 0) + "\nouterHTML characters: " + (document.documentElement ? document.documentElement.outerHTML.length : 0) + "\n"; })()' "$TIMEOUT"
+}
+
+cmd_read() {
+  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  local selector="$SELECTOR" code
+  selector="${selector//\\/\\\\}"
+  selector="${selector//\"/\\\"}"
+  selector="${selector//$'\n'/\\n}"
+  selector="${selector//$'\r'/\\r}"
+  selector="${selector//$'\t'/\\t}"
+  code="(function(){
+    var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector("%s")' "$selector" || printf 'document.documentElement');
+    if (!root) return 'safari-cli-no-match:';
+    var result;
+    if ('$cmd' === 'text') {
+      result = (root.matches('script, style') ? '' : (root.innerText || '')).replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n');
+    } else if ('$cmd' === 'links') {
+      var anchors = Array.from(root.querySelectorAll('a'));
+      if (root.matches('a')) anchors.unshift(root);
+      result = anchors.filter(function(a){ var h = a.getAttribute('href'); return h && h.trim() && !/^javascript:/i.test(h.trim()); }).map(function(a){ return (a.innerText || '').trim().replace(/\\s+/g, ' ') + '\\t' + a.href; }).join('\\n');
+    } else if ($RAW) {
+      result = root.outerHTML;
+    } else {
+      var clone = root.cloneNode(true);
+      if (clone.matches('script, style, svg, noscript')) return '';
+      clone.querySelectorAll('script, style, svg, noscript').forEach(function(e){ e.remove(); });
+      clone.removeAttribute('style');
+      clone.querySelectorAll('[style]').forEach(function(e){ e.removeAttribute('style'); });
+      var walker = document.createTreeWalker(clone, NodeFilter.SHOW_COMMENT), comments = [], node;
+      while (node = walker.nextNode()) comments.push(node);
+      comments.forEach(function(e){ e.remove(); });
+      result = clone.outerHTML;
+    }
+    return 'safari-cli-result:' + result;
+  })()"
+  run_js "$code" "$TIMEOUT" >"$WORK/read-output" || return 1
+  local out total limit="${MAX_CHARS:-20000}"
+  out="$(cat "$WORK/read-output"; printf '.')"; out="${out%.}"
+  if [ "$out" = 'safari-cli-no-match:' ]; then
+    echo "safari-cli: no element matches: $SELECTOR" >&2; return 1
+  fi
+  out="${out#safari-cli-result:}"; total=${#out}
+  if [ "$total" -gt "$limit" ]; then
+    printf '%s' "${out:0:limit}"
+    echo "safari-cli: truncated to $limit of $total chars" >&2
+  else
+    printf '%s' "$out"
+  fi
 }
 
 cmd_wait() {
@@ -354,12 +438,21 @@ cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
-  tabs|open|close|eval|file|wait|status)
+  tabs|open|close|eval|file|wait|status|info|text|links|html)
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'safari-cli: --json only applies to tabs' >&2; exit 2; }
-    "cmd_${cmd//-/_}"
+    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html)$ ]] || { echo 'safari-cli: --selector only applies to text, links, and html' >&2; exit 2; }
+    [ "$RAW" = 0 ] || [ "$cmd" = html ] || { echo 'safari-cli: --raw only applies to html' >&2; exit 2; }
+    if [ "$MAX_CHARS_SET" = 1 ]; then
+      [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: max-chars must be a positive integer' >&2; exit 2; }
+      [[ "$cmd" =~ ^(text|links|html|eval|file)$ ]] || { echo 'safari-cli: --max-chars only applies to text, links, html, eval, and file' >&2; exit 2; }
+    fi
+    case "$cmd" in
+      text|links|html) cmd_read ;;
+      *) "cmd_${cmd//-/_}" ;;
+    esac
     ;;
   *) usage >&2; exit 2 ;;
 esac
