@@ -46,6 +46,7 @@ safari-cli <command> [options]
 
 --tab T     <window>:<tab> as printed by `tabs`, or a substring of the URL; default: front window's current tab
 --background open only: do not activate Safari, raise a window or switch tabs; launches Safari in the background if not running
+--trusted   click, fill, or press: send real input to the foreground tab (requires Accessibility permission)
 --json      tabs only: output a JSON array
 --timeout N positive integer seconds before commands give up (default 30)
 --selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
@@ -60,7 +61,7 @@ EOF
 }
 
 # ---- option parsing: sets TAB, TIMEOUT and ARGS (positional) ----
-TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; JSON=0; ARGS=()
+TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; TRUSTED=0; JSON=0; ARGS=()
 SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
 TO=""; TO_SET=0; BY=""; BY_SET=0
 OUT=""; OUT_SET=0
@@ -69,6 +70,7 @@ parse() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --background) BACKGROUND=1; shift ;;
+      --trusted) TRUSTED=1; shift ;;
       --json) JSON=1; shift ;;
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; TIMEOUT_SET=1; shift 2 ;;
@@ -296,18 +298,26 @@ js_string() {
 
 run_js() {
   local code="$1" limit="$2"
-  code="(
+  # Trusted actions supply a controlled expression and a stable window ID.
+  # Run it directly so site CSP rules against eval do not block hit testing.
+  if [ -z "${4-}" ]; then
+    code="(
 $code
 )"
-  code="${code//\\/\\\\}"
-  code="${code//\"/\\\"}"
-  code="${code//$'\n'/\\n}"
-  code="${code//$'\r'/\\r}"
-  code="${code//$'\t'/\\t}"
-  printf '%s' "(function(){ try { var r = eval(\"$code\"); return typeof r === 'string' ? 'str:' + r : 'ok:' + (r === undefined ? '' : JSON.stringify(r)) } catch (e) { return 'err:' + (e && e.message || e) } })()" >"$WORK/code.js"
+    code="${code//\\/\\\\}"
+    code="${code//\"/\\\"}"
+    code="${code//$'\n'/\\n}"
+    code="${code//$'\r'/\\r}"
+    code="${code//$'\t'/\\t}"
+    code="eval(\"$code\")"
+  fi
+  printf '%s' "(function(){ try { var r = $code; return typeof r === 'string' ? 'str:' + r : 'ok:' + (r === undefined ? '' : JSON.stringify(r)) } catch (e) { return 'err:' + (e && e.message || e) } })()" >"$WORK/code.js"
   local f; f="$(script eval <<AS
 on run argv
   set code to read (POSIX file (item 2 of argv)) as «class utf8»
+  if item 3 of argv is not "" then
+    tell application "Safari" to return do JavaScript code in tab ((item 1 of argv) as integer) of window id ((item 3 of argv) as integer)
+  end if
   set r to resolve(item 1 of argv)
   tell application "Safari" to return do JavaScript code in tab (item 2 of r) of window (item 1 of r)
 end run
@@ -315,7 +325,7 @@ $RESOLVE
 AS
 )"
   local out
-  osa "$limit" "$f" "$TAB" "$WORK/code.js" >"$WORK/result" || return 1
+  osa "$limit" "$f" "$TAB" "$WORK/code.js" "${4-}" >"$WORK/result" || return 1
   out="$(cat "$WORK/result"; printf '.')"
   out="${out%.}"
   out="${out%$'\n'}"
@@ -502,6 +512,192 @@ JS
   output_read "$code"
 }
 
+cmd_trusted() {
+  local selector="$1" arg="$2" f target window_id tab_index code result point='' output=''
+  if [ "$cmd" = press ]; then
+    local LC_ALL=C
+    local printable='^[ -~]$'
+    case "$arg" in
+      Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace|Space) ;;
+      *) [[ "$arg" =~ $printable ]] || die "unsupported trusted key: $arg (use a named key or printable ASCII character)" ;;
+    esac
+  fi
+
+  # Check through both the APIs used to send input before activating Safari.
+  f="$WORK/trusted.js"
+  cat >"$f" <<'JS'
+ObjC.import('ApplicationServices');
+ObjC.import('AppKit');
+function run(argv) {
+  const se = Application('System Events');
+  if (argv[0] === 'permission') return $.AXIsProcessTrusted() && se.uiElementsEnabled();
+  const [action, windowID, tabIndex, geometry, text] = argv;
+  const codes = {Enter: 36, Escape: 53, Tab: 48, ArrowUp: 126, ArrowDown: 125,
+                 ArrowLeft: 123, ArrowRight: 124, Backspace: 51, Space: 49, ' ': 49};
+  const safari = Application('Safari');
+  const process = se.processes.byName('Safari');
+  function frontWindow() {
+    const win = safari.windows[0];
+    if (!process.frontmost() || win.id() !== Number(windowID) || win.currentTab.index() !== Number(tabIndex))
+      throw new Error('the target Safari tab is no longer in front');
+    return win;
+  }
+
+  const win = frontWindow();
+  if (geometry) {
+    const [x, y, sx, sy, ow, oh, iw, ih, zoom] = JSON.parse(geometry);
+    const bounds = win.bounds();
+    const axWindow = process.windows[0];
+    const [wx, wy] = axWindow.position();
+    const [ww, wh] = axWindow.size();
+    const web = webViewport(axWindow, 0);
+    if (!web || Math.abs(wx - bounds.x) > 2 || Math.abs(wy - bounds.y) > 2 ||
+        Math.abs(ww - bounds.width) > 2 || Math.abs(wh - bounds.height) > 2 ||
+        Math.abs(sx - wx) > 2 || Math.abs(sy - wy) > 2 ||
+        Math.abs(ow - ww) > 2 || Math.abs(oh - wh) > 2)
+      throw new Error('could not verify Safari viewport position');
+    const [[vx, vy], [vw, vh]] = web;
+    // AX measures the actual content area, including the toolbar/sidebar insets
+    // from the window bounds. The width ratio converts CSS px (page zoom) to
+    // screen points; comparing the height also checks the toolbar calibration.
+    const scale = vw / iw;
+    if (!(scale > 0 && zoom > 0 && Math.abs(ih * scale - vh) <= 3 &&
+          vx >= wx - 2 && vy >= wy - 2 && vx + vw <= wx + ww + 2 && vy + vh <= wy + wh + 2))
+      throw new Error('could not calibrate Safari viewport dimensions');
+    const px = vx + x * scale * zoom, py = vy + y * scale * zoom;
+    if (!(px >= vx && px < vx + vw && py >= vy && py < vy + vh && onScreen(px, py)))
+      throw new Error('element center is outside the visible Safari viewport');
+    frontWindow();
+    const point = $.CGPointMake(px, py);
+    [$.kCGEventMouseMoved, $.kCGEventLeftMouseDown, $.kCGEventLeftMouseUp].forEach(type => {
+      $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateMouseEvent(null, type, point, $.kCGMouseButtonLeft));
+    });
+    if (action !== 'click') $.NSThread.sleepForTimeInterval(0.12);
+  }
+  if (action === 'fill') {
+    frontWindow();
+    se.keystroke('a', {using: 'command down'});
+    if (text === '') se.keyCode(51);
+    else paste(se, text, frontWindow);
+  } else if (action === 'press') {
+    frontWindow();
+    if (Object.prototype.hasOwnProperty.call(codes, text)) se.keyCode(codes[text]);
+    else se.keystroke(text);
+  }
+}
+
+function webViewport(element, depth) {
+  const role = element.role();
+  if (depth > 12 || !['AXWindow', 'AXSplitGroup', 'AXTabGroup', 'AXGroup', 'AXScrollArea'].includes(role)) return null;
+  const children = element.uiElements();
+  if (role === 'AXScrollArea' && children.some(child => child.role() === 'AXWebArea'))
+    return [element.position(), element.size()];
+  for (const child of children) {
+    const viewport = webViewport(child, depth + 1);
+    if (viewport) return viewport;
+  }
+  return null;
+}
+
+function onScreen(x, y) {
+  const screens = $.NSScreen.screens;
+  for (let i = 0; i < screens.count; i++) {
+    const id = screens.objectAtIndex(i).deviceDescription.objectForKey('NSScreenNumber').unsignedIntValue;
+    if ($.CGRectContainsPoint($.CGDisplayBounds(id), $.CGPointMake(x, y))) return true;
+  }
+  return false;
+}
+
+function paste(se, text, frontWindow) {
+  const board = $.NSPasteboard.generalPasteboard;
+  const originalCount = board.changeCount;
+  const items = board.pasteboardItems, saved = $.NSMutableArray.alloc.init;
+  for (let i = 0; !items.isNil() && i < items.count; i++) {
+    const item = items.objectAtIndex(i), types = item.types, copy = $.NSPasteboardItem.alloc.init;
+    for (let j = 0; j < types.count; j++) {
+      const type = types.objectAtIndex(j), data = item.dataForType(type);
+      if (data.isNil() || !copy.setDataForType(data, type)) throw new Error('could not save clipboard contents');
+    }
+    saved.addObject(copy);
+  }
+  if (board.changeCount !== originalCount) throw new Error('clipboard changed while saving it');
+  frontWindow();
+  let change = board.clearContents;
+  try {
+    if (!board.setStringForType(text, $.NSPasteboardTypeString)) throw new Error('could not write clipboard text');
+    change = board.changeCount;
+    se.keystroke('v', {using: 'command down'});
+    // System Events returns after queuing input, before Safari has read the pasteboard.
+    $.NSThread.sleepForTimeInterval(0.3);
+  } finally {
+    if (board.changeCount === change) {
+      board.clearContents;
+      if (saved.count && !board.writeObjects(saved)) throw new Error('could not restore clipboard contents');
+    }
+  }
+}
+JS
+  local launcher="$WORK/trusted.applescript"
+  local access
+  access="$(osa "$TIMEOUT" "$f" permission)" || return 1
+  [ "$access" = true ] || die '--trusted needs Accessibility permission for your terminal (System Settings > Privacy & Security > Accessibility)'
+
+  cat >"$launcher" <<AS
+on run argv
+  set r to resolve(item 1 of argv)
+  set ti to item 2 of r
+  tell application "Safari"
+    set wi to id of window (item 1 of r)
+    set miniaturized of window id wi to false
+    set current tab of window id wi to tab ti of window id wi
+    set index of window id wi to 1
+    activate
+  end tell
+  return (wi as text) & space & (ti as text)
+end run
+$RESOLVE
+AS
+  target="$(osa "$TIMEOUT" "$launcher" "$TAB")" || return 1
+  read -r window_id tab_index <<<"$target"
+  if [ "$cmd" != press ] || [ "$SELECTOR_SET" = 1 ]; then
+    js_string "$selector"; local sel_js="$JS_STRING"
+    code="(function(){ const element = document.querySelector($sel_js); const action = '$cmd';"
+    cat >"$WORK/trusted-page.js" <<'JS'
+      if (!element) return 'safari-cli-no-match:';
+      if (action === 'fill') {
+        const input = element instanceof HTMLInputElement && /^(text|search|tel|url|email|password|number)$/.test(element.type);
+        if (!(input || element instanceof HTMLTextAreaElement || element.isContentEditable) || element.readOnly || element.matches(':disabled'))
+          throw new Error('element is not fillable');
+      }
+      if (element.checkVisibility && !element.checkVisibility({checkOpacity:true, checkVisibilityCSS:true}))
+        throw new Error('element is not visible');
+      element.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+      const v = visualViewport, r = element.getBoundingClientRect();
+      const left = Math.max(v.offsetLeft, r.left), right = Math.min(v.offsetLeft + v.width, r.right);
+      const top = Math.max(v.offsetTop, r.top), bottom = Math.min(v.offsetTop + v.height, r.bottom);
+      const x = (left + right) / 2, y = (top + bottom) / 2;
+      if (left >= right || top >= bottom || !element.contains(document.elementFromPoint(x, y)))
+        throw new Error('element is not visible at its center');
+      const point = [x - v.offsetLeft, y - v.offsetTop, screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight, v.scale];
+      const tag = element.tagName.toLowerCase();
+      const label = (element.innerText || element.getAttribute('aria-label') || element.value || '').trim().replace(/\s+/g,' ').slice(0,40);
+      return JSON.stringify(point) + '\n' + (action === 'click' ? 'clicked ' + tag + ' "' + label + '"' : tag);
+    })()
+JS
+    code+="$(cat "$WORK/trusted-page.js")"
+    result="$(TAB="$tab_index" run_js "$code" "$TIMEOUT" '' "$window_id")" || return 1
+    [ "$result" != 'safari-cli-no-match:' ] || die "no element matches: $selector"
+    point="${result%%$'\n'*}"
+    output="${result#*$'\n'}"
+  fi
+  osa "$TIMEOUT" "$f" "$cmd" "$window_id" "$tab_index" "$point" "$arg" >/dev/null || return 1
+  case "$cmd" in
+    fill) output="filled $output (${#arg} chars)" ;;
+    press) output="pressed $arg" ;;
+  esac
+  printf 'trusted %s\n' "$output"
+}
+
 cmd_action() {
   case "$cmd" in
     click|submit|press) [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; } ;;
@@ -518,6 +714,7 @@ cmd_action() {
     press) arg="${ARGS[0]}" ;;
     scroll) if [ "$TO_SET" = 1 ]; then arg="$TO"; else arg="$BY"; fi ;;
   esac
+  if [ "$TRUSTED" = 1 ]; then cmd_trusted "$selector" "$arg"; return; fi
   js_string "$selector"; sel_js="$JS_STRING"
   js_string "$arg"; arg_js="$JS_STRING"
   code="(function(){
@@ -769,6 +966,8 @@ case "$cmd" in
   tabs|open|close|eval|file|wait|wait-challenge|status|info|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
+    [ "$TRUSTED$BACKGROUND" != 11 ] || { echo 'safari-cli: --trusted cannot be used with --background' >&2; exit 2; }
+    [ "$TRUSTED" = 0 ] || [[ "$cmd" =~ ^(click|fill|press)$ ]] || { echo 'safari-cli: --trusted only applies to click, fill, and press' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'safari-cli: --json only applies to tabs' >&2; exit 2; }
     [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'safari-cli: --selector only applies to text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
