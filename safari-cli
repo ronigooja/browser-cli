@@ -40,6 +40,7 @@ safari-cli <command> [options]
   scroll [--selector CSS] --to top|bottom | --by N  scroll page or element
   submit <css>                  submit a form or its owning form
   wait [--tab T] <js>           poll until the expression is truthy
+  wait-challenge [--tab T] [--timeout N]  wait for a challenge to clear
   status                        probe JavaScript permission: on, off, or unknown (no window)
 
 --tab T     <window>:<tab> as printed by `tabs`, or a substring of the URL; default: front window's current tab
@@ -57,7 +58,7 @@ EOF
 }
 
 # ---- option parsing: sets TAB, TIMEOUT and ARGS (positional) ----
-TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; BACKGROUND=0; JSON=0; ARGS=()
+TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; JSON=0; ARGS=()
 SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
 TO=""; TO_SET=0; BY=""; BY_SET=0
 parse() {
@@ -67,7 +68,7 @@ parse() {
       --background) BACKGROUND=1; shift ;;
       --json) JSON=1; shift ;;
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
-      --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; shift 2 ;;
+      --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; TIMEOUT_SET=1; shift 2 ;;
       --selector) [ $# -ge 2 ] || { usage >&2; exit 2; }; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
       --to) [ $# -ge 2 ] || { usage >&2; exit 2; }; TO="$2"; TO_SET=1; shift 2 ;;
       --by) [ $# -ge 2 ] || { usage >&2; exit 2; }; BY="$2"; BY_SET=1; shift 2 ;;
@@ -352,9 +353,29 @@ output_js() {
   fi
 }
 
+# A read-only classifier operating on the main document; iframe contents are never read.
+CHALLENGE_JS='function challengeState() {
+  function visible(e) {
+    if (e.closest(".grecaptcha-badge, [aria-hidden=\"true\"]")) return false;
+    var s = getComputedStyle(e), r = e.getBoundingClientRect();
+    return s.display !== "none" && s.visibility !== "hidden" && s.visibility !== "collapse" && Number(s.opacity) !== 0 && r.width > 0 && r.height > 0;
+  }
+  var title = document.title.trim();
+  if (/attention required/i.test(title)) return "needs-human";
+  var widgets = document.querySelectorAll("iframe[src], .g-recaptcha, .cf-turnstile, .h-captcha");
+  for (var i = 0; i < widgets.length; i++) {
+    var e = widgets[i];
+    if (!visible(e)) continue;
+    if (e.tagName !== "IFRAME" || /challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|hcaptcha\.com/i.test(e.getAttribute("src") || "")) return "needs-human";
+  }
+  if (/^just a moment(?:\.\.\.|…)?$/i.test(title) || document.querySelector("#challenge-running, #cf-challenge-running") || (document.querySelector(".main-wrapper") && document.querySelector("[id^=cf-], [class*=cf-]"))) return "cloudflare-passive";
+  return "none";
+}'
+
 cmd_info() {
   [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
-  run_js '(function(){ return "title: " + document.title + "\nurl: " + location.href + "\nreadyState: " + document.readyState + "\ninnerText characters: " + (document.body ? document.body.innerText.length : 0) + "\nouterHTML characters: " + (document.documentElement ? document.documentElement.outerHTML.length : 0) + "\n"; })()' "$TIMEOUT"
+  run_js "(function(){ $CHALLENGE_JS
+    return \"title: \" + document.title + \"\\nurl: \" + location.href + \"\\nreadyState: \" + document.readyState + \"\\ninnerText characters: \" + (document.body ? document.body.innerText.length : 0) + \"\\nouterHTML characters: \" + (document.documentElement ? document.documentElement.outerHTML.length : 0) + \"\\nchallenge: \" + challengeState() + \"\\n\"; })()" "$TIMEOUT"
 }
 
 cmd_read() {
@@ -586,6 +607,36 @@ ${ARGS[0]}
   done
 }
 
+cmd_wait_challenge() {
+  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ "$TIMEOUT_SET" = 1 ] || TIMEOUT=600
+  local deadline=$((SECONDS + TIMEOUT)) remaining out state=unknown host notified=0
+  while :; do
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+      die "challenge not cleared after ${TIMEOUT}s (state: $state)"
+    fi
+    if out="$(run_js "(function(){ $CHALLENGE_JS return challengeState() + '\\n' + (location.host || location.protocol); })()" "$remaining" 2>"$WORK/challenge-error")"; then
+      state="${out%%$'\n'*}"
+      host="${out#*$'\n'}"
+      if [ "$state" = none ]; then
+        echo 'challenge: cleared'
+        return 0
+      fi
+      if [ "$state" = needs-human ] && [ "$notified" = 0 ]; then
+        printf 'safari-cli: human verification needed on %s; waiting for you to complete it\n' "$host" >&2
+        # Pass the host as an argument, not interpolated AppleScript source.
+        osascript -e 'on run argv' -e 'display notification ((item 1 of argv) & " needs verification — please complete it in Safari") with title "safari-cli"' -e 'end run' "$host" >/dev/null 2>&1 || true
+        notified=1
+      fi
+    elif grep -q 'JavaScript from Apple Events is off' "$WORK/challenge-error"; then
+      cat "$WORK/challenge-error" >&2
+      return 1
+    fi
+    [ "$SECONDS" -ge "$deadline" ] || sleep 1
+  done
+}
+
 cmd_status() {
   [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
   local f
@@ -620,7 +671,7 @@ cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
-  tabs|open|close|eval|file|wait|status|info|text|links|html|snapshot|click|fill|select|press|scroll|submit)
+  tabs|open|close|eval|file|wait|wait-challenge|status|info|text|links|html|snapshot|click|fill|select|press|scroll|submit)
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
