@@ -140,13 +140,22 @@ still the ones it selected. If you switch app, switch tab, or close the tab or w
 `browser-cli: the target tab was closed or changed during the action; nothing more was sent`
 (exit 1). The clipboard is restored.
 
-Known gap: the target tab is first found by URL substring and its identity is read a moment later.
-If the user closes the target in that instant and a neighbouring tab takes its position, input can
-go to the neighbour while the command reports success. The launcher re-checks the tab's URL against
-the `--tab` text to narrow this. It was confirmed to stop the case on Safari. It was not confirmed on
-Chrome, where it occurred before the re-check was added. It cannot help when `--tab` is an index
-such as `1:2` or omitted, or when the neighbour's URL also contains the same text. Prefer a specific
-URL substring and avoid closing tabs while the command runs.
+Known gaps (input going to a neighbouring tab if the target is closed at the wrong instant):
+
+- **Safari** tabs have no id. The tab is found by `--tab`, then identified by a URL+title
+  fingerprint, and the launcher re-checks that its URL still contains the `--tab` text. This stops the
+  case where the target is closed and a neighbour takes its index; it was verified with a
+  deterministic pause. It cannot help when `--tab` is an index such as `1:2` or omitted, or when the
+  neighbour has the same URL and title.
+- **Chrome** reads each candidate's URL and tab id together in one call and then uses the id, not
+  the index, for selection and for every check before input. This removes the separate
+  "find by URL, then read the id" step where input once reached a neighbour. The new code path was
+  checked with one normal `click` and one `fill` per browser; the closing race itself was **not
+  reproduced or verified** after the change, so treat the fix as unproven.
+- Both: a very short window remains between the last identity check and the operating system
+  delivering the event; it cannot be removed.
+
+Prefer a specific URL substring for `--tab` and avoid closing tabs while the command runs.
 
 ## Screenshots
 
