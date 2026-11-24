@@ -364,7 +364,11 @@ js_string() {
 
 run_js() {
   local code="$1" limit="$2"
-  # Trusted actions supply a controlled expression and a stable window ID.
+  local trusted_tab_ref="tab ((item 1 of argv) as integer) of window id $AS_WINDOW_ID"
+  if [ -n "${5-}" ]; then
+    trusted_tab_ref='tab id (item 1 of argv) of window id (item 3 of argv)'
+  fi
+  # Trusted actions supply a controlled expression and a stable window ID; Chrome also supplies a tab ID.
   # Run it directly so site CSP rules against eval do not block hit testing.
   if [ -z "${4-}" ]; then
     code="(
@@ -382,7 +386,7 @@ $code
 on run argv
   set code to read (POSIX file (item 2 of argv)) as «class utf8»
   if item 3 of argv is not "" then
-    tell application "$APP" to return $(as_js code "tab ((item 1 of argv) as integer) of window id $AS_WINDOW_ID")
+    tell application "$APP" to return $(as_js code "$trusted_tab_ref")
   end if
   set r to resolve(item 1 of argv)
   tell application "$APP" to return $(as_js code 'tab (item 2 of r) of window (item 1 of r)')
@@ -391,7 +395,7 @@ $RESOLVE
 AS
 )"
   local out
-  osa "$limit" "$f" "$TAB" "$WORK/code.js" "${4-}" >"$WORK/result" || return 1
+  osa "$limit" "$f" "${5:-$TAB}" "$WORK/code.js" "${4-}" >"$WORK/result" || return 1
   out="$(cat "$WORK/result"; printf '.')"
   out="${out%.}"
   out="${out%$'\n'}"
@@ -616,7 +620,7 @@ function run(argv) {
     try {
       const win = app.windows[0];
       inFront = chrome
-        ? win.id() === windowID && win.activeTabIndex() === Number(tabIndex) && String(win.activeTab.id()) === tabID && process.frontmost()
+        ? win.id() === windowID && String(win.activeTab.id()) === tabID && process.frontmost()
         : process.frontmost() && win.id() === Number(windowID) && win.currentTab.index() === Number(tabIndex) && fingerprint(win) === tabID;
       if (inFront) return win;
     } catch (_) {
@@ -801,20 +805,83 @@ JS
   access="$(osa "$TIMEOUT" "$f" permission)" || return 1
   [ "$access" = true ] || die '--trusted needs Accessibility permission for your terminal (System Settings > Privacy & Security > Accessibility)'
 
-  local unminimize='set miniaturized of window id wi to false'
-  local select_tab='set current tab of window id wi to tab ti of window id wi'
-  local tab_identity='my fingerprintOf(tab ti of window id wi)'
-  if [ "$BROWSER" = chrome ]; then
-    unminimize='set minimized of window id wi to false'
-    select_tab='set active tab index of window id wi to ti'
-    tab_identity='(id of tab ti of window id wi as text)'
-  fi
-  # Resolving --tab to an index and reading the tab's identity are separate steps. If the user closes
-  # the target between them, a neighbour takes its index and its identity would be read instead, so
-  # after reading it the launcher re-checks that the tab at that index still matches the --tab text.
-  # A tab that vanishes later is caught by the identity checks made before every send.
   TRUSTED_SENDING=1
-  cat >"$launcher" <<AS
+  if [ "$BROWSER" = chrome ]; then
+    cat >"$launcher" <<'AS'
+on run argv
+  set spec to item 1 of argv
+  set wi to ""
+  set identity to ""
+  set matchedURL to false
+  set gone to "the target tab was closed or changed during the action; nothing more was sent"
+  set wantedWindow to 0
+  set wantedTab to 0
+  try
+    set AppleScript's text item delimiters to ":"
+    set parts to text items of spec
+    if (count of parts) = 2 then
+      set wantedWindow to (item 1 of parts) as integer
+      set wantedTab to (item 2 of parts) as integer
+    end if
+  end try
+  set AppleScript's text item delimiters to ""
+  tell application "Google Chrome"
+    set windowIDs to id of every window
+    if windowIDs is {} then error "no Google Chrome window is open"
+    if spec is "" then
+      set wi to item 1 of windowIDs
+      set identity to id of active tab of window id wi
+    else
+      if wantedWindow > 0 and wantedWindow ≤ (count of windowIDs) and wantedTab > 0 then
+        set candidateWindow to item wantedWindow of windowIDs
+        set tabIDs to id of every tab of window id candidateWindow
+        if wantedTab ≤ (count of tabIDs) then
+          set wi to candidateWindow
+          set identity to item wantedTab of tabIDs
+        end if
+      end if
+      if identity is "" then
+        repeat with w in windowIDs
+          set candidateWindow to contents of w
+          -- One property read supplies both URL and ID; never match a URL and then read its index again.
+          set candidates to properties of every tab of window id candidateWindow
+          repeat with candidate in candidates
+            if URL of candidate contains spec then
+              set wi to candidateWindow
+              set identity to id of candidate
+              set matchedURL to true
+              exit repeat
+            end if
+          end repeat
+          if matchedURL then exit repeat
+        end repeat
+        if not matchedURL then error "no tab matches: " & spec
+      end if
+    end if
+    if matchedURL then
+      set currentURL to URL of tab id identity of window id wi
+      if currentURL is missing value or currentURL does not contain spec then error gone
+    end if
+    set minimized of window id wi to false
+    -- Chrome only accepts an index when selecting; read it from a fresh ID list and verify the selection.
+    set tabIDs to id of every tab of window id wi
+    set ti to 1
+    repeat while ti ≤ (count of tabIDs)
+      if item ti of tabIDs is identity then exit repeat
+      set ti to ti + 1
+    end repeat
+    if ti > (count of tabIDs) then error gone
+    set active tab index of window id wi to ti
+    if id of active tab of window id wi is not identity then error gone
+    set index of window id wi to 1
+    activate
+    return wi & (ASCII character 9) & (ti as text) & (ASCII character 9) & identity
+  end tell
+end run
+AS
+  else
+    # Safari uses a fingerprint and keeps its existing index and URL checks.
+    cat >"$launcher" <<AS
 on fingerprintOf(t)
   tell application "$APP"
     set u to URL of t
@@ -827,14 +894,14 @@ on run argv
   set ti to item 2 of r
   tell application "$APP"
     set wi to id of window (item 1 of r)
-    set identity to $tab_identity
+    set identity to my fingerprintOf(tab ti of window id wi)
     if (item 3 of r) is not "" then
       set cur to URL of tab ti of window id wi
       if cur is missing value then set cur to ""
       if cur does not contain (item 3 of r) then error "the target tab was closed or changed during the action; nothing more was sent"
     end if
-    $unminimize
-    $select_tab
+    set miniaturized of window id wi to false
+    set current tab of window id wi to tab ti of window id wi
     set index of window id wi to 1
     activate
     return (wi as text) & (ASCII character 9) & (ti as text) & (ASCII character 9) & identity
@@ -842,6 +909,7 @@ on run argv
 end run
 $RESOLVE
 AS
+  fi
   target="$(osa "$TIMEOUT" "$launcher" "$TAB")" || return 1
   local rest
   window_id="${target%%$'\t'*}"; rest="${target#*$'\t'}"
@@ -873,7 +941,11 @@ AS
     })()
 JS
     code+="$(cat "$WORK/trusted-page.js")"
-    result="$(TAB="$tab_index" run_js "$code" "$TIMEOUT" '' "$window_id")" || return 1
+    if [ "$BROWSER" = chrome ]; then
+      result="$(run_js "$code" "$TIMEOUT" '' "$window_id" "$tab_id")" || return 1
+    else
+      result="$(TAB="$tab_index" run_js "$code" "$TIMEOUT" '' "$window_id")" || return 1
+    fi
     [ "$result" != 'browser-cli-no-match:' ] || die "no element matches: $selector"
     point="${result%%$'\n'*}"
     output="${result#*$'\n'}"
