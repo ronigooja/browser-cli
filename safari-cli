@@ -32,6 +32,12 @@ safari-cli <command> [options]
   text [--tab T]                print page text
   links [--tab T]               print link text and absolute URLs
   html [--tab T]                print sanitized page HTML
+  click <css>                   click the first matching element
+  fill <css> <text>             fill an input, textarea, or editable element
+  select <css> <value>          select an option by value or label
+  press <key> [--selector CSS]  send a synthetic key event
+  scroll [--selector CSS] --to top|bottom | --by N  scroll page or element
+  submit <css>                  submit a form or its owning form
   wait [--tab T] <js>           poll until the expression is truthy
   status                        probe JavaScript permission: on, off, or unknown (no window)
 
@@ -39,7 +45,8 @@ safari-cli <command> [options]
 --background open only: do not activate Safari, raise a window or switch tabs; launches Safari in the background if not running
 --json      tabs only: output a JSON array
 --timeout N positive integer seconds before commands give up (default 30)
---selector CSS scope text, links, or html to the first matching element
+--selector CSS scope text, links, html, press, or scroll to an element
+--to top|bottom, --by N scroll only: choose destination or integer distance
 --max-chars N limit output characters for text, links, html, eval, or file
 --raw       html only: return unmodified outerHTML
 Enable JavaScript from Apple Events once by hand in Safari > Settings > Developer.
@@ -51,6 +58,7 @@ EOF
 # ---- option parsing: sets TAB, TIMEOUT and ARGS (positional) ----
 TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; BACKGROUND=0; JSON=0; ARGS=()
 SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
+TO=""; TO_SET=0; BY=""; BY_SET=0
 parse() {
   ARGS=()
   while [ $# -gt 0 ]; do
@@ -60,6 +68,8 @@ parse() {
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; shift 2 ;;
       --selector) [ $# -ge 2 ] || { usage >&2; exit 2; }; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
+      --to) [ $# -ge 2 ] || { usage >&2; exit 2; }; TO="$2"; TO_SET=1; shift 2 ;;
+      --by) [ $# -ge 2 ] || { usage >&2; exit 2; }; BY="$2"; BY_SET=1; shift 2 ;;
       --max-chars) [ $# -ge 2 ] || { usage >&2; exit 2; }; MAX_CHARS="$2"; MAX_CHARS_SET=1; shift 2 ;;
       --raw) RAW=1; shift ;;
       --) shift; ARGS+=("$@"); break ;;
@@ -263,6 +273,21 @@ AS
 }
 
 # Runs the expression in the tab; prints the value, exits 1 on a JS exception.
+# Assign a JavaScript string literal to JS_STRING without losing trailing newlines.
+js_string() {
+  local s="$1" c n i
+  JS_STRING='"'
+  for ((i=0; i<${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      '"') JS_STRING+='\"' ;;
+      '\') JS_STRING+='\\' ;;
+      *) printf -v n '%d' "'$c"; if [ "$n" -ge 0 ] && [ "$n" -lt 32 ]; then printf -v c '\\u%04x' "$n"; fi; JS_STRING+="$c" ;;
+    esac
+  done
+  JS_STRING+='"'
+}
+
 run_js() {
   local code="$1" limit="$2"
   code="(
@@ -291,7 +316,7 @@ AS
   case "$out" in
     str:*) printf '%s' "${out#str:}" ;;
     ok:*) printf '%s\n' "${out#ok:}" ;;
-    err:*) echo "safari-cli: JavaScript error: ${out#err:}" >&2; return 1 ;;
+    err:*) echo "safari-cli: ${3-JavaScript error: }${out#err:}" >&2; return 1 ;;
     *) echo "safari-cli: unexpected result: $out" >&2; return 1 ;;
   esac
 }
@@ -333,14 +358,10 @@ cmd_info() {
 
 cmd_read() {
   [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
-  local selector="$SELECTOR" code
-  selector="${selector//\\/\\\\}"
-  selector="${selector//\"/\\\"}"
-  selector="${selector//$'\n'/\\n}"
-  selector="${selector//$'\r'/\\r}"
-  selector="${selector//$'\t'/\\t}"
+  local selector code
+  js_string "$SELECTOR"; selector="$JS_STRING"
   code="(function(){
-    var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector("%s")' "$selector" || printf 'document.documentElement');
+    var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector(%s)' "$selector" || printf 'document.documentElement');
     if (!root) return 'safari-cli-no-match:';
     var result;
     if ('$cmd' === 'text') {
@@ -377,6 +398,90 @@ cmd_read() {
   else
     printf '%s' "$out"
   fi
+}
+
+cmd_action() {
+  case "$cmd" in
+    click|submit|press) [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; } ;;
+    fill|select) [ ${#ARGS[@]} -eq 2 ] || { usage >&2; exit 2; } ;;
+    scroll) [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; } ;;
+  esac
+  local selector="" arg="" sel_js arg_js code out
+  case "$cmd" in
+    click|fill|select|submit) selector="${ARGS[0]}" ;;
+    press|scroll) selector="$SELECTOR" ;;
+  esac
+  case "$cmd" in
+    fill|select) arg="${ARGS[1]}" ;;
+    press) arg="${ARGS[0]}" ;;
+    scroll) if [ "$TO_SET" = 1 ]; then arg="$TO"; else arg="$BY"; fi ;;
+  esac
+  js_string "$selector"; sel_js="$JS_STRING"
+  js_string "$arg"; arg_js="$JS_STRING"
+  code="(function(){
+    var command = '$cmd', selector = $sel_js, arg = $arg_js;
+    var hasSelector = $SELECTOR_SET, element;
+    if (command !== 'press' && command !== 'scroll' || hasSelector) {
+      element = document.querySelector(selector);
+      if (!element) return 'safari-cli-no-match:';
+    }
+    if (command === 'click') {
+      if (!element.getClientRects().length) throw new Error('element is not visible');
+      element.scrollIntoView({block:'center'});
+      element.focus();
+      var r = element.getBoundingClientRect(), opts = {bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2};
+      ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(type){ element.dispatchEvent(type.indexOf('pointer') === 0 ? new PointerEvent(type, opts) : new MouseEvent(type, opts)); });
+      return 'clicked ' + element.tagName.toLowerCase() + ' \"' + (element.innerText || element.getAttribute('aria-label') || element.value || '').trim().replace(/\\s+/g,' ').slice(0,40) + '\"\\n';
+    }
+    if (command === 'fill') {
+      element.focus();
+      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+        var proto = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        Object.getOwnPropertyDescriptor(proto,'value').set.call(element,arg);
+        element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:arg}));
+        element.dispatchEvent(new Event('change',{bubbles:true}));
+      } else if (element.isContentEditable) {
+        element.textContent = arg;
+        element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:arg}));
+      } else throw new Error('element is not fillable');
+      return 'filled ' + element.tagName.toLowerCase() + ' (' + Array.from(arg).length + ' chars)\\n';
+    }
+    if (command === 'select') {
+      if (!(element instanceof HTMLSelectElement)) throw new Error('element is not a select');
+      var options = Array.from(element.options), index = options.findIndex(function(o){return o.value === arg;});
+      if (index < 0) index = options.findIndex(function(o){return o.label === arg;});
+      if (index < 0) throw new Error('no option matches: ' + arg);
+      element.selectedIndex = index;
+      element.dispatchEvent(new Event('input',{bubbles:true})); element.dispatchEvent(new Event('change',{bubbles:true}));
+      return 'selected \"' + options[index].label + '\"\\n';
+    }
+    if (command === 'press') {
+      var key = arg === 'Space' ? ' ' : arg;
+      if (!['Enter','Escape','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Backspace',' '].includes(key) && Array.from(key).length !== 1) throw new Error('unsupported key: ' + arg);
+      element = element || document.activeElement || document.body;
+      var keyopts = {key:key,bubbles:true,cancelable:true}, allowed = element.dispatchEvent(new KeyboardEvent('keydown',keyopts));
+      if (key === 'Enter' || Array.from(key).length === 1) allowed = element.dispatchEvent(new KeyboardEvent('keypress',keyopts)) && allowed;
+      allowed = element.dispatchEvent(new KeyboardEvent('keyup',keyopts)) && allowed;
+      var form = element.form || element.closest('form');
+      if (key === 'Enter' && allowed && form) form.requestSubmit();
+      return 'pressed ' + arg + '\\n';
+    }
+    if (command === 'scroll') {
+      var target = element || document.scrollingElement, max = Math.max(0,target.scrollHeight-target.clientHeight);
+      var dest = $TO_SET ? (arg === 'top' ? 0 : max) : target.scrollTop + Number(arg);
+      if (element) element.scrollTop = dest; else window.scrollTo(0,dest);
+      return (element ? 'scrollTop: ' : 'scrollY: ') + Math.round(target.scrollTop) + ' of ' + Math.round(max) + '\\n';
+    }
+    var form = element instanceof HTMLFormElement ? element : (element.form || element.closest('form'));
+    if (!form) throw new Error('element has no form');
+    form.requestSubmit(); return 'submitted form\\n';
+  })()"
+  run_js "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
+  out="$(cat "$WORK/action-output"; printf '.')"; out="${out%.}"
+  if [ "$out" = 'safari-cli-no-match:' ]; then
+    printf 'safari-cli: no element matches: %s\n' "$selector" >&2; return 1
+  fi
+  printf '%s' "$out"
 }
 
 cmd_wait() {
@@ -438,12 +543,19 @@ cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
-  tabs|open|close|eval|file|wait|status|info|text|links|html)
+  tabs|open|close|eval|file|wait|status|info|text|links|html|click|fill|select|press|scroll|submit)
     parse "$@"
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: timeout must be a positive integer' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'safari-cli: --background only applies to open' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'safari-cli: --json only applies to tabs' >&2; exit 2; }
-    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html)$ ]] || { echo 'safari-cli: --selector only applies to text, links, and html' >&2; exit 2; }
+    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|press|scroll)$ ]] || { echo 'safari-cli: --selector only applies to text, links, html, press, and scroll' >&2; exit 2; }
+    if [ "$cmd" = scroll ]; then
+      [ "$((TO_SET + BY_SET))" = 1 ] || { echo 'safari-cli: scroll requires exactly one of --to or --by' >&2; exit 2; }
+      [ "$TO_SET" = 0 ] || [[ "$TO" =~ ^(top|bottom)$ ]] || { echo 'safari-cli: --to must be top or bottom' >&2; exit 2; }
+      [ "$BY_SET" = 0 ] || [[ "$BY" =~ ^-?[0-9]+$ ]] || { echo 'safari-cli: --by must be an integer' >&2; exit 2; }
+    else
+      [ "$((TO_SET + BY_SET))" = 0 ] || { echo 'safari-cli: --to and --by only apply to scroll' >&2; exit 2; }
+    fi
     [ "$RAW" = 0 ] || [ "$cmd" = html ] || { echo 'safari-cli: --raw only applies to html' >&2; exit 2; }
     if [ "$MAX_CHARS_SET" = 1 ]; then
       [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'safari-cli: max-chars must be a positive integer' >&2; exit 2; }
@@ -451,6 +563,7 @@ case "$cmd" in
     fi
     case "$cmd" in
       text|links|html) cmd_read ;;
+      click|fill|select|press|scroll|submit) cmd_action ;;
       *) "cmd_${cmd//-/_}" ;;
     esac
     ;;
