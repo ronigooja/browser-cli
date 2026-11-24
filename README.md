@@ -94,7 +94,9 @@ clipped to the viewport; a fully offscreen element fails with `element is outsid
 (scroll first), and a hidden element (no layout box, `visibility:hidden`, or zero opacity) fails
 with `element is not visible`. The browser must be the active app:
 with Stage Manager on, an inactive browser window is captured as a thumbnail and the command fails
-with a "capture does not match the viewport" error instead of returning a wrong image. Use screenshots sparingly because
+with a "capture does not match the viewport" error instead of returning a wrong image. A size
+mismatch is retried for about 3 seconds so a capture right after a tab or app switch succeeds;
+a window that stays inactive then fails. Use screenshots sparingly because
 images cost tokens; prefer text or `snapshot`.
 
 Challenge detection applies to the main frame only; cross-origin iframes are detected by

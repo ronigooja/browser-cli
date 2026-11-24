@@ -947,10 +947,8 @@ end run
 $RESOLVE
 AS
 )"
-  window="$(osa "$TIMEOUT" "$f" "$TAB")" || return 1
-  [ "$window" != not-displayed ] || die 'tab is not currently displayed; switch to it first (screenshot cannot capture background tabs)'
-  if [ "$BROWSER" = chrome ]; then
-    cat >"$WORK/window.js" <<'JS'
+  local not_active="$APP window capture does not match the viewport; $APP is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring $APP to the front and retry"
+  cat >"$WORK/window.js" <<'JS'
 ObjC.import('CoreGraphics'); ObjC.import('Foundation');
 function run(a) {
   var b=a[0].split(/,\s*/).map(Number);
@@ -966,8 +964,6 @@ function run(a) {
   return String(found[0]);
 }
 JS
-    window="$(osascript -l JavaScript "$WORK/window.js" "$window" 2>/dev/null)" || die "$APP window capture does not match the viewport; $APP is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring $APP to the front and retry"
-  fi
   js_string "$SELECTOR"; selector="$JS_STRING"
   geometry="$(run_js "(function(){
     var w=innerWidth,h=innerHeight,d=devicePixelRatio, l=0,t=0,r=w,b=h;
@@ -982,9 +978,6 @@ JS
   [ "$geometry" != no-match ] || die "no element matches: $SELECTOR"
   [ "$geometry" != hidden ] || die 'element is not visible'
   [ "$geometry" != outside ] || die 'element is outside the viewport'
-  if ! screencapture -x -o -l"$window" "$WORK/capture.png" >/dev/null 2>&1 || [ ! -s "$WORK/capture.png" ]; then
-    die 'screen capture failed; check System Settings > Privacy & Security > Screen Recording'
-  fi
   # A nonblack pixel distinguishes an accessible image from a denied black capture.
   cat >"$WORK/image.js" <<'JS'
 ObjC.import('AppKit');
@@ -1000,18 +993,46 @@ function run(argv) {
   return nonblack ? w+' '+h : 'black';
 }
 JS
-  local dimensions
-  dimensions="$(osascript -l JavaScript "$WORK/image.js" "$WORK/capture.png" 2>/dev/null)" || dimensions=invalid
-  case "$dimensions" in black|invalid|'') die 'screen capture is empty or black; check System Settings > Privacy & Security > Screen Recording' ;; esac
-  read -r width height <<<"$dimensions"
-  crop="$(awk -v g="$geometry" -v iw="$width" -v ih="$height" 'BEGIN {
-    split(g,a," "); vw=a[1]; vh=a[2]; d=a[3];
-    if (vw<=0 || vh<=0 || d<=0 || iw < vw*d-2 || ih < vh*d-2 || iw > vw*d+2) exit 1;
-    x=int(a[4]*d+0.5); y=int(ih-vh*d+a[5]*d+0.5);
-    right=int(a[6]*d+0.5); bottom=int(ih-vh*d+a[7]*d+0.5);
-    if (right<=x || bottom<=y || y<0 || right>iw || bottom>ih) exit 1;
-    print bottom-y, right-x, y, x;
-  }')" || die "$APP window capture does not match the viewport; $APP is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring $APP to the front and retry"
+  # Right after a tab or app switch the window can still be a thumbnail (Stage Manager) or
+  # mid-animation, so retry only the size mismatch; permission and blank-capture errors are final.
+  local dimensions attempt=0 bounds="" window_id=""
+  while :; do
+    # Safari's window id is the CGWindowID; Chrome's is not, so Chrome is matched by bounds,
+    # re-read on every attempt because they are still changing right after a switch.
+    window_id=""
+    if [ "$BROWSER" = chrome ]; then
+      bounds="$(osa "$TIMEOUT" "$f" "$TAB")" || return 1
+      [ "$bounds" != not-displayed ] || die 'tab is not currently displayed; switch to it first (screenshot cannot capture background tabs)'
+      window_id="$(osascript -l JavaScript "$WORK/window.js" "$bounds" 2>/dev/null)" || window_id=""
+    elif [ "$attempt" = 0 ]; then
+      window="$(osa "$TIMEOUT" "$f" "$TAB")" || return 1
+      [ "$window" != not-displayed ] || die 'tab is not currently displayed; switch to it first (screenshot cannot capture background tabs)'
+      window_id="$window"
+    else
+      window_id="$window"
+    fi
+    if [ -n "$window_id" ] && { ! screencapture -x -o -l"$window_id" "$WORK/capture.png" >/dev/null 2>&1 || [ ! -s "$WORK/capture.png" ]; }; then
+      die 'screen capture failed; check System Settings > Privacy & Security > Screen Recording'
+    fi
+    if [ -z "$window_id" ]; then
+      dimensions="0 0"
+    else
+      dimensions="$(osascript -l JavaScript "$WORK/image.js" "$WORK/capture.png" 2>/dev/null)" || dimensions=invalid
+      case "$dimensions" in black|invalid|'') die 'screen capture is empty or black; check System Settings > Privacy & Security > Screen Recording' ;; esac
+    fi
+    read -r width height <<<"$dimensions"
+    if crop="$(awk -v g="$geometry" -v iw="$width" -v ih="$height" 'BEGIN {
+      split(g,a," "); vw=a[1]; vh=a[2]; d=a[3];
+      if (vw<=0 || vh<=0 || d<=0 || iw < vw*d-2 || ih < vh*d-2 || iw > vw*d+2) exit 1;
+      x=int(a[4]*d+0.5); y=int(ih-vh*d+a[5]*d+0.5);
+      right=int(a[6]*d+0.5); bottom=int(ih-vh*d+a[7]*d+0.5);
+      if (right<=x || bottom<=y || y<0 || right>iw || bottom>ih) exit 1;
+      print bottom-y, right-x, y, x;
+    }')"; then break; fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 6 ] || die "$not_active"
+    sleep 0.5
+  done
   local ch cw cy cx
   read -r ch cw cy cx <<<"$crop"
   cat >"$WORK/crop.js" <<'JS'
