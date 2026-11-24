@@ -973,12 +973,14 @@ JS
     var w=innerWidth,h=innerHeight,d=devicePixelRatio, l=0,t=0,r=w,b=h;
     if ($SELECTOR_SET) {
       var e=document.querySelector($selector); if (!e) return 'no-match';
+      if (!e.getClientRects().length || (e.checkVisibility && !e.checkVisibility({checkOpacity:true, checkVisibilityCSS:true}))) return 'hidden';
       var q=e.getBoundingClientRect(); l=Math.max(0,q.left); t=Math.max(0,q.top); r=Math.min(w,q.right); b=Math.min(h,q.bottom);
       if (r<=l || b<=t) return 'outside';
     }
     return [w,h,d,l,t,r,b].join(' ');
   })()" "$TIMEOUT")" || return 1
   [ "$geometry" != no-match ] || die "no element matches: $SELECTOR"
+  [ "$geometry" != hidden ] || die 'element is not visible'
   [ "$geometry" != outside ] || die 'element is outside the viewport'
   if ! screencapture -x -o -l"$window" "$WORK/capture.png" >/dev/null 2>&1 || [ ! -s "$WORK/capture.png" ]; then
     die 'screen capture failed; check System Settings > Privacy & Security > Screen Recording'

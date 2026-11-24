@@ -90,7 +90,9 @@ supported. Use it only when a site ignores synthetic events.
 currently displayed tab of a non-minimized window; it never activates the browser or switches tabs.
 Background tabs fail with `browser-cli: tab is not currently displayed; switch to it first
 (screenshot cannot capture background tabs)`. A selector captures its first matching element,
-clipped to the viewport; a fully offscreen element fails. The browser must be the active app:
+clipped to the viewport; a fully offscreen element fails with `element is outside the viewport`
+(scroll first), and a hidden element (no layout box, `visibility:hidden`, or zero opacity) fails
+with `element is not visible`. The browser must be the active app:
 with Stage Manager on, an inactive browser window is captured as a thumbnail and the command fails
 with a "capture does not match the viewport" error instead of returning a wrong image. Use screenshots sparingly because
 images cost tokens; prefer text or `snapshot`.
