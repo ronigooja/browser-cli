@@ -160,6 +160,7 @@ browser_setup() {
     end tell'
       AS_JS='do JavaScript JS_CODE in TAB_REF'
       AS_WINDOW_ID='((item 3 of argv) as integer)'
+      AS_SCREENSHOT_DISPLAYED='miniaturized of w or (index of current tab of w) is not (item 2 of r)'
       JS_PERMISSION_ERROR='Allow JavaScript from Apple Events'
       JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off. Turn it on in Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password), then retry.'
       ;;
@@ -176,6 +177,7 @@ browser_setup() {
     if bg then set active tab index of window 1 to prev'
       AS_JS='execute TAB_REF javascript JS_CODE'
       AS_WINDOW_ID='(item 3 of argv)'
+      AS_SCREENSHOT_DISPLAYED='minimized of w or (active tab index of w) is not (item 2 of r)'
       # Chrome localizes the error text, but embeds the same help URL.
       JS_PERMISSION_ERROR='Allow JavaScript from Apple Events|support\.google\.com/chrome/\?p=applescript'
       JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off in Chrome. Enable View > Developer > Allow JavaScript from Apple Events, then retry.'
@@ -843,9 +845,13 @@ cmd_screenshot() {
   f="$(script screenshot-window <<AS
 on run argv
   set r to resolve(item 1 of argv)
-  tell application "Safari"
+  tell application "$APP"
     set w to window (item 1 of r)
-    if miniaturized of w or (index of current tab of w) is not (item 2 of r) then return "not-displayed"
+    if $AS_SCREENSHOT_DISPLAYED then return "not-displayed"
+    if "$BROWSER" is "chrome" then
+      set b to bounds of w
+      return (item 1 of b as text) & "," & (item 2 of b as text) & "," & (item 3 of b as text) & "," & (item 4 of b as text)
+    end if
     return id of w
   end tell
 end run
@@ -854,6 +860,25 @@ AS
 )"
   window="$(osa "$TIMEOUT" "$f" "$TAB")" || return 1
   [ "$window" != not-displayed ] || die 'tab is not currently displayed; switch to it first (screenshot cannot capture background tabs)'
+  if [ "$BROWSER" = chrome ]; then
+    cat >"$WORK/window.js" <<'JS'
+ObjC.import('CoreGraphics'); ObjC.import('Foundation');
+function run(a) {
+  var b=a[0].split(/,\s*/).map(Number);
+  var windows=ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionAll,$.kCGNullWindowID));
+  var found=[];
+  for (var i=0;i<Number(windows.count);i++) {
+    var w=windows.objectAtIndex(i), get=function(k){return w.objectForKey($(k))};
+    if (ObjC.unwrap(get('kCGWindowOwnerName')) !== 'Google Chrome' || Number(ObjC.unwrap(get('kCGWindowLayer'))) !== 0) continue;
+    var r=get('kCGWindowBounds'), n=function(k){return Number(ObjC.unwrap(r.objectForKey($(k))))};
+    if (n('X')===b[0] && n('Y')===b[1] && n('Width')===b[2]-b[0] && n('Height')===b[3]-b[1]) found.push(ObjC.unwrap(get('kCGWindowNumber')));
+  }
+  if (found.length!==1) throw Error('window not uniquely found');
+  return String(found[0]);
+}
+JS
+    window="$(osascript -l JavaScript "$WORK/window.js" "$window" 2>/dev/null)" || die "$APP window capture does not match the viewport; $APP is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring $APP to the front and retry"
+  fi
   js_string "$SELECTOR"; selector="$JS_STRING"
   geometry="$(run_js "(function(){
     var w=innerWidth,h=innerHeight,d=devicePixelRatio, l=0,t=0,r=w,b=h;
@@ -895,7 +920,7 @@ JS
     right=int(a[6]*d+0.5); bottom=int(ih-vh*d+a[7]*d+0.5);
     if (right<=x || bottom<=y || y<0 || right>iw || bottom>ih) exit 1;
     print bottom-y, right-x, y, x;
-  }')" || die 'Safari window capture does not match the viewport; Safari is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring Safari to the front and retry'
+  }')" || die "$APP window capture does not match the viewport; $APP is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring $APP to the front and retry"
   local ch cw cy cx
   read -r ch cw cy cx <<<"$crop"
   cat >"$WORK/crop.js" <<'JS'
@@ -1044,7 +1069,7 @@ case "$cmd" in
       [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: max-chars must be a positive integer' >&2; exit 2; }
       [[ "$cmd" =~ ^(text|links|html|snapshot|eval|file)$ ]] || { echo 'browser-cli: --max-chars only applies to text, links, html, snapshot, eval, and file' >&2; exit 2; }
     fi
-    if [ "$BROWSER" = chrome ] && { [ "$cmd" = screenshot ] || [ "$TRUSTED" = 1 ]; }; then
+    if [ "$BROWSER" = chrome ] && [ "$TRUSTED" = 1 ]; then
       die "$cmd is not supported for chrome yet"
     fi
     browser_setup
