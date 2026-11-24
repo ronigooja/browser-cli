@@ -841,7 +841,7 @@ JS
     right=int(a[6]*d+0.5); bottom=int(ih-vh*d+a[7]*d+0.5);
     if (right<=x || bottom<=y || y<0 || right>iw || bottom>ih) exit 1;
     print bottom-y, right-x, y, x;
-  }')" || die 'Safari window capture dimensions do not match the viewport; ensure the window is fully displayed'
+  }')" || die 'Safari window capture does not match the viewport; Safari is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring Safari to the front and retry'
   local ch cw cy cx
   read -r ch cw cy cx <<<"$crop"
   cat >"$WORK/crop.js" <<'JS'
@@ -858,7 +858,8 @@ JS
   if [ "$OUT_SET" = 1 ]; then
     [ -n "$OUT" ] || die 'output path must not be empty'
     dir="$(dirname "$OUT")"; base="$(basename "$OUT")"
-    dir="$(cd "$dir" && pwd -P)" || die "cannot access output directory: $dir"
+    local given="$dir"
+    dir="$(cd "$dir" 2>/dev/null && pwd -P)" || die "cannot access output directory: $given"
     out="$dir/$base"
     cp "$WORK/crop.png" "$out" || die "cannot write screenshot: $out"
   else

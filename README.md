@@ -85,7 +85,9 @@ supported. Use it only when a site ignores synthetic events.
 currently displayed tab of a non-minimized window; it never activates Safari or switches tabs.
 Background tabs fail with `safari-cli: tab is not currently displayed; switch to it first
 (screenshot cannot capture background tabs)`. A selector captures its first matching element,
-clipped to the viewport; a fully offscreen element fails. Use screenshots sparingly because
+clipped to the viewport; a fully offscreen element fails. Safari must also be the active app:
+with Stage Manager on, an inactive window is captured as a thumbnail and the command fails
+with a "capture does not match the viewport" error instead of returning a wrong image. Use screenshots sparingly because
 images cost tokens; prefer text or `snapshot`.
 
 Challenge detection applies to the main frame only; cross-origin iframes are detected by
