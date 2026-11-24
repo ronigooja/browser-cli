@@ -27,28 +27,28 @@ browser-cli --browser safari|chrome <command> [options]
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
-  info [--tab T]                show page metadata and character counts
+  info [--tab T]                show page metadata, character counts and challenge state
   text [--tab T]                print page text
   links [--tab T]               print link text and absolute URLs
   html [--tab T]                print sanitized page HTML
   snapshot [--tab T] [--selector CSS] [--max-chars N]  list interactive elements
   screenshot [--tab T] [--selector CSS] [--out PATH]  capture the visible viewport or element as PNG
-  click <css>                   click the first matching element
-  fill <css> <text>             fill an input, textarea, or editable element
-  select <css> <value>          select an option by value or label
-  press <key> [--selector CSS]  send a synthetic key event
-  scroll [--selector CSS] --to top|bottom | --by N  scroll page or element
-  submit <css>                  submit a form or its owning form
+  click [--tab T] <css>         click the first matching element
+  fill [--tab T] <css> <text>   fill an input, textarea, or editable element
+  select [--tab T] <css> <value>  select an option by value or label
+  press [--tab T] <key> [--selector CSS]  send a key event
+  scroll [--tab T] [--selector CSS] --to top|bottom | --by N  scroll page or element
+  submit [--tab T] <css>        submit a form or its owning form
   wait [--tab T] <js>           poll until the expression is truthy
   wait-challenge [--tab T] [--timeout N]  wait for a challenge to clear
-  status                        probe JavaScript permission: on, off, or unknown (no window)
+  status                        probe JavaScript permission: on, off, or unknown (no window or tab)
 
 --browser safari|chrome required except for help and version
 --tab T     <window>:<tab> as printed by `tabs`, or a substring of the URL; default: front window's active tab
 --background open only: do not activate the browser, raise a window or switch tabs; launch in the background if needed
 --trusted   click, fill, or press: send real input to the foreground tab (requires Accessibility permission)
 --json      tabs only: output a JSON array
---timeout N positive integer seconds before commands give up (default 30)
+--timeout N positive integer seconds before commands give up (default 30; wait-challenge 600)
 --selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
 --out PATH  screenshot only: output PNG path (default: a new file in the system temp directory)
 --to top|bottom, --by N scroll only: choose destination or integer distance
@@ -56,7 +56,8 @@ browser-cli --browser safari|chrome <command> [options]
 --raw       html only: return unmodified outerHTML
 Enable "Allow JavaScript from Apple Events" manually in Safari > Settings > Developer or
 Chrome > View > Developer. This tool never changes that setting or restarts the browser.
-Exit status: 0 ok, 1 error (JS exception, no matching tab, timeout), 2 usage.
+No window or tab open: tabs prints nothing (exit 0), status prints unknown (exit 1), other commands fail (exit 1); open creates a window.
+Exit status: 0 ok, 1 error (JS exception, no matching tab or element, timeout, status off/unknown), 2 usage.
 EOF
 }
 
@@ -309,7 +310,7 @@ on run argv
         end if
       end repeat
     end repeat
-    if (count of windows) = 0 then
+    if (count of windows) = 0 or (count of tabs of window 1) = 0 then
       $AS_NEW_WINDOW
       return "1:1" & (ASCII character 9) & "created"
     end if
