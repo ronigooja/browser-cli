@@ -28,7 +28,7 @@ Commands behave the same on both browsers unless [Browser differences](#browser-
 | --- | --- |
 | `status` | Probe `1+1` in an existing tab: print `on`, `off`, or `unknown` (no window or tab); never open a window. |
 | `tabs [--json]` | List tabs as three TAB-separated fields: `<window>:<tab>`, title, URL. `--json` prints an array of `{window,tab,title,url,id}` objects; Chrome `id` is a string and Safari `id` is `null`. |
-| `open --foreground\|--background <url>` | Reuse a tab whose URL starts with the URL, otherwise open one; print `<window>:<tab><TAB>reused` or `<window>:<tab><TAB>created`. Exactly one mode is required. |
+| `open --foreground\|--background <url>` | Match existing tabs by URL prefix. On success, print `<window>:<tab><TAB>reused` or `<window>:<tab><TAB>created`. Exactly one mode is required; see [Options and results](#options-and-results). |
 | `close [--tab T]` | Close the selected tab. |
 | `info [--tab T]` | Print title, URL, readyState, body-text/HTML character counts, and a final `challenge: none\|cloudflare-passive\|needs-human` line. |
 | `wait-challenge [--tab T] [--timeout N]` | Wait until no challenge page is present; print `challenge: cleared`. Default timeout is 600 seconds. |
@@ -76,10 +76,11 @@ unsupported state, or `status` off/unknown), 2 usage error.
 - `--raw`: `html` only; preserve the original markup.
 - `--json`: `tabs` only; return a JSON array of objects with `window`, `tab`, `title`, `url`, and `id` (Chrome id is a string; Safari id is `null`).
 - `--to top|bottom` and `--by N`: `scroll` only, exactly one; scroll to an endpoint or by a number of pixels.
-- `--background`: `open` only. Do not activate the browser, raise a window, or switch the visible tab.
-  Existing match reports `reused`; otherwise add a tab in window 1 and report `created`,
-  restoring the previous current tab. Close only tabs reported as `created` by your own `open`.
-  Browser not running: launch it in the background. No windows: a new window is still created.
+- `--background`: `open` only. In Chrome, reuse an existing matching tab without bringing Chrome to
+  the front or selecting the tab. If Chrome is not running or no tab matches, exit 1 without
+  launching Chrome or creating a window or tab. In Safari, reuse a match without switching tabs;
+  otherwise add a tab and restore the previous selection. Safari launches in the background if
+  needed and creates a window if none has tabs.
 - `--foreground`: `open` only. Activate the browser, raise its window, and switch to the matched or
   newly created tab. `--foreground` and `--background` are mutually exclusive.
 - `--trusted`: `click`, `fill`, `press` only; see [Real input](#real-input). Incompatible with `--background`.
@@ -111,11 +112,9 @@ that need a tab fail. Two states exist:
 | --- | --- | --- |
 | `status` | prints `unknown`, exit 1 | same |
 | `tabs` | prints nothing, exit 0 (`--json` prints `[]`) | same; empty output means no tabs, not a broken tool |
-| `open --foreground\|--background <url>` | creates a window, prints `1:1<TAB>created` | same (a new window replaces the empty one) |
-| other commands | `browser-cli: no <Browser> window is open; run open --background <url> first`, exit 1 | `browser-cli: AppleScript error -1728: ...` (macOS wording, localized, no next step), exit 1 |
+| `open --foreground <url>` or Safari `open --background <url>` | creates a window, prints `1:1<TAB>created` | same (a new window replaces the empty one) |
+| other tab commands | exit 1 with a no-window error | `browser-cli: AppleScript error -1728: ...` (macOS wording, localized, no next step), exit 1 |
 | `wait`, `wait-challenge` | poll until success or timeout; `wait` timeout prints `browser-cli: timed out after Ns waiting for: ...; check the page with info before raising --timeout`; `wait-challenge` timeout reports `state: unknown` | same |
-
-For a page that needs no login, recovery in either state is `open --background <url>`, then `status`.
 
 ## Real input
 
