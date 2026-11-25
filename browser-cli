@@ -44,10 +44,11 @@ browser-cli --browser safari|chrome <command> [options]
   status                        probe JavaScript permission: on, off, or unknown (no window or tab)
 
 --browser safari|chrome required except for help and version
---tab T     <window>:<tab> as printed by `tabs`, or a substring of the URL; default: front window's active tab
+--tab T     <window>:<tab>, URL substring, or id:<chrome-tab-id> (Chrome only; see `tabs --json`)
+            default: front window's active tab
 --background open only: do not activate the browser, raise a window or switch tabs; launch in the background if needed
 --trusted   click, fill, or press: send real input to the foreground tab (requires Accessibility permission)
---json      tabs only: output a JSON array
+--json      tabs only: output a JSON array with tab IDs (null for Safari)
 --timeout N positive integer seconds before commands give up (default 30; wait-challenge 600)
 --selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
 --out PATH  screenshot only: output PNG path (default: a new file in the system temp directory)
@@ -157,6 +158,7 @@ browser_setup() {
       APP=Safari
       AS_ACTIVE_INDEX='index of current tab of window 1'
       AS_TITLE=name
+      AS_TAB_ID_JSON='"null"'
       AS_SELECT_TAB='set current tab of window w to tab t of window w'
       AS_NEW_WINDOW='make new document with properties {URL:u}'
       AS_APPEND_TAB='tell window 1
@@ -178,6 +180,7 @@ browser_setup() {
       APP='Google Chrome'
       AS_ACTIVE_INDEX='active tab index of window 1'
       AS_TITLE=title
+      AS_TAB_ID_JSON='("\"" & (id of tab t of window w as text) & "\"")'
       AS_SELECT_TAB='set active tab index of window w to t'
       AS_NEW_WINDOW='set newWindow to make new window
     set URL of active tab of newWindow to u'
@@ -196,10 +199,29 @@ browser_setup() {
   RESOLVE="$(resolve_handler)"
 }
 
-# Shared handler: resolve a tab spec to {window, tab}.
+# Shared handler: resolve a tab spec to {window index, tab index, URL substring or empty}.
 resolve_handler() {
+  local resolve_id=''
+  if [ "$BROWSER" = chrome ]; then
+    resolve_id='  considering case
+    set byID to spec starts with "id:"
+  end considering
+  if byID then
+    set wantedID to text 4 thru -1 of spec
+    tell application "Google Chrome"
+      repeat with w from 1 to count of windows
+        set tabIDs to id of every tab of window w
+        repeat with t from 1 to count of tabIDs
+          if item t of tabIDs is wantedID then return {w, t, ""}
+        end repeat
+      end repeat
+    end tell
+    my noTabMatch(spec)
+  end if'
+  fi
   cat <<AS
 on resolve(spec)
+$resolve_id
   tell application "$APP"
     if (count of windows) = 0 then error "no $APP window is open; run open <url> first"
     if spec is "" then return {1, $AS_ACTIVE_INDEX, ""}
@@ -226,8 +248,12 @@ on resolve(spec)
       end repeat
     end repeat
   end tell
-  error "no tab matches: " & spec & "; run tabs to list open tabs"
+  my noTabMatch(spec)
 end resolve
+
+on noTabMatch(spec)
+  error "no tab matches: " & spec & "; run tabs to list open tabs"
+end noTabMatch
 AS
 }
 
@@ -252,7 +278,7 @@ on run argv
         if tabTitle is missing value then set tabTitle to ""
         if jsonOutput then
           if out is not "" then set out to out & ","
-          set out to out & "{\"window\":" & w & ",\"tab\":" & t & ",\"title\":\"" & my jsonEscape(tabTitle) & "\",\"url\":\"" & my jsonEscape(u) & "\"}"
+          set out to out & "{\"window\":" & w & ",\"tab\":" & t & ",\"title\":\"" & my jsonEscape(tabTitle) & "\",\"url\":\"" & my jsonEscape(u) & "\",\"id\":" & $AS_TAB_ID_JSON & "}"
         else
           set out to out & w & ":" & t & (ASCII character 9) & my cleanField(tabTitle) & (ASCII character 9) & my cleanField(u) & linefeed
         end if
@@ -810,6 +836,9 @@ JS
     cat >"$launcher" <<'AS'
 on run argv
   set spec to item 1 of argv
+  considering case
+    set byID to spec starts with "id:"
+  end considering
   set wi to ""
   set identity to ""
   set matchedURL to false
@@ -827,8 +856,20 @@ on run argv
   set AppleScript's text item delimiters to ""
   tell application "Google Chrome"
     set windowIDs to id of every window
-    if windowIDs is {} then error "no Google Chrome window is open; run open <url> first"
-    if spec is "" then
+    if byID then
+      set identity to text 4 thru -1 of spec
+      repeat with w in windowIDs
+        set candidateWindow to contents of w
+        set tabIDs to id of every tab of window id candidateWindow
+        if tabIDs contains identity then
+          set wi to candidateWindow
+          exit repeat
+        end if
+      end repeat
+      if wi is "" then error gone
+    else if windowIDs is {} then
+      error "no Google Chrome window is open; run open <url> first"
+    else if spec is "" then
       set wi to item 1 of windowIDs
       set identity to id of active tab of window id wi
     else
@@ -1277,6 +1318,10 @@ case "$cmd" in
   tabs|open|close|eval|file|wait|wait-challenge|status|info|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
     parse "$@"
     [ -n "$BROWSER" ] || { echo 'browser-cli: --browser safari|chrome is required' >&2; exit 2; }
+    if [[ "$TAB" = id:* ]]; then
+      [ "$BROWSER" = chrome ] || { echo 'browser-cli: --tab id:<id> is only supported for chrome' >&2; exit 2; }
+      [[ "${TAB#id:}" =~ ^[0-9]+$ ]] || { echo 'browser-cli: --tab id:<id> needs a numeric tab id' >&2; exit 2; }
+    fi
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: timeout must be a positive integer' >&2; exit 2; }
     [ "$TRUSTED$BACKGROUND" != 11 ] || { echo 'browser-cli: --trusted cannot be used with --background' >&2; exit 2; }
     [ "$TRUSTED" = 0 ] || [[ "$cmd" =~ ^(click|fill|press)$ ]] || { echo 'browser-cli: --trusted only applies to click, fill, and press' >&2; exit 2; }
