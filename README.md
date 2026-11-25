@@ -63,10 +63,10 @@ unsupported state, or `status` off/unknown), 2 usage error.
 
 - `--browser safari|chrome`: required; chooses the user's browser.
 - `--tab T`: 1-based `<window>:<tab>` or a URL substring (first match across windows);
-  default is the front window's active tab. Indexes may change; prefer URL substrings.
+  default is the front window's active tab. Indexes may change.
 - `--selector CSS`: `text`, `links`, and `html` restrict output to the first matching element;
   `snapshot` filters the elements listed; `screenshot` captures the element; `press` and `scroll`
-  target the matching element. A missing match prints `browser-cli: no element matches: <css>`
+  target the matching element. A missing match prints `browser-cli: no element matches: <css>; run snapshot to list selectors`
   to stderr and exits 1.
 - `--max-chars N`: `text`, `links`, `html`, and `snapshot` default to 20000 characters. `eval` and `file`
   truncate only when this option is explicitly supplied. Truncation reports the emitted and
@@ -92,7 +92,7 @@ Errors go to stderr as `browser-cli: <message>`. AppleScript failures print
 `browser-cli: AppleScript error <code>: <message>` (`unknown` when no error code is available).
 Quotes, backslashes, and Unicode pass through a UTF-8 temporary file. Shell quoting still
 applies. Wrap statements in an immediately invoked function; first/last-line comments work.
-Evaluation is synchronous (promises are not awaited), in the page world and main frame only.
+Evaluation is synchronous (promises are not awaited), in the page world and main frame only. Some error messages end with a suggested next step.
 
 ## No window or no tab
 
@@ -108,8 +108,8 @@ that need a tab fail. Two states exist:
 | `status` | prints `unknown`, exit 1 | same |
 | `tabs` | prints nothing, exit 0 (`--json` prints `[]`) | same; empty output means no tabs, not a broken tool |
 | `open <url>` | creates a window, prints `1:1<TAB>created` | same (a new window replaces the empty one) |
-| other commands | `browser-cli: AppleScript error -2700: no <Browser> window is open`, exit 1 | `AppleScript error -1728` (localized text), exit 1 |
-| `wait`, `wait-challenge` | keep retrying; fail only at the timeout (`wait-challenge`: `state: unknown`) | same |
+| other commands | `browser-cli: no <Browser> window is open; run open <url> first`, exit 1 | same |
+| `wait`, `wait-challenge` | poll until success or timeout; `wait` timeout prints `browser-cli: timed out after Ns waiting for: ...; check the page with info before raising --timeout`; `wait-challenge` timeout reports `state: unknown` | same |
 
 Recovery in both states: run `open <url>`, then `status`.
 
@@ -119,7 +119,7 @@ Default page actions run inside the page via JavaScript, so dispatched events ar
 (`isTrusted` is false). They do not activate the browser, switch tabs, or require extra
 permissions, and work with `--background`. Some sites (including strong anti-bot and some
 payment pages) ignore synthetic events: the command reports what it dispatched, but the page may
-not react. Verify with `text`, `snapshot`, or `wait`; do not retry blindly.
+not react. The page response can be checked with `text`, `snapshot`, or `wait`.
 
 `--trusted` on `click`, `fill`, or `press` sends real OS-level input (`isTrusted=true`). It
 requires Accessibility permission, activates the selected browser, selects the tab, and raises its
@@ -131,14 +131,12 @@ example `trusted clicked button "Go"`. Details:
 - `fill` selects the existing content with Cmd+A and pastes the text, so Unicode works. It
   temporarily uses the clipboard and restores it afterwards.
 - `press` supports the named keys and printable ASCII only; use `fill` for Unicode text.
-- Use it only when a site ignores synthetic events.
-
-**Do not use the browser while a `--trusted` command runs** (it takes about a second). Before each
+Before each
 click, paste, or key it checks that the browser is frontmost and that the target window and tab are
-still the ones it selected. If you switch app, switch tab, or close the tab or window, it stops with
-`browser-cli: the target Safari tab is no longer in front; nothing more was sent` or
-`browser-cli: the target tab was closed or changed during the action; nothing more was sent`
-(exit 1). The clipboard is restored.
+still the ones it selected. If the app, tab, or window changes, it stops with
+`browser-cli: the target <Browser> tab is no longer in front; nothing more was sent; tell the user and do not retry automatically` or
+`browser-cli: the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically`
+(exit 1). Nothing more is sent and the clipboard is restored.
 
 Known gaps (input going to a neighbouring tab if the target is closed at the wrong instant):
 
@@ -158,7 +156,6 @@ Known gaps (input going to a neighbouring tab if the target is closed at the wro
 - Both: a very short window remains between the last identity check and the operating system
   delivering the event; it cannot be removed.
 
-Prefer a specific URL substring for `--tab` and avoid closing tabs while the command runs.
 
 ## Screenshots
 
@@ -166,9 +163,11 @@ Prefer a specific URL substring for `--tab` and avoid closing tabs while the com
 currently displayed tab of a non-minimized window; it never activates the browser or switches tabs.
 Background tabs fail with `browser-cli: tab is not currently displayed; switch to it first
 (screenshot cannot capture background tabs)`. A selector captures its first matching element,
-clipped to the viewport; a fully offscreen element fails with `element is outside the viewport`
-(scroll first), and a hidden element (no layout box, `visibility:hidden`, or zero opacity) fails
-with `element is not visible`.
+clipped to the viewport; a fully offscreen element fails with
+`browser-cli: element is outside the viewport; scroll to it first`, and a hidden element (no layout
+box, `visibility:hidden`, or zero opacity) fails with
+`browser-cli: element is not visible; run snapshot to check it is on screen` (also
+`browser-cli: element is not visible at its center; run snapshot to check it is on screen`).
 
 The browser must be the active app: with Stage Manager on, an inactive browser window is captured
 as a thumbnail and the command fails with a "capture does not match the viewport" error instead of
@@ -187,13 +186,13 @@ Turnstile/reCAPTCHA/hCaptcha widget or a Cloudflare block page.
 `wait-challenge` polls until the state is `none`. On `needs-human` it prints
 `browser-cli: human verification needed on <host>; waiting for you to complete it` to stderr,
 sends one macOS notification, and keeps waiting without touching the page. On timeout it prints
-`browser-cli: challenge not cleared after Ns (state: <state>)` and exits 1.
+`browser-cli: challenge not cleared after Ns (state: <state>); tell the user and do not call it again in a loop` and exits 1.
 
-**Human verification policy:** browser-cli never clicks, types into, reads, or solves CAPTCHA or
-human-verification widgets. Agents must not attempt this with `click`, `eval`, `--trusted`, or any
-other command. When `needs-human` appears, stop, tell the user, and use `wait-challenge` to resume
-after they complete it. Prefer official APIs; in the user's own test environments, use vendor
-test keys or disable the challenge.
+**Human verification behavior:** browser-cli never clicks, types into, reads, or solves CAPTCHA or
+human-verification widgets. `wait-challenge` only waits for the state to clear and sends one
+notification when human verification is needed.
+
+Other updated lookup errors include `browser-cli: no tab matches: <spec>; run tabs to list open tabs`.
 
 ## Permissions
 
