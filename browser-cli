@@ -23,7 +23,7 @@ usage() {
 browser-cli --browser safari|chrome <command> [options]
 
   tabs                          list tabs: <window>:<tab> <TAB> title <TAB> url
-  open --foreground|--background <url>  focus or create a tab; prints <window>:<tab> <TAB> reused|created
+  open --foreground|--background <url>  open or reuse a tab; prints <window>:<tab> <TAB> reused|created
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
@@ -46,7 +46,7 @@ browser-cli --browser safari|chrome <command> [options]
 --browser safari|chrome required except for help and version
 --tab T     <window>:<tab>, URL substring, or id:<chrome-tab-id> (Chrome only; see `tabs --json`)
             default: front window's active tab
---background  open only: open or reuse the target tab without bringing the browser to the front or switching the visible tab
+--background  open only: Safari opens or reuses a tab; Chrome only reuses an existing matching tab, without bringing the browser forward or switching tabs
 --foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)
 --json      tabs only: output a JSON array with tab IDs (null for Safari)
@@ -58,7 +58,7 @@ browser-cli --browser safari|chrome <command> [options]
 --raw       html only: return unmodified outerHTML
 Enable "Allow JavaScript from Apple Events" manually in Safari > Settings > Developer or
 Chrome > View > Developer. This tool never changes that setting or restarts the browser.
-No window or tab open: tabs prints nothing (exit 0), status prints unknown (exit 1), other commands fail (exit 1); open creates a window.
+No window or tab open: tabs prints nothing (exit 0), status prints unknown (exit 1), other commands fail (exit 1); open creates a window except Chrome --background, which fails.
 Exit status: 0 ok, 1 error (JS exception, no matching tab or element, timeout, status off/unknown), 2 usage.
 EOF
 }
@@ -204,7 +204,9 @@ browser_setup() {
 # Shared handler: resolve a tab spec to {window index, tab index, URL substring or empty}.
 resolve_handler() {
   local resolve_id=''
+  local no_window_hint='run open --background <url> first'
   if [ "$BROWSER" = chrome ]; then
+    no_window_hint='run open --foreground <url> or manually open the page'
     resolve_id='  considering case
     set byID to spec starts with "id:"
   end considering
@@ -225,7 +227,7 @@ resolve_handler() {
 on resolve(spec)
 $resolve_id
   tell application "$APP"
-    if (count of windows) = 0 then error "no $APP window is open; run open --background <url> first"
+    if (count of windows) = 0 then error "no $APP window is open; $no_window_hint"
     if spec is "" then return {1, $AS_ACTIVE_INDEX, ""}
   end tell
   try
@@ -327,8 +329,14 @@ AS
 
 cmd_open() {
   [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
+  local chrome_bg_error='Chrome background open requires an existing matching tab; manually open the page or run open --foreground <url>'
   if [ "$BACKGROUND" = 1 ] && ! pgrep -qx "$APP"; then
+    [ "$BROWSER" != chrome ] || die "$chrome_bg_error"
     open -g -a "$APP" || die "cannot launch $APP"
+  fi
+  local chrome_bg_guard=''
+  if [ "$BROWSER" = chrome ]; then
+    chrome_bg_guard="if bg then error \"$chrome_bg_error\""
   fi
   local f; f="$(script open <<AS
 on run argv
@@ -347,6 +355,7 @@ on run argv
         end if
       end repeat
     end repeat
+    $chrome_bg_guard
     if (count of windows) = 0 or (count of tabs of window 1) = 0 then
       $AS_NEW_WINDOW
       return "1:1" & (ASCII character 9) & "created"
@@ -870,7 +879,7 @@ on run argv
       end repeat
       if wi is "" then error gone
     else if windowIDs is {} then
-      error "no Google Chrome window is open; run open --background <url> first"
+      error "no Google Chrome window is open; run open --foreground <url> or manually open the page"
     else if spec is "" then
       set wi to item 1 of windowIDs
       set identity to id of active tab of window id wi
