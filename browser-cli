@@ -23,7 +23,7 @@ usage() {
 browser-cli --browser safari|chrome <command> [options]
 
   tabs                          list tabs: <window>:<tab> <TAB> title <TAB> url
-  open <url>                    focus or create a tab; prints <window>:<tab> <TAB> reused|created
+  open --foreground|--background <url>  focus or create a tab; prints <window>:<tab> <TAB> reused|created
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
@@ -47,6 +47,7 @@ browser-cli --browser safari|chrome <command> [options]
 --tab T     <window>:<tab>, URL substring, or id:<chrome-tab-id> (Chrome only; see `tabs --json`)
             default: front window's active tab
 --background open only: do not activate the browser, raise a window or switch tabs; launch in the background if needed
+--foreground open only: activate the browser, raise the window and switch to the tab
 --trusted   click, fill, or press: send real input to the foreground tab (requires Accessibility permission)
 --json      tabs only: output a JSON array with tab IDs (null for Safari)
 --timeout N positive integer seconds before commands give up (default 30; wait-challenge 600)
@@ -64,7 +65,7 @@ EOF
 
 # ---- option parsing: sets BROWSER, TAB, TIMEOUT and ARGS (positional) ----
 BROWSER=""
-TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; TRUSTED=0; TRUSTED_SENDING=0; JSON=0; ARGS=()
+TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; FOREGROUND=0; TRUSTED=0; TRUSTED_SENDING=0; JSON=0; ARGS=()
 SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
 TO=""; TO_SET=0; BY=""; BY_SET=0
 OUT=""; OUT_SET=0
@@ -74,6 +75,7 @@ parse() {
     case "$1" in
       --browser) [ $# -ge 2 ] || { usage >&2; exit 2; }; set_browser "$2"; shift 2 ;;
       --background) BACKGROUND=1; shift ;;
+      --foreground) FOREGROUND=1; shift ;;
       --trusted) TRUSTED=1; shift ;;
       --json) JSON=1; shift ;;
       --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
@@ -1323,9 +1325,12 @@ case "$cmd" in
       [[ "${TAB#id:}" =~ ^[0-9]+$ ]] || { echo 'browser-cli: --tab id:<id> needs a numeric tab id' >&2; exit 2; }
     fi
     [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: timeout must be a positive integer' >&2; exit 2; }
+    [ "$FOREGROUND$BACKGROUND" != 11 ] || { echo 'browser-cli: --foreground and --background cannot be used together' >&2; exit 2; }
     [ "$TRUSTED$BACKGROUND" != 11 ] || { echo 'browser-cli: --trusted cannot be used with --background' >&2; exit 2; }
     [ "$TRUSTED" = 0 ] || [[ "$cmd" =~ ^(click|fill|press)$ ]] || { echo 'browser-cli: --trusted only applies to click, fill, and press' >&2; exit 2; }
     [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'browser-cli: --background only applies to open' >&2; exit 2; }
+    [ "$FOREGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'browser-cli: --foreground only applies to open' >&2; exit 2; }
+    [ "$cmd" != open ] || [ "$FOREGROUND$BACKGROUND" != 00 ] || { echo 'browser-cli: open needs --foreground or --background' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'browser-cli: --json only applies to tabs' >&2; exit 2; }
     [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'browser-cli: --selector only applies to text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
     [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'browser-cli: --out only applies to screenshot' >&2; exit 2; }
