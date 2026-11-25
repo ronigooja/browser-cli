@@ -225,7 +225,7 @@ resolve_handler() {
 on resolve(spec)
 $resolve_id
   tell application "$APP"
-    if (count of windows) = 0 then error "no $APP window is open; run open <url> first"
+    if (count of windows) = 0 then error "no $APP window is open; run open --background <url> first"
     if spec is "" then return {1, $AS_ACTIVE_INDEX, ""}
   end tell
   try
@@ -870,7 +870,7 @@ on run argv
       end repeat
       if wi is "" then error gone
     else if windowIDs is {} then
-      error "no Google Chrome window is open; run open <url> first"
+      error "no Google Chrome window is open; run open --background <url> first"
     else if spec is "" then
       set wi to item 1 of windowIDs
       set identity to id of active tab of window id wi
