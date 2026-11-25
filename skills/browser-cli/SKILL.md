@@ -11,6 +11,7 @@ Controls the user's real Safari or Google Chrome via AppleScript. Run `browser-c
 
 - macOS only. The script ships with this skill: below, `browser-cli` means `./browser-cli`, relative to the directory containing this file (the skill base directory given when the skill loads).
 - Ask or infer which browser holds the user's logged-in session; never guess silently.
+- Chrome cannot tell which profile a window belongs to. For a Chrome login, run `tabs --json`, find a tab already on the target site, tell the user which tab you will use (title and URL, not the whole list), and continue after they confirm. If no such tab exists, ask the user to open the logged-in page themselves in the profile that has the login; do not use `open`, which creates the tab in window 1 and may target another profile. After confirmation, pin that tab with `--tab id:<id>` using its `id` from `tabs --json` for all later commands. If the id stops matching, the tab was closed or Chrome restarted; ask the user again. Safari has no tab id; use a specific URL substring.
 - Run `browser-cli --browser <safari|chrome> status` first, substituting the selected browser.
   - `on`: proceed.
   - `off`: stop and ask the user to enable Safari > Settings > Developer or Chrome > View > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password). Never change this setting, and never quit or restart the browser.
@@ -31,7 +32,7 @@ Controls the user's real Safari or Google Chrome via AppleScript. Run `browser-c
 ## Rules
 
 - When a command fails, stop and tell the user the error; do not run the same command again. If the message names a next step (for example `tabs`, `snapshot`, or `open <url>`), running that step first is allowed; after that diagnostic, report the result instead of running the original command again.
-- Select tabs by a specific URL substring; `<window>:<tab>` indexes change.
+- For Safari, select tabs by a specific URL substring because `<window>:<tab>` indexes change; for Chrome, prefer `--tab id:<id>`.
 - `eval` is synchronous: promises are not awaited. Return plain values and poll with `wait` for async results.
 - Default page actions dispatch synthetic JavaScript events (`isTrusted` is false); some sites ignore them. `--trusted` is available for `click`, `fill`, and `press`; it sends real OS-level input, activates the target browser, uses the clipboard briefly for `fill`, and requires Accessibility permission. `press --trusted` takes named keys or printable ASCII only. Tell the user before running it and ask them not to touch the browser for a few seconds. Switching app or tab, or closing the tab, aborts it with `nothing more was sent` (exit 1); do not retry automatically. A known gap is the short interval between the final identity check and OS event delivery.
 - browser-cli never clicks, types into, reads, or solves CAPTCHA/human-verification widgets. When `info` shows `challenge: needs-human`, stop, tell the user, and continue with `wait-challenge` after they complete it. `cloudflare-passive` is waited out by `wait-challenge`; `wait-challenge` defaults to 600 s. If it times out, stop and tell the user.

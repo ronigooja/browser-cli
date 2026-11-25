@@ -27,7 +27,7 @@ Commands behave the same on both browsers unless [Browser differences](#browser-
 | Command | Behavior |
 | --- | --- |
 | `status` | Probe `1+1` in an existing tab: print `on`, `off`, or `unknown` (no window or tab); never open a window. |
-| `tabs [--json]` | List tabs as three TAB-separated fields: `<window>:<tab>`, title, URL. `--json` prints an array of `{window,tab,title,url}` objects. |
+| `tabs [--json]` | List tabs as three TAB-separated fields: `<window>:<tab>`, title, URL. `--json` prints an array of `{window,tab,title,url,id}` objects; Chrome `id` is a string and Safari `id` is `null`. |
 | `open <url>` | Focus a tab whose URL starts with the URL, otherwise open one; print `<window>:<tab><TAB>reused` or `<window>:<tab><TAB>created`. |
 | `close [--tab T]` | Close the selected tab. |
 | `info [--tab T]` | Print title, URL, readyState, body-text/HTML character counts, and a final `challenge: none\|cloudflare-passive\|needs-human` line. |
@@ -55,6 +55,7 @@ unsupported state, or `status` off/unknown), 2 usage error.
 | | Safari | Chrome |
 | --- | --- | --- |
 | Setting path | Settings > Developer | View > Developer |
+| Profiles | | The AppleScript interface does not expose profiles. `--tab` URL-substring and `<window>:<tab>` matches span all profiles; `open` creates new tabs in window 1. |
 | Setting off, error text | `... Turn it on in Safari > Settings > Developer ...` | `... Enable View > Developer > Allow JavaScript from Apple Events ...` (Chrome's own text is localized; the tool matches its help URL) |
 | `screenshot` window lookup | Window id equals the system window id. | Matched by window bounds; fails if not unique. |
 | Everything else | Same commands, options, output, and exit codes. | |
@@ -62,7 +63,7 @@ unsupported state, or `status` off/unknown), 2 usage error.
 ## Options and results
 
 - `--browser safari|chrome`: required; chooses the user's browser.
-- `--tab T`: 1-based `<window>:<tab>` or a URL substring (first match across windows);
+- `--tab T`: `id:<id>` selects a Chrome tab by stable Chrome tab id (a numeric id string), or 1-based `<window>:<tab>` or a URL substring (first match across windows);
   default is the front window's active tab. Indexes may change. No match prints
   `browser-cli: AppleScript error -2700: no tab matches: <spec>; run tabs to list open tabs` and exits 1.
 - `--selector CSS`: `text`, `links`, and `html` restrict output to the first matching element;
@@ -73,7 +74,7 @@ unsupported state, or `status` off/unknown), 2 usage error.
   truncate only when this option is explicitly supplied. Truncation reports the emitted and
   total character counts to stderr and succeeds (exit 0).
 - `--raw`: `html` only; preserve the original markup.
-- `--json`: `tabs` only; return a JSON array of objects with `window`, `tab`, `title`, and `url`.
+- `--json`: `tabs` only; return a JSON array of objects with `window`, `tab`, `title`, `url`, and `id` (Chrome id is a string; Safari id is `null`).
 - `--to top|bottom` and `--by N`: `scroll` only, exactly one; scroll to an endpoint or by a number of pixels.
 - `--background`: `open` only. Do not activate the browser, raise a window, or switch the visible tab.
   Existing match reports `reused`; otherwise add a tab in window 1 and report `created`,
