@@ -138,7 +138,7 @@ osa() {
         printf 'browser-cli: %s\n' "$message" >&2
       elif [ "$TRUSTED" = 1 ] && [ "$TRUSTED_SENDING" = 1 ] && { [ "$code" = -1719 ] || [ "$code" = -1728 ]; }; then
         # The window or tab disappeared while input was being sent (macOS words this per locale).
-        printf 'browser-cli: the target tab was closed or changed during the action; nothing more was sent\n' >&2
+        printf 'browser-cli: the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically\n' >&2
       else
         printf 'browser-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
       fi
@@ -201,7 +201,7 @@ resolve_handler() {
   cat <<AS
 on resolve(spec)
   tell application "$APP"
-    if (count of windows) = 0 then error "no $APP window is open"
+    if (count of windows) = 0 then error "no $APP window is open; run open <url> first"
     if spec is "" then return {1, $AS_ACTIVE_INDEX, ""}
   end tell
   try
@@ -226,7 +226,7 @@ on resolve(spec)
       end repeat
     end repeat
   end tell
-  error "no tab matches: " & spec
+  error "no tab matches: " & spec & "; run tabs to list open tabs"
 end resolve
 AS
 }
@@ -499,7 +499,7 @@ output_read() {
   local out total limit="${MAX_CHARS:-20000}"
   out="$(cat "$WORK/read-output"; printf '.')"; out="${out%.}"
   if [ "$out" = 'browser-cli-no-match:' ]; then
-    echo "browser-cli: no element matches: $SELECTOR" >&2; return 1
+    echo "browser-cli: no element matches: $SELECTOR; run snapshot to list selectors" >&2; return 1
   fi
   out="${out#browser-cli-result:}"; total=${#out}
   if [ "$total" -gt "$limit" ]; then
@@ -602,7 +602,7 @@ function run(argv) {
   const se = Application('System Events');
   if (argv[0] === 'permission') return $.AXIsProcessTrusted() && se.uiElementsEnabled();
   const [action, windowID, tabIndex, geometry, text, appName, tabID] = argv;
-  const GONE = 'the target tab was closed or changed during the action; nothing more was sent';
+  const GONE = 'the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically';
   const codes = {Enter: 36, Escape: 53, Tab: 48, ArrowUp: 126, ArrowDown: 125,
                  ArrowLeft: 123, ArrowRight: 124, Backspace: 51, Space: 49, ' ': 49};
   const app = Application(appName);
@@ -627,7 +627,7 @@ function run(argv) {
       // The window or tab vanished while it was being read.
       throw new Error(GONE);
     }
-    throw new Error(process.frontmost() ? GONE : 'the target ' + browser + ' tab is no longer in front; nothing more was sent');
+    throw new Error(process.frontmost() ? GONE : 'the target ' + browser + ' tab is no longer in front; nothing more was sent; tell the user and do not retry automatically');
   }
 
   const win = frontWindow();
@@ -655,7 +655,7 @@ function run(argv) {
       throw new Error('could not calibrate ' + browser + ' viewport dimensions');
     const px = vx + x * scale * zoom, py = vy + y * scale * zoom;
     if (!(px >= vx && px < vx + vw && py >= vy && py < vy + vh && onScreen(px, py)))
-      throw new Error('element center is outside the visible ' + browser + ' viewport');
+      throw new Error('element center is outside the visible ' + browser + ' viewport; scroll to it first');
     const current = frontWindow();
     if (chrome) {
       const b = current.bounds();
@@ -813,7 +813,7 @@ on run argv
   set wi to ""
   set identity to ""
   set matchedURL to false
-  set gone to "the target tab was closed or changed during the action; nothing more was sent"
+  set gone to "the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically"
   set wantedWindow to 0
   set wantedTab to 0
   try
@@ -827,7 +827,7 @@ on run argv
   set AppleScript's text item delimiters to ""
   tell application "Google Chrome"
     set windowIDs to id of every window
-    if windowIDs is {} then error "no Google Chrome window is open"
+    if windowIDs is {} then error "no Google Chrome window is open; run open <url> first"
     if spec is "" then
       set wi to item 1 of windowIDs
       set identity to id of active tab of window id wi
@@ -855,7 +855,7 @@ on run argv
           end repeat
           if matchedURL then exit repeat
         end repeat
-        if not matchedURL then error "no tab matches: " & spec
+        if not matchedURL then error "no tab matches: " & spec & "; run tabs to list open tabs"
       end if
     end if
     if matchedURL then
@@ -898,7 +898,7 @@ on run argv
     if (item 3 of r) is not "" then
       set cur to URL of tab ti of window id wi
       if cur is missing value then set cur to ""
-      if cur does not contain (item 3 of r) then error "the target tab was closed or changed during the action; nothing more was sent"
+      if cur does not contain (item 3 of r) then error "the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically"
     end if
     set miniaturized of window id wi to false
     set current tab of window id wi to tab ti of window id wi
@@ -926,14 +926,14 @@ AS
           throw new Error('element is not fillable');
       }
       if (element.checkVisibility && !element.checkVisibility({checkOpacity:true, checkVisibilityCSS:true}))
-        throw new Error('element is not visible');
+        throw new Error('element is not visible; run snapshot to check it is on screen');
       element.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
       const v = visualViewport, r = element.getBoundingClientRect();
       const left = Math.max(v.offsetLeft, r.left), right = Math.min(v.offsetLeft + v.width, r.right);
       const top = Math.max(v.offsetTop, r.top), bottom = Math.min(v.offsetTop + v.height, r.bottom);
       const x = (left + right) / 2, y = (top + bottom) / 2;
       if (left >= right || top >= bottom || !element.contains(document.elementFromPoint(x, y)))
-        throw new Error('element is not visible at its center');
+        throw new Error('element is not visible at its center; run snapshot to check it is on screen');
       const point = [x - v.offsetLeft, y - v.offsetTop, screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight, v.scale];
       const tag = element.tagName.toLowerCase();
       const label = (element.innerText || element.getAttribute('aria-label') || element.value || '').trim().replace(/\s+/g,' ').slice(0,40);
@@ -946,7 +946,7 @@ JS
     else
       result="$(TAB="$tab_index" run_js "$code" "$TIMEOUT" '' "$window_id")" || return 1
     fi
-    [ "$result" != 'browser-cli-no-match:' ] || die "no element matches: $selector"
+    [ "$result" != 'browser-cli-no-match:' ] || die "no element matches: $selector; run snapshot to list selectors"
     point="${result%%$'\n'*}"
     output="${result#*$'\n'}"
   fi
@@ -985,7 +985,7 @@ cmd_action() {
       if (!element) return 'browser-cli-no-match:';
     }
     if (command === 'click') {
-      if (!element.getClientRects().length) throw new Error('element is not visible');
+      if (!element.getClientRects().length) throw new Error('element is not visible; run snapshot to check it is on screen');
       element.scrollIntoView({block:'center'});
       element.focus();
       var r = element.getBoundingClientRect(), opts = {bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2};
@@ -1038,7 +1038,7 @@ cmd_action() {
   run_js "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
   out="$(cat "$WORK/action-output"; printf '.')"; out="${out%.}"
   if [ "$out" = 'browser-cli-no-match:' ]; then
-    printf 'browser-cli: no element matches: %s\n' "$selector" >&2; return 1
+    printf 'browser-cli: no element matches: %s; run snapshot to list selectors\n' "$selector" >&2; return 1
   fi
   printf '%s' "$out"
 }
@@ -1090,9 +1090,9 @@ JS
     }
     return [w,h,d,l,t,r,b].join(' ');
   })()" "$TIMEOUT")" || return 1
-  [ "$geometry" != no-match ] || die "no element matches: $SELECTOR"
-  [ "$geometry" != hidden ] || die 'element is not visible'
-  [ "$geometry" != outside ] || die 'element is outside the viewport'
+  [ "$geometry" != no-match ] || die "no element matches: $SELECTOR; run snapshot to list selectors"
+  [ "$geometry" != hidden ] || die 'element is not visible; run snapshot to check it is on screen'
+  [ "$geometry" != outside ] || die 'element is outside the viewport; scroll to it first'
   # A nonblack pixel distinguishes an accessible image from a denied black capture.
   cat >"$WORK/image.js" <<'JS'
 ObjC.import('AppKit');
@@ -1188,7 +1188,7 @@ cmd_wait() {
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
       [ -z "$last_error" ] || printf '%s\n' "$last_error" >&2
-      die "timed out after ${TIMEOUT}s waiting for: ${ARGS[0]}"
+      die "timed out after ${TIMEOUT}s waiting for: ${ARGS[0]}; check the page with info before raising --timeout"
     fi
     if out="$(run_js "!!(
 ${ARGS[0]}
@@ -1213,7 +1213,7 @@ cmd_wait_challenge() {
   while :; do
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
-      die "challenge not cleared after ${TIMEOUT}s (state: $state)"
+      die "challenge not cleared after ${TIMEOUT}s (state: $state); tell the user and do not call it again in a loop"
     fi
     if out="$(run_js "(function(){ $CHALLENGE_JS return challengeState() + '\\n' + (location.host || location.protocol); })()" "$remaining" 2>"$WORK/challenge-error")"; then
       state="${out%%$'\n'*}"
