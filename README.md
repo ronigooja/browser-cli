@@ -55,7 +55,7 @@ unsupported state, or `status` off/unknown), 2 usage error.
 | | Safari | Chrome |
 | --- | --- | --- |
 | Setting path | Settings > Developer | View > Developer |
-| Profiles | | The AppleScript interface does not expose profiles. `--tab` URL-substring and `<window>:<tab>` matches span all profiles; `open` creates new tabs in window 1. |
+| Profiles | Not applicable. | The AppleScript interface does not expose profiles. `--tab` URL-substring and `<window>:<tab>` matches span all profiles; `open` creates new tabs in window 1. |
 | Setting off, error text | `... Turn it on in Safari > Settings > Developer ...` | `... Enable View > Developer > Allow JavaScript from Apple Events ...` (Chrome's own text is localized; the tool matches its help URL) |
 | `screenshot` window lookup | Window id equals the system window id. | Matched by window bounds; fails if not unique. |
 | Everything else | Same commands, options, output, and exit codes. | |
