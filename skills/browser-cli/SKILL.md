@@ -15,17 +15,17 @@ Controls the user's real Safari or Google Chrome via AppleScript. Run `browser-c
 - Run `browser-cli --browser <safari|chrome> status` first, substituting the selected browser.
   - `on`: proceed.
   - `off`: stop and ask the user to enable Safari > Settings > Developer or Chrome > View > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password). Never change this setting, and never quit or restart the browser.
-  - `unknown`: no window or tab is open (the browser process may be running with zero windows). For a page that needs no login, run `browser-cli --browser <safari|chrome> open <url>`, then `status` again. For a page that needs the login, ask the user to open it in the profile that has the login, then run `status` again; do not use `open`.
-- Empty `tabs` output (exit 0; `--json` gives `[]`) means there are no tabs. A command that needs a tab cannot run until a URL is opened. If a tab command fails with `AppleScript error -1728` (macOS wording, possibly localized), the window has no tab: run `open <url>` first.
+  - `unknown`: no window or tab is open (the browser process may be running with zero windows). For a page that needs no login, run `browser-cli --browser <safari|chrome> open --background <url>`, then `status` again. For a page that needs the login, ask the user to open it in the profile that has the login, then run `status` again; do not use `open`.
+- Empty `tabs` output (exit 0; `--json` gives `[]`) means there are no tabs. A command that needs a tab cannot run until a URL is opened. If a tab command fails with `AppleScript error -1728` (macOS wording, possibly localized), the window has no tab: for a page that needs no login, run `open --background <url>` first; for a login page, ask the user to open it in the appropriate profile.
 
 ## Workflow
 
-1. Use `open --background` unless the next steps need `screenshot` or `--trusted` (they need the tab in the foreground). `open` reports `reused` or `created`; close only a tab reported `created` by your own `open`.
+1. `open` requires exactly one of `--foreground` or `--background`; they are mutually exclusive and apply only to `open`. Use `open --background <url>` unless the next steps need `screenshot` or `--trusted` (they need the tab in the foreground). Background open does not activate the browser, raise a window, or switch the visible tab; foreground open activates the browser, raises its window, and switches to the matched or newly created tab. `open` reports `reused` or `created`; close only a tab reported `created` by your own `open`.
 2. `browser-cli --browser <safari|chrome> wait --tab <url-substring> '<js condition>'` until the page is ready (default timeout 30 s; `--timeout N` to change).
 3. For page reading, use `info` -> `text`/`links` -> `snapshot`, then `html`/`screenshot`/`eval`. Prefer `text`/`snapshot` over `screenshot`; use `--selector` and a small `--max-chars`.
 4. For interaction, use `snapshot` to find targets, then an action (`click`, `fill`, `select`, `press`, or `submit`), then `wait` or `text`/`snapshot` to verify the result. If the page does not react to a click or fill, try once with `--trusted` and tell the user it brings the browser to the front. Prefer `snapshot` over `html` to save tokens.
 5. Use `info` and `wait-challenge` when a page looks like a verification page. When `info` shows `challenge: needs-human`, stop, tell the user, and continue with `wait-challenge` after they complete it. `cloudflare-passive` is waited out by `wait-challenge`. `wait-challenge` defaults to 600 s; if it times out, stop and tell the user.
-6. `screenshot` needs the target tab to be the displayed tab of the active browser (it never switches tabs).
+6. `screenshot` needs the target tab to be the displayed tab of the active browser (it never switches tabs). If you opened a page for screenshot capture, use `open --foreground`.
 7. Use `browser-cli --browser <safari|chrome> eval --tab <url-substring> '<js expression>'` for custom reads. Use `file` for long scripts.
 8. `browser-cli --browser <safari|chrome> close --tab <url-substring>` only for tabs reported `created` by your own `open`. Closing the only tab of a window removes the window in Chrome and leaves an empty window in Safari; later commands then need a new `open` (or a user-opened page, for a login).
 

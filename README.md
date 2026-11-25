@@ -28,7 +28,7 @@ Commands behave the same on both browsers unless [Browser differences](#browser-
 | --- | --- |
 | `status` | Probe `1+1` in an existing tab: print `on`, `off`, or `unknown` (no window or tab); never open a window. |
 | `tabs [--json]` | List tabs as three TAB-separated fields: `<window>:<tab>`, title, URL. `--json` prints an array of `{window,tab,title,url,id}` objects; Chrome `id` is a string and Safari `id` is `null`. |
-| `open <url>` | Focus a tab whose URL starts with the URL, otherwise open one; print `<window>:<tab><TAB>reused` or `<window>:<tab><TAB>created`. |
+| `open --foreground|--background <url>` | Focus a tab whose URL starts with the URL, otherwise open one; print `<window>:<tab><TAB>reused` or `<window>:<tab><TAB>created`. Exactly one mode is required. |
 | `close [--tab T]` | Close the selected tab. |
 | `info [--tab T]` | Print title, URL, readyState, body-text/HTML character counts, and a final `challenge: none\|cloudflare-passive\|needs-human` line. |
 | `wait-challenge [--tab T] [--timeout N]` | Wait until no challenge page is present; print `challenge: cleared`. Default timeout is 600 seconds. |
@@ -80,6 +80,9 @@ unsupported state, or `status` off/unknown), 2 usage error.
   Existing match reports `reused`; otherwise add a tab in window 1 and report `created`,
   restoring the previous current tab. Close only tabs reported as `created` by your own `open`.
   Browser not running: launch it in the background. No windows: a new window is still created.
+- `--foreground`: `open` only. Activate the browser, raise its window, and switch to the matched or
+  newly created tab. Use this when the next step needs a visible tab, such as `screenshot` or `--trusted`.
+  `--foreground` and `--background` are mutually exclusive.
 - `--trusted`: `click`, `fill`, `press` only; see [Real input](#real-input). Incompatible with `--background`.
 - `--timeout N`: positive integer seconds for a command, default 30; wait polls share one deadline.
   `wait-challenge` defaults to 600 seconds.
@@ -109,11 +112,11 @@ that need a tab fail. Two states exist:
 | --- | --- | --- |
 | `status` | prints `unknown`, exit 1 | same |
 | `tabs` | prints nothing, exit 0 (`--json` prints `[]`) | same; empty output means no tabs, not a broken tool |
-| `open <url>` | creates a window, prints `1:1<TAB>created` | same (a new window replaces the empty one) |
-| other commands | `browser-cli: no <Browser> window is open; run open <url> first`, exit 1 | `browser-cli: AppleScript error -1728: ...` (macOS wording, localized, no next step), exit 1 |
+| `open --foreground|--background <url>` | creates a window, prints `1:1<TAB>created` | same (a new window replaces the empty one) |
+| other commands | `browser-cli: no <Browser> window is open; run open --background <url> first`, exit 1 | `browser-cli: AppleScript error -1728: ...` (macOS wording, localized, no next step), exit 1 |
 | `wait`, `wait-challenge` | poll until success or timeout; `wait` timeout prints `browser-cli: timed out after Ns waiting for: ...; check the page with info before raising --timeout`; `wait-challenge` timeout reports `state: unknown` | same |
 
-Recovery in both states: run `open <url>`, then `status`.
+Recovery in both states: run `open --background <url>`, then `status`.
 
 ## Real input
 
@@ -209,7 +212,7 @@ Permissions are per application: a different terminal or host program needs its 
 
 ```sh
 browser-cli --browser safari status
-browser-cli --browser safari open --background https://example.com/
+browser-cli --browser safari open --foreground https://example.com/
 browser-cli --browser safari wait --timeout 20 --tab example.com 'document.querySelector("h1") !== null'
 browser-cli --browser safari eval --tab example.com '({url: location.href, title: document.title})'
 browser-cli --browser chrome info --tab example.com
