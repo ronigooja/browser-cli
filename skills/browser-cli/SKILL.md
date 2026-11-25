@@ -15,7 +15,7 @@ Controls the user's real Safari or Google Chrome via AppleScript. Run `browser-c
   - `on`: proceed.
   - `off`: stop and ask the user to enable Safari > Settings > Developer or Chrome > View > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password). Never change this setting, and never quit or restart the browser.
   - `unknown`: no window or tab is open (the browser process may be running with zero windows). Run `browser-cli --browser <safari|chrome> open <url>`, then `status` again.
-- Empty `tabs` output (exit 0; `--json` gives `[]`) means there are no tabs. A command that needs a tab cannot run until a URL is opened.
+- Empty `tabs` output (exit 0; `--json` gives `[]`) means there are no tabs. A command that needs a tab cannot run until a URL is opened. If a tab command fails with `AppleScript error -1728` (macOS wording, possibly localized), the window has no tab: run `open <url>` first.
 
 ## Workflow
 

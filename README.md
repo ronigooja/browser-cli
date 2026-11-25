@@ -63,7 +63,8 @@ unsupported state, or `status` off/unknown), 2 usage error.
 
 - `--browser safari|chrome`: required; chooses the user's browser.
 - `--tab T`: 1-based `<window>:<tab>` or a URL substring (first match across windows);
-  default is the front window's active tab. Indexes may change.
+  default is the front window's active tab. Indexes may change. No match prints
+  `browser-cli: AppleScript error -2700: no tab matches: <spec>; run tabs to list open tabs` and exits 1.
 - `--selector CSS`: `text`, `links`, and `html` restrict output to the first matching element;
   `snapshot` filters the elements listed; `screenshot` captures the element; `press` and `scroll`
   target the matching element. A missing match prints `browser-cli: no element matches: <css>; run snapshot to list selectors`
@@ -108,7 +109,7 @@ that need a tab fail. Two states exist:
 | `status` | prints `unknown`, exit 1 | same |
 | `tabs` | prints nothing, exit 0 (`--json` prints `[]`) | same; empty output means no tabs, not a broken tool |
 | `open <url>` | creates a window, prints `1:1<TAB>created` | same (a new window replaces the empty one) |
-| other commands | `browser-cli: no <Browser> window is open; run open <url> first`, exit 1 | same |
+| other commands | `browser-cli: no <Browser> window is open; run open <url> first`, exit 1 | `browser-cli: AppleScript error -1728: ...` (macOS wording, localized, no next step), exit 1 |
 | `wait`, `wait-challenge` | poll until success or timeout; `wait` timeout prints `browser-cli: timed out after Ns waiting for: ...; check the page with info before raising --timeout`; `wait-challenge` timeout reports `state: unknown` | same |
 
 Recovery in both states: run `open <url>`, then `status`.
@@ -131,8 +132,8 @@ example `trusted clicked button "Go"`. Details:
 - `fill` selects the existing content with Cmd+A and pastes the text, so Unicode works. It
   temporarily uses the clipboard and restores it afterwards.
 - `press` supports the named keys and printable ASCII only; use `fill` for Unicode text.
-Before each
-click, paste, or key it checks that the browser is frontmost and that the target window and tab are
+
+Before each click, paste, or key it checks that the browser is frontmost and that the target window and tab are
 still the ones it selected. If the app, tab, or window changes, it stops with
 `browser-cli: the target <Browser> tab is no longer in front; nothing more was sent; tell the user and do not retry automatically` or
 `browser-cli: the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically`
@@ -155,7 +156,6 @@ Known gaps (input going to a neighbouring tab if the target is closed at the wro
   there, so this rests on reading it, not on a test), and `--tab` given as an index or omitted.
 - Both: a very short window remains between the last identity check and the operating system
   delivering the event; it cannot be removed.
-
 
 ## Screenshots
 
@@ -191,8 +191,6 @@ sends one macOS notification, and keeps waiting without touching the page. On ti
 **Human verification behavior:** browser-cli never clicks, types into, reads, or solves CAPTCHA or
 human-verification widgets. `wait-challenge` only waits for the state to clear and sends one
 notification when human verification is needed.
-
-Other updated lookup errors include `browser-cli: no tab matches: <spec>; run tabs to list open tabs`.
 
 ## Permissions
 
