@@ -10,7 +10,7 @@ Controls the user's real Safari or Google Chrome via AppleScript. Run `browser-c
 ## Preconditions
 
 - macOS only. The script ships with this skill: below, `browser-cli` means `./browser-cli`, relative to the directory containing this file (the skill base directory given when the skill loads).
-- Ask or infer which browser holds the user's logged-in session; never guess silently.
+- Ask the user which browser holds the logged-in session; do not infer it.
 - Chrome cannot tell which profile a window belongs to. For a Chrome login, run `tabs --json`, find a tab already on the target site, tell the user which tab you will use (title and URL, not the whole list), and continue after they confirm. If no such tab exists, ask the user to open the logged-in page themselves in the profile that has the login; do not use `open`, which creates the tab in window 1 and may target another profile. After confirmation, pin that tab with `--tab id:<id>` using its `id` from `tabs --json` for all later commands. If the id stops matching, the tab was closed or Chrome restarted; ask the user again. Safari has no tab id; use a specific URL substring.
 - Run `browser-cli --browser <safari|chrome> status` first, substituting the selected browser.
   - `on`: proceed.
