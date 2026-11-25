@@ -48,7 +48,7 @@ browser-cli --browser safari|chrome <command> [options]
             default: front window's active tab
 --background  open only: open or reuse the target tab without bringing the browser to the front or switching the visible tab
 --foreground  open only: bring the browser to the front and select the target tab
---trusted   click, fill, or press: send real input to the foreground tab (requires Accessibility permission)
+--trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)
 --json      tabs only: output a JSON array with tab IDs (null for Safari)
 --timeout N positive integer seconds before commands give up (default 30; wait-challenge 600)
 --selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
