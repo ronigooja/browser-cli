@@ -46,8 +46,8 @@ browser-cli --browser safari|chrome <command> [options]
 --browser safari|chrome required except for help and version
 --tab T     <window>:<tab>, URL substring, or id:<chrome-tab-id> (Chrome only; see `tabs --json`)
             default: front window's active tab
---background open only: do not activate the browser, raise a window or switch tabs; launch in the background if needed
---foreground open only: activate the browser, raise the window and switch to the tab
+--background  open only: open or reuse the target tab without bringing the browser to the front or switching the visible tab
+--foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: send real input to the foreground tab (requires Accessibility permission)
 --json      tabs only: output a JSON array with tab IDs (null for Safari)
 --timeout N positive integer seconds before commands give up (default 30; wait-challenge 600)
