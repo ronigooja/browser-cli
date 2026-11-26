@@ -17,49 +17,62 @@ cleanup() {
 trap cleanup EXIT
 
 die() { echo "browser-cli: $*" >&2; exit 1; }
+usage_error() { printf 'browser-cli: %s; see browser-cli help\n' "$*" >&2; exit 2; }
 
 usage() {
   cat <<'EOF'
 browser-cli --browser safari|chrome <command> [options]
+browser-cli help | version
 
-  tabs                          list tabs: <window>:<tab> <TAB> title <TAB> url
-  open --foreground|--background <url>  open or reuse a tab; prints <window>:<tab> <TAB> reused|created
+  tabs [--json]                 list tabs: <window>:<tab> <TAB> title <TAB> url
+  open (--foreground | --background) <url>
+                                match a URL prefix or open a page; prints <window>:<tab> <TAB> reused|created
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
-  info [--tab T]                show page metadata, character counts and challenge state
+  info [--tab T]                print page metadata and challenge: none|cloudflare-passive|needs-human
   text [--tab T]                print page text
-  links [--tab T]               print link text and absolute URLs
+  links [--tab T]               print link text and absolute URL, tab-separated, one per line
   html [--tab T]                print sanitized page HTML
-  snapshot [--tab T] [--selector CSS] [--max-chars N]  list interactive elements
-  screenshot [--tab T] [--selector CSS] [--out PATH]  capture the visible viewport or element as PNG
+  snapshot [--tab T] [--selector CSS] [--max-chars N]
+                                list visible controls with index, tag/role, label and CSS selector
+  screenshot [--tab T] [--selector CSS] [--out PATH]
+                                save a PNG and print its path; target must already be visible
   click [--tab T] <css>         click the first matching element
   fill [--tab T] <css> <text>   fill an input, textarea, or editable element
   select [--tab T] <css> <value>  select an option by value or label
-  press [--tab T] <key> [--selector CSS]  send a key event
-  scroll [--tab T] [--selector CSS] --to top|bottom | --by N  scroll page or element
+  press [--tab T] <key> [--selector CSS]
+                                send Enter, Escape, Tab, arrow keys, Backspace, Space or one character
+  scroll [--tab T] [--selector CSS] (--to top|bottom | --by N)  scroll page or element
   submit [--tab T] <css>        submit a form or its owning form
-  wait [--tab T] <js>           poll until the expression is truthy
-  wait-challenge [--tab T] [--timeout N]  wait for a challenge to clear
-  status                        probe JavaScript permission: on, off, or unknown (no window or tab)
+  wait [--tab T] <js>           poll until the expression is truthy; no output on success
+  wait-challenge [--tab T] [--timeout N]
+                                wait without interacting; prints challenge: cleared on success
+  status                        print on (exit 0), off (permission disabled, exit 1),
+                                or unknown (no tab to probe, exit 1)
 
 --browser safari|chrome required except for help and version
 --tab T     <window>:<tab>, URL substring, or id:<chrome-tab-id> (Chrome only; see `tabs --json`)
+            indexes are 1-based; URL substrings select the first match across windows
             default: front window's active tab
---background  open only: Safari opens or reuses a tab; Chrome only reuses an existing matching tab, without bringing the browser forward or switching tabs
+--background  open only: Safari opens or reuses a tab without bringing Safari to the front;
+              Chrome only reuses an existing URL-prefix match without bringing Chrome to the front
+              or selecting the tab. No match: fail without launching Chrome or creating anything.
 --foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)
---json      tabs only: output a JSON array with tab IDs (null for Safari)
+--json      tabs only: array of {window,tab,title,url,id}; id is a string in Chrome, null in Safari
 --timeout N positive integer seconds before commands give up (default 30; wait-challenge 600)
 --selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
---out PATH  screenshot only: output PNG path (default: a new file in the system temp directory)
+--out PATH  screenshot only: PNG destination (default: a new file in the system temp directory)
 --to top|bottom, --by N scroll only: choose destination or integer distance
---max-chars N limit output characters for text, links, html, snapshot, eval, or file
+--max-chars N limit output characters (default 20000 for text, links, html and snapshot;
+              no limit for eval and file unless specified)
 --raw       html only: return unmodified outerHTML
-Enable "Allow JavaScript from Apple Events" manually in Safari > Settings > Developer or
-Chrome > View > Developer. This tool never changes that setting or restarts the browser.
-No window or tab open: tabs prints nothing (exit 0), status prints unknown (exit 1), other commands fail (exit 1); open creates a window except Chrome --background, which fails.
-Exit status: 0 ok, 1 error (JS exception, no matching tab or element, timeout, status off/unknown), 2 usage.
+--          end option parsing
+With no tabs, tabs succeeds with empty output (or [] with --json).
+eval and file are synchronous; promises are not awaited.
+Exit status: 0 success, 1 operation failed or status off/unknown, 2 invalid usage.
+Results go to stdout; diagnostics go to stderr.
 EOF
 }
 
@@ -73,21 +86,21 @@ parse() {
   ARGS=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --browser) [ $# -ge 2 ] || { usage >&2; exit 2; }; set_browser "$2"; shift 2 ;;
+      --browser) [ $# -ge 2 ] || usage_error '--browser requires a value'; set_browser "$2"; shift 2 ;;
       --background) BACKGROUND=1; shift ;;
       --foreground) FOREGROUND=1; shift ;;
       --trusted) TRUSTED=1; shift ;;
       --json) JSON=1; shift ;;
-      --tab) [ $# -ge 2 ] || { usage >&2; exit 2; }; TAB="$2"; shift 2 ;;
-      --timeout) [ $# -ge 2 ] || { usage >&2; exit 2; }; TIMEOUT="$2"; TIMEOUT_SET=1; shift 2 ;;
-      --selector) [ $# -ge 2 ] || { usage >&2; exit 2; }; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
-      --out) [ $# -ge 2 ] || { usage >&2; exit 2; }; OUT="$2"; OUT_SET=1; shift 2 ;;
-      --to) [ $# -ge 2 ] || { usage >&2; exit 2; }; TO="$2"; TO_SET=1; shift 2 ;;
-      --by) [ $# -ge 2 ] || { usage >&2; exit 2; }; BY="$2"; BY_SET=1; shift 2 ;;
-      --max-chars) [ $# -ge 2 ] || { usage >&2; exit 2; }; MAX_CHARS="$2"; MAX_CHARS_SET=1; shift 2 ;;
+      --tab) [ $# -ge 2 ] || usage_error '--tab requires a value'; TAB="$2"; shift 2 ;;
+      --timeout) [ $# -ge 2 ] || usage_error '--timeout requires a value'; TIMEOUT="$2"; TIMEOUT_SET=1; shift 2 ;;
+      --selector) [ $# -ge 2 ] || usage_error '--selector requires a value'; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
+      --out) [ $# -ge 2 ] || usage_error '--out requires a value'; OUT="$2"; OUT_SET=1; shift 2 ;;
+      --to) [ $# -ge 2 ] || usage_error '--to requires a value'; TO="$2"; TO_SET=1; shift 2 ;;
+      --by) [ $# -ge 2 ] || usage_error '--by requires a value'; BY="$2"; BY_SET=1; shift 2 ;;
+      --max-chars) [ $# -ge 2 ] || usage_error '--max-chars requires a value'; MAX_CHARS="$2"; MAX_CHARS_SET=1; shift 2 ;;
       --raw) RAW=1; shift ;;
       --) shift; ARGS+=("$@"); break ;;
-      --*) usage >&2; exit 2 ;;
+      --*) usage_error "unknown option: $1" ;;
       *) ARGS+=("$1"); shift ;;
     esac
   done
@@ -141,7 +154,7 @@ osa() {
         printf 'browser-cli: %s\n' "$message" >&2
       elif [ "$TRUSTED" = 1 ] && [ "$TRUSTED_SENDING" = 1 ] && { [ "$code" = -1719 ] || [ "$code" = -1728 ]; }; then
         # The window or tab disappeared while input was being sent (macOS words this per locale).
-        printf 'browser-cli: the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically\n' >&2
+        printf 'browser-cli: the target tab was closed or changed during the action; nothing more was sent\n' >&2
       else
         printf 'browser-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
       fi
@@ -176,7 +189,7 @@ browser_setup() {
       AS_WINDOW_ID='((item 3 of argv) as integer)'
       AS_SCREENSHOT_DISPLAYED='miniaturized of w or (index of current tab of w) is not (item 2 of r)'
       JS_PERMISSION_ERROR='Allow JavaScript from Apple Events'
-      JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off. Turn it on in Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password), then retry.'
+      JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off. Turn it on in Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password).'
       ;;
     chrome)
       APP='Google Chrome'
@@ -195,7 +208,7 @@ browser_setup() {
       AS_SCREENSHOT_DISPLAYED='minimized of w or (active tab index of w) is not (item 2 of r)'
       # Chrome localizes the error text, but embeds the same help URL.
       JS_PERMISSION_ERROR='Allow JavaScript from Apple Events|support\.google\.com/chrome/\?p=applescript'
-      JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off in Chrome. Enable View > Developer > Allow JavaScript from Apple Events, then retry.'
+      JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off in Chrome. Enable View > Developer > Allow JavaScript from Apple Events.'
       ;;
   esac
   RESOLVE="$(resolve_handler)"
@@ -204,9 +217,7 @@ browser_setup() {
 # Shared handler: resolve a tab spec to {window index, tab index, URL substring or empty}.
 resolve_handler() {
   local resolve_id=''
-  local no_window_hint='run open --background <url> first'
   if [ "$BROWSER" = chrome ]; then
-    no_window_hint='run open --foreground <url> or manually open the page'
     resolve_id='  considering case
     set byID to spec starts with "id:"
   end considering
@@ -227,7 +238,7 @@ resolve_handler() {
 on resolve(spec)
 $resolve_id
   tell application "$APP"
-    if (count of windows) = 0 then error "no $APP window is open; $no_window_hint"
+    if (count of windows) = 0 then error "no $APP window is open; open the target page in $APP first"
     if spec is "" then return {1, $AS_ACTIVE_INDEX, ""}
   end tell
   try
@@ -268,7 +279,7 @@ as_js() {
 }
 
 cmd_tabs() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 0 ] || usage_error 'tabs takes no positional arguments'
   local f; f="$(script tabs <<AS
 on run argv
   set jsonOutput to item 1 of argv is "1"
@@ -328,8 +339,8 @@ AS
 }
 
 cmd_open() {
-  [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
-  local chrome_bg_error='Chrome background open requires an existing matching tab; manually open the page or run open --foreground <url>'
+  [ ${#ARGS[@]} -eq 1 ] || usage_error 'open requires exactly one URL'
+  local chrome_bg_error='no Chrome tab matches the requested URL prefix; open the target page in the intended Chrome profile first'
   if [ "$BACKGROUND" = 1 ] && ! pgrep -qx "$APP"; then
     [ "$BROWSER" != chrome ] || die "$chrome_bg_error"
     open -g -a "$APP" || die "cannot launch $APP"
@@ -370,7 +381,7 @@ AS
 }
 
 cmd_close() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 0 ] || usage_error 'close takes no positional arguments; use --tab to select a tab'
   local f; f="$(script close <<AS
 on run argv
   set r to resolve(item 1 of argv)
@@ -445,12 +456,12 @@ AS
 }
 
 cmd_eval() {
-  [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 1 ] || usage_error 'eval requires one JavaScript expression'
   output_js "${ARGS[0]}" "$MAX_CHARS"
 }
 
 cmd_file() {
-  [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 1 ] || usage_error 'file requires one JavaScript file path'
   [ -r "${ARGS[0]}" ] || die "cannot read ${ARGS[0]}"
   local code
   code="$(cat "${ARGS[0]}"; printf '.')"
@@ -494,13 +505,13 @@ CHALLENGE_JS='function challengeState() {
 }'
 
 cmd_info() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 0 ] || usage_error 'info takes no positional arguments'
   run_js "(function(){ $CHALLENGE_JS
     return \"title: \" + document.title + \"\\nurl: \" + location.href + \"\\nreadyState: \" + document.readyState + \"\\ninnerText characters: \" + (document.body ? document.body.innerText.length : 0) + \"\\nouterHTML characters: \" + (document.documentElement ? document.documentElement.outerHTML.length : 0) + \"\\nchallenge: \" + challengeState() + \"\\n\"; })()" "$TIMEOUT"
 }
 
 cmd_read() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 0 ] || usage_error "$cmd takes no positional arguments; use --selector to scope the result"
   local selector code
   js_string "$SELECTOR"; selector="$JS_STRING"
   code="(function(){
@@ -536,7 +547,7 @@ output_read() {
   local out total limit="${MAX_CHARS:-20000}"
   out="$(cat "$WORK/read-output"; printf '.')"; out="${out%.}"
   if [ "$out" = 'browser-cli-no-match:' ]; then
-    echo "browser-cli: no element matches: $SELECTOR; run snapshot to list selectors" >&2; return 1
+    echo "browser-cli: no element matches: $SELECTOR; check the selector against the current page" >&2; return 1
   fi
   out="${out#browser-cli-result:}"; total=${#out}
   if [ "$total" -gt "$limit" ]; then
@@ -549,7 +560,7 @@ output_read() {
 }
 
 cmd_snapshot() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 0 ] || usage_error 'snapshot takes no positional arguments; use --selector to scope the result'
   local selector="$SELECTOR" code
   selector="${selector//\\/\\\\}"
   selector="${selector//\"/\\\"}"
@@ -639,7 +650,7 @@ function run(argv) {
   const se = Application('System Events');
   if (argv[0] === 'permission') return $.AXIsProcessTrusted() && se.uiElementsEnabled();
   const [action, windowID, tabIndex, geometry, text, appName, tabID] = argv;
-  const GONE = 'the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically';
+  const GONE = 'the target tab was closed or changed during the action; nothing more was sent';
   const codes = {Enter: 36, Escape: 53, Tab: 48, ArrowUp: 126, ArrowDown: 125,
                  ArrowLeft: 123, ArrowRight: 124, Backspace: 51, Space: 49, ' ': 49};
   const app = Application(appName);
@@ -664,7 +675,7 @@ function run(argv) {
       // The window or tab vanished while it was being read.
       throw new Error(GONE);
     }
-    throw new Error(process.frontmost() ? GONE : 'the target ' + browser + ' tab is no longer in front; nothing more was sent; tell the user and do not retry automatically');
+    throw new Error(process.frontmost() ? GONE : 'the target ' + browser + ' tab is no longer in front; nothing more was sent');
   }
 
   const win = frontWindow();
@@ -853,7 +864,7 @@ on run argv
   set wi to ""
   set identity to ""
   set matchedURL to false
-  set gone to "the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically"
+  set gone to "the target tab was closed or changed during the action; nothing more was sent"
   set wantedWindow to 0
   set wantedTab to 0
   try
@@ -879,7 +890,7 @@ on run argv
       end repeat
       if wi is "" then error gone
     else if windowIDs is {} then
-      error "no Google Chrome window is open; run open --foreground <url> or manually open the page"
+      error "no Google Chrome window is open; open the target page in Google Chrome first"
     else if spec is "" then
       set wi to item 1 of windowIDs
       set identity to id of active tab of window id wi
@@ -950,7 +961,7 @@ on run argv
     if (item 3 of r) is not "" then
       set cur to URL of tab ti of window id wi
       if cur is missing value then set cur to ""
-      if cur does not contain (item 3 of r) then error "the target tab was closed or changed during the action; nothing more was sent; tell the user and do not retry automatically"
+      if cur does not contain (item 3 of r) then error "the target tab was closed or changed during the action; nothing more was sent"
     end if
     set miniaturized of window id wi to false
     set current tab of window id wi to tab ti of window id wi
@@ -978,14 +989,14 @@ AS
           throw new Error('element is not fillable');
       }
       if (element.checkVisibility && !element.checkVisibility({checkOpacity:true, checkVisibilityCSS:true}))
-        throw new Error('element is not visible; run snapshot to check it is on screen');
+        throw new Error('element is not visible');
       element.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
       const v = visualViewport, r = element.getBoundingClientRect();
       const left = Math.max(v.offsetLeft, r.left), right = Math.min(v.offsetLeft + v.width, r.right);
       const top = Math.max(v.offsetTop, r.top), bottom = Math.min(v.offsetTop + v.height, r.bottom);
       const x = (left + right) / 2, y = (top + bottom) / 2;
       if (left >= right || top >= bottom || !element.contains(document.elementFromPoint(x, y)))
-        throw new Error('element is not visible at its center; run snapshot to check it is on screen');
+        throw new Error('element is not visible at its center');
       const point = [x - v.offsetLeft, y - v.offsetTop, screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight, v.scale];
       const tag = element.tagName.toLowerCase();
       const label = (element.innerText || element.getAttribute('aria-label') || element.value || '').trim().replace(/\s+/g,' ').slice(0,40);
@@ -998,7 +1009,7 @@ JS
     else
       result="$(TAB="$tab_index" run_js "$code" "$TIMEOUT" '' "$window_id")" || return 1
     fi
-    [ "$result" != 'browser-cli-no-match:' ] || die "no element matches: $selector; run snapshot to list selectors"
+    [ "$result" != 'browser-cli-no-match:' ] || die "no element matches: $selector; use snapshot to inspect visible controls"
     point="${result%%$'\n'*}"
     output="${result#*$'\n'}"
   fi
@@ -1012,9 +1023,11 @@ JS
 
 cmd_action() {
   case "$cmd" in
-    click|submit|press) [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; } ;;
-    fill|select) [ ${#ARGS[@]} -eq 2 ] || { usage >&2; exit 2; } ;;
-    scroll) [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; } ;;
+    click|submit) [ ${#ARGS[@]} -eq 1 ] || usage_error "$cmd requires one CSS selector" ;;
+    press) [ ${#ARGS[@]} -eq 1 ] || usage_error 'press requires one key' ;;
+    fill) [ ${#ARGS[@]} -eq 2 ] || usage_error 'fill requires a CSS selector and text' ;;
+    select) [ ${#ARGS[@]} -eq 2 ] || usage_error 'select requires a CSS selector and a value' ;;
+    scroll) [ ${#ARGS[@]} -eq 0 ] || usage_error 'scroll takes no positional arguments; use --to or --by' ;;
   esac
   local selector="" arg="" sel_js arg_js code out
   case "$cmd" in
@@ -1037,7 +1050,7 @@ cmd_action() {
       if (!element) return 'browser-cli-no-match:';
     }
     if (command === 'click') {
-      if (!element.getClientRects().length) throw new Error('element is not visible; run snapshot to check it is on screen');
+      if (!element.getClientRects().length) throw new Error('element is not visible');
       element.scrollIntoView({block:'center'});
       element.focus();
       var r = element.getBoundingClientRect(), opts = {bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2};
@@ -1090,13 +1103,13 @@ cmd_action() {
   run_js "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
   out="$(cat "$WORK/action-output"; printf '.')"; out="${out%.}"
   if [ "$out" = 'browser-cli-no-match:' ]; then
-    printf 'browser-cli: no element matches: %s; run snapshot to list selectors\n' "$selector" >&2; return 1
+    printf 'browser-cli: no element matches: %s; use snapshot to inspect visible controls\n' "$selector" >&2; return 1
   fi
   printf '%s' "$out"
 }
 
 cmd_screenshot() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 0 ] || usage_error 'screenshot takes no positional arguments; use --out to set the output path'
   local f window selector geometry width height crop out dir base
   f="$(script screenshot-window <<AS
 on run argv
@@ -1114,7 +1127,7 @@ end run
 $RESOLVE
 AS
 )"
-  local not_active="$APP window capture does not match the viewport; $APP is probably not the active app (Stage Manager captures inactive windows as thumbnails). Bring $APP to the front and retry"
+  local not_active="$APP window capture does not match the viewport; screenshot requires the target tab to be visible in the active browser"
   cat >"$WORK/window.js" <<'JS'
 ObjC.import('CoreGraphics'); ObjC.import('Foundation');
 function run(a) {
@@ -1142,8 +1155,8 @@ JS
     }
     return [w,h,d,l,t,r,b].join(' ');
   })()" "$TIMEOUT")" || return 1
-  [ "$geometry" != no-match ] || die "no element matches: $SELECTOR; run snapshot to list selectors"
-  [ "$geometry" != hidden ] || die 'element is not visible; run snapshot to check it is on screen'
+  [ "$geometry" != no-match ] || die "no element matches: $SELECTOR; check the selector against the current page"
+  [ "$geometry" != hidden ] || die 'element is not visible'
   [ "$geometry" != outside ] || die 'element is outside the viewport; scroll to it first'
   # A nonblack pixel distinguishes an accessible image from a denied black capture.
   cat >"$WORK/image.js" <<'JS'
@@ -1169,11 +1182,11 @@ JS
     window_id=""
     if [ "$BROWSER" = chrome ]; then
       bounds="$(osa "$TIMEOUT" "$f" "$TAB")" || return 1
-      [ "$bounds" != not-displayed ] || die 'tab is not currently displayed; switch to it first (screenshot cannot capture background tabs)'
+      [ "$bounds" != not-displayed ] || die 'target tab is not displayed; screenshot requires a visible tab in the active browser'
       window_id="$(osascript -l JavaScript "$WORK/window.js" "$bounds" 2>/dev/null)" || window_id=""
     elif [ "$attempt" = 0 ]; then
       window="$(osa "$TIMEOUT" "$f" "$TAB")" || return 1
-      [ "$window" != not-displayed ] || die 'tab is not currently displayed; switch to it first (screenshot cannot capture background tabs)'
+      [ "$window" != not-displayed ] || die 'target tab is not displayed; screenshot requires a visible tab in the active browser'
       window_id="$window"
     else
       window_id="$window"
@@ -1234,7 +1247,7 @@ JS
 }
 
 cmd_wait() {
-  [ ${#ARGS[@]} -eq 1 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 1 ] || usage_error 'wait requires one JavaScript condition'
   local deadline=$((SECONDS + TIMEOUT)) out remaining last_error=""
   while :; do
     remaining=$((deadline - SECONDS))
@@ -1259,13 +1272,13 @@ ${ARGS[0]}
 }
 
 cmd_wait_challenge() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
+  [ ${#ARGS[@]} -eq 0 ] || usage_error 'wait-challenge takes no positional arguments'
   [ "$TIMEOUT_SET" = 1 ] || TIMEOUT=600
   local deadline=$((SECONDS + TIMEOUT)) remaining out state=unknown host notified=0
   while :; do
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
-      die "challenge not cleared after ${TIMEOUT}s (state: $state); tell the user and do not call it again in a loop"
+      die "challenge not cleared after ${TIMEOUT}s (state: $state)"
     fi
     if out="$(run_js "(function(){ $CHALLENGE_JS return challengeState() + '\\n' + (location.host || location.protocol); })()" "$remaining" 2>"$WORK/challenge-error")"; then
       state="${out%%$'\n'*}"
@@ -1289,8 +1302,8 @@ cmd_wait_challenge() {
 }
 
 cmd_status() {
-  [ ${#ARGS[@]} -eq 0 ] || { usage >&2; exit 2; }
-  local f
+  [ ${#ARGS[@]} -eq 0 ] || usage_error 'status takes no positional arguments'
+  local f state
   f="$(script status <<AS
 on run
   tell application "$APP"
@@ -1307,8 +1320,12 @@ end run
 AS
 )"
   if osa "$TIMEOUT" "$f" >"$WORK/status"; then
+    state="$(cat "$WORK/status")"
     cat "$WORK/status"
-    [ "$(cat "$WORK/status")" = on ]
+    if [ "$state" = unknown ]; then
+      printf 'browser-cli: no tab is open in %s; open a page in %s, then check status again\n' "$APP" "$APP" >&2
+    fi
+    [ "$state" = on ]
   else
     if permission_blocked; then
       echo off
@@ -1318,10 +1335,10 @@ AS
 }
 
 while [ "${1-}" = --browser ]; do
-  [ $# -ge 2 ] || { usage >&2; exit 2; }
+  [ $# -ge 2 ] || usage_error '--browser requires a value'
   set_browser "$2"; shift 2
 done
-[ $# -ge 1 ] || { usage >&2; exit 2; }
+[ $# -ge 1 ] || usage_error 'missing command'
 cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
@@ -1362,5 +1379,5 @@ case "$cmd" in
       *) "cmd_${cmd//-/_}" ;;
     esac
     ;;
-  *) usage >&2; exit 2 ;;
+  *) usage_error "unknown command: $cmd" ;;
 esac
