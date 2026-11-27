@@ -1,7 +1,7 @@
 # browser-cli
 
-A dependency-free Bash tool that drives the user's real, logged-in macOS Safari or Google Chrome
-through AppleScript. The user logs in themselves; the tool stores no credentials or page markers.
+A Bash tool that drives the user's real, logged-in macOS Safari or Google Chrome. Most commands use
+system tools only. The user logs in themselves; the tool stores no credentials or page markers.
 Chrome only (not Edge, Brave, or Chromium). Headless browsers are not supported.
 
 ## Setup
@@ -17,6 +17,28 @@ Requires macOS and the system Bash/AppleScript tools.
 Optional permissions, granted to the terminal in System Settings > Privacy & Security:
 Screen Recording for `screenshot`, Accessibility for `--trusted`. See [Permissions](#permissions).
 
+### Chrome background setup
+
+Requires Chrome 120+ and Python 3. From the repository checkout, run:
+
+```sh
+./browser-cli --browser chrome install-background
+```
+
+The installer selects the sole Chrome profile (or the default for a fresh Chrome) or prompts if
+there are several. It copies the extension and bridge into `~/Library/Application Support/browser-cli/chrome-background/`,
+registers the native messaging host in Chrome, and requests `chrome://extensions/` in the selected
+profile. Verify the profile before loading: if Chrome opens a different profile, switch manually.
+Turn on **Developer mode**, click **Load unpacked**, and select the extension directory printed by
+the command. Chrome requires this final step. Rerun the installer and use **Reload** on the extension to update.
+
+After setup, `browser-cli --browser chrome open --background https://example.com/` reuses a
+matching tab or adds an unselected tab without activating Chrome. It searches only within the
+profile with the connected extension, accepts HTTP(S) URLs, and requires an existing normal window.
+Keep the extension enabled in just one profile: the command fails if none or more than one are
+connected. It never falls back to opening in the foreground. The result is `id:<tab-id>` followed
+by a tab and `created` or `reused`; use the returned ID with `--tab`.
+
 ## Command reference
 
 `browser-cli help` lists the supported commands, options, outputs, and exit codes.
@@ -26,7 +48,7 @@ Screen Recording for `screenshot`, Accessibility for `--trusted`. See [Permissio
 | | Safari | Chrome |
 | --- | --- | --- |
 | Setting path | Settings > Developer | View > Developer |
-| Profiles | Not applicable. | The AppleScript interface does not expose profiles. `--tab` URL-substring and `<window>:<tab>` matches span all profiles; `open` creates new tabs in window 1. |
+| Profiles | Not applicable. | `open --background` uses the connected extension's profile. AppleScript selectors span all profiles; `open --foreground` creates new tabs in window 1. |
 | `screenshot` window lookup | Window id equals the system window id. | Matched by window bounds; fails if not unique. |
 
 ## Implementation details
@@ -62,6 +84,7 @@ that need a tab fail. Two states exist:
 | Command | Zero windows | Safari window with zero tabs |
 | --- | --- | --- |
 | `open --foreground <url>` or Safari `open --background <url>` | creates a window | a new window replaces the empty one |
+| Chrome `open --background <url>` | fails without creating a window | not applicable |
 | other tab commands | fail with a no-window error | can fail with localized AppleScript error `-1728` |
 | `wait`, `wait-challenge` | poll until success or timeout; `wait-challenge` reports its last state on timeout | same |
 
@@ -132,7 +155,7 @@ one macOS notification without interacting with the widget.
 
 | Permission (granted to the terminal) | Needed for | When missing |
 | --- | --- | --- |
-| Automation: control the browser | browser commands | macOS prompts on first use; a previously denied request surfaces as a macOS AppleScript error |
+| Automation: control the browser | AppleScript-backed commands | macOS prompts on first use; a previously denied request surfaces as a macOS AppleScript error |
 | Allow JavaScript from Apple Events (browser setting) | JavaScript-backed commands | the diagnostic names the setting |
 | Screen Recording | `screenshot` | capture fails |
 | Accessibility | `--trusted` | real input is not sent |
@@ -159,3 +182,6 @@ browser-cli --browser safari file --tab 1:2 ./inspect.js
 
 Allowing JavaScript from Apple Events lets programs with Automation access run JavaScript in
 logged-in pages. macOS lists those grants in System Settings > Privacy & Security > Automation.
+The Chrome extension reads tab URLs to match the requested prefix. Its native bridge accepts
+HTTP(S) open requests from processes running as the same OS user over a private Unix socket;
+it does not listen over the network.

@@ -26,7 +26,9 @@ browser-cli help | version
 
   tabs [--json]                 list tabs: <window>:<tab> <TAB> title <TAB> url
   open (--foreground | --background) <url>
-                                match a URL prefix or open a page; prints <window>:<tab> <TAB> reused|created
+                                match a URL prefix or open a page; prints <target> <TAB> reused|created
+                                target: id:<tab-id> for Chrome background; otherwise <window>:<tab>
+  install-background            Chrome only: install the local bridge and guide extension setup
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
@@ -56,8 +58,8 @@ browser-cli help | version
             indexes are 1-based; URL substrings select the first match across windows
             default: front window's active tab
 --background  open only: Safari opens or reuses a tab without bringing Safari to the front;
-              Chrome only reuses an existing URL-prefix match without bringing Chrome to the front
-              or selecting the tab. No match: fail without launching Chrome or creating anything.
+              Chrome reuses or creates a tab without focusing Chrome or changing the active tab.
+              Chrome requires one connected extension, a normal window and an HTTP(S) URL.
 --foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)
 --json      tabs only: array of {window,tab,title,url,id}; id is a string in Chrome, null in Safari
@@ -199,10 +201,7 @@ browser_setup() {
       AS_SELECT_TAB='set active tab index of window w to t'
       AS_NEW_WINDOW='set newWindow to make new window
     set URL of active tab of newWindow to u'
-      # Chrome selects an appended tab; restore the original selection without activating Chrome.
-      AS_APPEND_TAB='set prev to active tab index of window 1
-    make new tab at end of tabs of window 1 with properties {URL:u}
-    if bg then set active tab index of window 1 to prev'
+      AS_APPEND_TAB='make new tab at end of tabs of window 1 with properties {URL:u}'
       AS_JS='execute TAB_REF javascript JS_CODE'
       AS_WINDOW_ID='(item 3 of argv)'
       AS_SCREENSHOT_DISPLAYED='minimized of w or (active tab index of w) is not (item 2 of r)'
@@ -338,16 +337,31 @@ AS
   osa "$TIMEOUT" "$f" "$JSON"
 }
 
+chrome_background() {
+  local python helper
+  python="$(command -v python3)" || die 'Chrome background mode requires Python 3'
+  helper="$(cd -- "$(dirname -- "$0")" && pwd -P)/chrome-background/bridge.py"
+  if [ "$1" != install ] && [ ! -f "$helper" ]; then
+    helper="$HOME/Library/Application Support/browser-cli/chrome-background/bridge.py"
+  fi
+  [ -f "$helper" ] || die 'Chrome background helper not found; use the repository checkout to run browser-cli --browser chrome install-background'
+  "$python" "$helper" "$@"
+}
+
+cmd_install_background() {
+  [ "$BROWSER" = chrome ] || usage_error 'install-background requires --browser chrome'
+  [ "$#" -eq 0 ] || usage_error 'install-background takes no options or arguments'
+  chrome_background install
+}
+
 cmd_open() {
   [ ${#ARGS[@]} -eq 1 ] || usage_error 'open requires exactly one URL'
-  local chrome_bg_error='no Chrome tab matches the requested URL prefix; open the target page in the intended Chrome profile first'
-  if [ "$BACKGROUND" = 1 ] && ! pgrep -qx "$APP"; then
-    [ "$BROWSER" != chrome ] || die "$chrome_bg_error"
-    open -g -a "$APP" || die "cannot launch $APP"
+  if [ "$BROWSER" = chrome ] && [ "$BACKGROUND" = 1 ]; then
+    chrome_background open "${ARGS[0]}" "$TIMEOUT"
+    return
   fi
-  local chrome_bg_guard=''
-  if [ "$BROWSER" = chrome ]; then
-    chrome_bg_guard="if bg then error \"$chrome_bg_error\""
+  if [ "$BACKGROUND" = 1 ] && ! pgrep -qx "$APP"; then
+    open -g -a "$APP" || die "cannot launch $APP"
   fi
   local f; f="$(script open <<AS
 on run argv
@@ -366,7 +380,6 @@ on run argv
         end if
       end repeat
     end repeat
-    $chrome_bg_guard
     if (count of windows) = 0 or (count of tabs of window 1) = 0 then
       $AS_NEW_WINDOW
       return "1:1" & (ASCII character 9) & "created"
@@ -1343,6 +1356,7 @@ cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
+  install-background) cmd_install_background "$@" ;;
   tabs|open|close|eval|file|wait|wait-challenge|status|info|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
     parse "$@"
     [ -n "$BROWSER" ] || { echo 'browser-cli: --browser safari|chrome is required' >&2; exit 2; }

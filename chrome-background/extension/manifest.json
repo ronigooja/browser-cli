@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "browser-cli Background Tabs",
+  "version": "1.0.0",
+  "description": "Open or reuse background tabs at the request of the local browser-cli tool.",
+  "minimum_chrome_version": "120",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt+IZRw7/Xi/uA0SQkSIxLEQcwJydiY7juX94INRLJC0g5kAGLKvnL0XSiklkxBnOWxxt8qXXoMtYc8LPcUmwtGX6/mGpWYjtFzHeakhIrVs/3TRf8ZTZknbN+uPaOpZveOmAZfk5bLQsoG9+KMet0HkMiNS9jTc1RFcUj4F4LsaP5soSprBwq+vWkQrvKU/99AKCYI2KCUoZc1hD95FTJs1OX17vyC57WuiFmg+kFSR08q1vJthrDVzuKNfXfaVLOloNVXOumciWLtTxqX9RPP5h6hKVO4+J3GvqTA7QkIlYNCKsGxnnDjjmghkCASx/zh+j0wMxEG7TY5qjr2GMAQIDAQAB",
+  "permissions": ["alarms", "nativeMessaging", "tabs"],
+  "incognito": "not_allowed",
+  "background": { "service_worker": "background.js" }
+}
