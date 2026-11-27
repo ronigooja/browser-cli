@@ -147,8 +147,11 @@ class BackgroundTest(unittest.TestCase):
         }}}))
         destination = home / "install"
         with patch.object(bridge, "CHROME", chrome), patch.object(bridge, "INSTALL", destination), \
-                patch.object(sys, "stdout", io.StringIO()) as output, patch.object(bridge.subprocess, "run") as launch:
+                patch.object(sys, "stdout", io.StringIO()) as output, patch.object(bridge.subprocess, "run") as launch, \
+                patch.object(sys.stdin, "isatty", return_value=True), \
+                patch.object(sys.stderr, "isatty", return_value=True), patch.object(bridge, "check_setup") as check:
             bridge.install()
+        check.assert_not_called()
         self.assertIn("--profile-directory=Profile 5", launch.call_args.args[0])
         self.assertIn("Finish setup in Chrome profile 'Work'", output.getvalue())
         self.assertIn("Setup is pending", output.getvalue())

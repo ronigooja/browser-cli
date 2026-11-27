@@ -34,9 +34,9 @@ the command. Chrome requires this final step. Rerun the installer and use **Relo
 
 On first use, Chrome `open --background` offers setup in an interactive terminal. Without a terminal,
 it reports the setup command and asks the caller to obtain consent first. Setup does not reopen the
-requested page. The installer waits briefly for Chrome to connect in an interactive terminal; after
-loading the extension, you can also run `install-background --check` (with `--browser chrome`) to
-confirm the connection without opening a tab.
+requested page. The installer returns after printing the manual loading instructions; it does not
+wait for Chrome to connect. After loading the extension, run `install-background --check` (with
+`--browser chrome`) to confirm the connection without opening a tab.
 
 After setup, `browser-cli --browser chrome open --background https://example.com/` reuses a
 matching tab or adds an unselected tab without activating Chrome. It searches only within the

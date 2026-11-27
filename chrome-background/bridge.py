@@ -23,7 +23,6 @@ HOST = "com.browser_cli.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/browser-cli/chrome-background"
 SETUP = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome install-background"
-SETUP_WAIT = 120
 LIMIT = 65536
 
 
@@ -228,17 +227,12 @@ def offer_setup():
     return 1
 
 
-def check_setup(wait=0):
-    deadline = time.monotonic() + wait
-    while True:
-        with connected_client(time.monotonic() + 1) as client:
-            if client is not None:
-                print("Chrome background setup complete. You can retry open --background.")
-                return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(1, remaining))
+def check_setup():
+    with connected_client(time.monotonic() + 1) as client:
+        if client is not None:
+            print("Chrome background setup complete. You can retry open --background.")
+            return True
+    return False
 
 
 def choose_profile():
@@ -314,10 +308,6 @@ def install():
     print(extension, flush=True)
     subprocess.run(["/usr/bin/open", "-na", "Google Chrome", "--args",
                     f"--profile-directory={profile}", "chrome://extensions/"], check=True)
-    if sys.stdin.isatty() and sys.stderr.isatty():
-        print(f"Waiting up to {SETUP_WAIT} seconds for the extension to connect…", flush=True)
-        if check_setup(SETUP_WAIT):
-            return
     print(f"Setup is pending until Chrome loads and connects the extension. After loading it, run `{SETUP} --check`.")
 
 
