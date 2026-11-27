@@ -102,6 +102,31 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(response["status"], "target_changed")
         self.assertEqual(self.run_cli.call_count, 3)
 
+    def test_prefix_only_reused_tab_is_not_reported_as_target_change(self):
+        tab = dict(TAB, url=URL + "post/123")
+        self.run_cli.side_effect = [json.dumps([tab]), "id:42\treused", json.dumps([tab])]
+        with patch.object(mcp.time, "monotonic", side_effect=[0, 4]):
+            response = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(response["status"], "reused_tab_mismatch")
+        self.assertEqual(self.run_cli.call_count, 3)
+        self.assertNotIn("cleanup_token", response)
+
+    def test_reused_chrome_tab_can_finish_an_exact_pending_navigation(self):
+        self.run_cli.side_effect = ["[]", "id:42\treused", "[]", json.dumps([TAB]), json.dumps(PAGE)]
+        with patch.object(mcp.time, "sleep") as delay:
+            response = self.reader.read({"url": URL, "browser": "chrome"})
+        delay.assert_called_once_with(0.25)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["tab_disposition"], "reused")
+        self.assertNotIn("cleanup_token", response)
+
+    def test_reused_chrome_tab_with_wrong_id_is_not_read(self):
+        self.run_cli.side_effect = ["[]", "id:41\treused", json.dumps([TAB])]
+        response = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(response["status"], "reused_tab_mismatch")
+        self.assertEqual(self.run_cli.call_count, 3)
+        self.assertNotIn("cleanup_token", response)
+
     def test_human_gate_and_login_stop_without_content(self):
         for status in ("verification_required", "login_required", "no_content", "tab_ambiguous"):
             self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": status, "text": "not passed through"})]

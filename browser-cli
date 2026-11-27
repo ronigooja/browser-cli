@@ -34,7 +34,8 @@ browser-cli help | version | mcp
 
   tabs [--json]                 list tabs: <window>:<tab> <TAB> title <TAB> url
   open (--foreground | --background) <url>
-                                match a URL prefix or open a page; prints <target> <TAB> reused|created
+                                reuse a matching tab or open a page; prints <target> <TAB> reused|created
+                                Chrome background reuse requires an exact URL; other opens match prefixes
                                 target: id:<tab-id> for Chrome background; otherwise <window>:<tab>
   install-background [--profile DIRECTORY]
                                 Chrome only: prepare setup; you then click Load unpacked in Chrome

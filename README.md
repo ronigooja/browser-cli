@@ -45,7 +45,7 @@ removes only the staged files and native host registration, not the CLI or Chrom
 If you never loaded the extension, run the uninstall command directly.
 
 After setup, `browser-cli --browser chrome open --background https://example.com/` reuses a
-matching tab or adds an unselected tab without activating Chrome. It searches only within the
+tab with the exact requested URL or adds an unselected tab without activating Chrome. It searches only within the
 profile with the connected extension, accepts HTTP(S) URLs, and requires an existing normal window.
 Keep the extension enabled in just one profile: the command fails if none or more than one are
 connected. It never falls back to opening in the foreground. The result is `id:<tab-id>` followed
@@ -240,6 +240,6 @@ browser-cli --browser safari file --tab 1:2 ./inspect.js
 
 Allowing JavaScript from Apple Events lets programs with Automation access run JavaScript in
 logged-in pages. macOS lists those grants in System Settings > Privacy & Security > Automation.
-The Chrome extension reads tab URLs to match the requested prefix. Its native bridge accepts
+The Chrome extension reads tab URLs to match the exact requested URL. Its native bridge accepts
 HTTP(S) open requests from processes running as the same OS user over a private Unix socket;
 it does not listen over the network.

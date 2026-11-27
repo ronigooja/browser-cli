@@ -35,8 +35,28 @@ function extension(tabs, windows, focused) {
 }
 
 test("reuse a matching tab without changing it", async () => {
-  const browser = extension([{ id: 5, url: "https://example.com/path" }], []);
+  const browser = extension([{ id: 4, url: "https://example.com/path" },
+    { id: 5, url: "https://example.com/" }], []);
   assert.deepEqual(await browser.open("https://example.com"), { id: 5, action: "reused" });
+  assert.deepEqual(browser.creations, []);
+});
+
+test("a Chrome profile path prefix does not reuse an individual post tab", async () => {
+  const browser = extension([
+    { id: 5, url: "https://example.com/user/status/123" },
+    { id: 6, url: "https://example.com/user?view=posts" },
+    { id: 7, url: "https://example.com/user#posts" },
+  ], [{ id: 1 }]);
+  assert.deepEqual(await browser.open("https://example.com/user"), { id: 42, action: "created" });
+  assert.deepEqual(browser.creations, [{ windowId: 1, url: "https://example.com/user", active: false }]);
+});
+
+test("prefer the exact pending navigation over the committed URL", async () => {
+  const browser = extension([
+    { id: 4, url: "https://example.com/user", pendingUrl: "https://example.com/user/status/123" },
+    { id: 5, url: "https://example.com/user/status/456", pendingUrl: "https://example.com/user" },
+  ], []);
+  assert.deepEqual(await browser.open("https://example.com/user"), { id: 5, action: "reused" });
   assert.deepEqual(browser.creations, []);
 });
 

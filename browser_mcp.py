@@ -74,6 +74,7 @@ MESSAGES = {
     "open_tab_required": "Open the exact URL in the selected browser/profile, then try again.",
     "tab_ambiguous": "More than one tab matches. Identify the intended tab without guessing, or ask the user to resolve the ambiguity.",
     "target_changed": "The tab no longer matches the exact URL. Confirm the final URL and intended tab before retrying.",
+    "reused_tab_mismatch": "Chrome returned a reused tab that did not match the requested URL. No content was read. This does not establish a redirect or login requirement.",
     "login_required": "Complete sign-in in the browser yourself. Then open the intended page and use session_tab.",
     "verification_required": "Complete the human verification in the browser yourself, then retry.",
     "passive_challenge": "A passive challenge is still present. Wait for it in the browser and retry later.",
@@ -284,20 +285,22 @@ class Reader:
             if not match:
                 raise ValueError("Unexpected open response")
             target = match[1]
+            chrome_reused = browser == "chrome" and match[2] == "reused"
+            mismatch = "reused_tab_mismatch" if chrome_reused else "target_changed"
             deadline = time.monotonic() + 4
             while True:
                 candidates = self.candidates(browser, expected, url)
                 if len(candidates) > 1:
                     return result("tab_ambiguous", browser, MESSAGES["tab_ambiguous"])
-                if candidates or match[2] == "reused" or time.monotonic() >= deadline:
+                if candidates or (match[2] == "reused" and not chrome_reused) or time.monotonic() >= deadline:
                     break
                 time.sleep(0.25)
             if not candidates:
-                return result("target_changed", browser, MESSAGES["target_changed"])
+                return result(mismatch, browser, MESSAGES[mismatch])
             tab = candidates[0]
             observed = f'id:{tab["id"]}' if browser == "chrome" else f'{tab["window"]}:{tab["tab"]}'
             if target != observed:
-                return result("target_changed", browser, MESSAGES["target_changed"])
+                return result(mismatch, browser, MESSAGES[mismatch])
             if match[2] == "created":
                 opened["tab_disposition"] = "created"
                 if browser == "chrome":

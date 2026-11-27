@@ -13,7 +13,7 @@ async function openBackground({ url, expires }) {
 
   const tabs = await chrome.tabs.query({ windowType: "normal" });
   const match = tabs.find(tab => !tab.incognito &&
-    (tab.pendingUrl ?? tab.url)?.startsWith(target.href));
+    (tab.pendingUrl ?? tab.url) === target.href);
   if (match) return { id: match.id, action: "reused" };
 
   const normal = { windowTypes: ["normal"] };
