@@ -499,7 +499,9 @@ cmd_close_created() {
     printf 'not_found\n'
     return 0
   fi
-  local f; f="$(script close-created <<'AS'
+  # Bash 3.2 misparses this quoted heredoc inside a command substitution.
+  local f="$WORK/close-created.applescript"
+  cat >"$f" <<'AS'
 on run argv
   set wantedID to item 1 of argv
   set expectedInstance to item 2 of argv
@@ -533,7 +535,6 @@ on chromeInstance()
   end try
 end chromeInstance
 AS
-)"
   osa "$TIMEOUT" "$f" "${TAB#id:}" "$instance"
 }
 
