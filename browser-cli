@@ -76,7 +76,7 @@ browser-cli help | version
 --raw       html only: return unmodified outerHTML
 --          end option parsing
 With no tabs, tabs succeeds with empty output (or [] with --json).
-eval and file are synchronous and may be blocked by the page's security policy; promises are not awaited.
+The page's security policy may block user JavaScript in eval, file, and wait. Promises are not awaited.
 By default, page actions use JavaScript, not real input. Synthetic key events don't type or move focus like a keyboard.
 Exit status: 0 success, 1 operation failed or status off/unknown, 2 invalid usage.
 Results go to stdout; diagnostics go to stderr.
@@ -566,7 +566,7 @@ cmd_read() {
 }
 
 output_read() {
-  run_js "$1" "$TIMEOUT" >"$WORK/read-output" || return 1
+  run_js --direct "$1" "$TIMEOUT" >"$WORK/read-output" || return 1
   local out total limit="${MAX_CHARS:-20000}"
   out="$(cat "$WORK/read-output"; printf '.')"; out="${out%.}"
   if [ "$out" = 'browser-cli-no-match:' ]; then
@@ -1123,7 +1123,7 @@ cmd_action() {
     if (!form) throw new Error('element has no form');
     form.requestSubmit(); return 'requested form submission\\n';
   })()"
-  run_js "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
+  run_js --direct "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
   out="$(cat "$WORK/action-output"; printf '.')"; out="${out%.}"
   if [ "$out" = 'browser-cli-no-match:' ]; then
     printf 'browser-cli: no element matches: %s; use snapshot to inspect visible controls\n' "$selector" >&2; return 1
@@ -1168,7 +1168,7 @@ function run(a) {
 }
 JS
   js_string "$SELECTOR"; selector="$JS_STRING"
-  geometry="$(run_js "(function(){
+  geometry="$(run_js --direct "(function(){
     var w=innerWidth,h=innerHeight,d=devicePixelRatio, l=0,t=0,r=w,b=h;
     if ($SELECTOR_SET) {
       var e=document.querySelector($selector); if (!e) return 'no-match';
@@ -1310,7 +1310,7 @@ cmd_wait_challenge() {
       [ -z "$last_error" ] || printf '%s\n' "$last_error" >&2
       die "could not determine challenge state within ${TIMEOUT}s"
     fi
-    if out="$(run_js "(function(){ $CHALLENGE_JS return challengeState() + '\\n' + (location.host || location.protocol); })()" "$remaining" 2>"$WORK/challenge-error")"; then
+    if out="$(run_js --direct "(function(){ $CHALLENGE_JS return challengeState() + '\\n' + (location.host || location.protocol); })()" "$remaining" 2>"$WORK/challenge-error")"; then
       state="${out%%$'\n'*}"
       host="${out#*$'\n'}"
       if [ "$state" = none ]; then
