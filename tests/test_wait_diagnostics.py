@@ -9,7 +9,7 @@ CLI = Path(__file__).resolve().parents[1] / "browser-cli"
 
 
 class WaitDiagnosticsTest(unittest.TestCase):
-    def run_cli(self, command, *probes, reject_eval=False, args=None, file_source=None):
+    def run_cli(self, command, *probes, reject_eval=False, args=None, file_source=None, page_fixture=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             mock = root / "osascript"
@@ -21,6 +21,11 @@ fi
 if [ "$MOCK_REJECT_EVAL" = 1 ] && grep -q 'eval(' "$3"; then
   echo 'err:string eval blocked'
   exit 0
+fi
+if [ -f "$MOCK_DIR/page.js" ]; then
+  exec node -e 'const fs = require("node:fs"), vm = require("node:vm");
+    vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"));
+    console.log(vm.runInThisContext(fs.readFileSync(process.argv[2], "utf8")));' "$MOCK_DIR/page.js" "$3"
 fi
 count=0
 if [ -f "$MOCK_DIR/count" ]; then read -r count < "$MOCK_DIR/count"; fi
@@ -44,6 +49,8 @@ printf '%s\\n' "$result"
                 source = root / "user.js"
                 source.write_text(file_source)
                 cli_args.append(str(source))
+            if page_fixture is not None:
+                (root / "page.js").write_text(page_fixture)
             result = subprocess.run([CLI, "--browser", "chrome", *cli_args], text=True,
                                     capture_output=True, timeout=8,
                                     env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", MOCK_DIR=directory,
@@ -54,6 +61,32 @@ printf '%s\\n' "$result"
     def test_info_does_not_use_string_eval(self):
         result, _ = self.run_cli("info", "str:challenge: none", reject_eval=True)
         self.assertEqual((result.returncode, result.stdout), (0, "challenge: none"))
+
+    def test_guarded_read_returns_structured_json_without_eval(self):
+        result, _ = self.run_cli("read-page", 'ok:{"status":"verification_required"}', reject_eval=True,
+                                 args=["--tab", "id:42", "--include-links", "--", "https://example.com/"])
+        self.assertEqual((result.returncode, result.stdout), (0, '{"status":"verification_required"}\n'))
+
+    def test_guarded_read_checks_url_and_verification_before_body(self):
+        url = "https://example.com/"
+        for title, current, expected in (("Attention required", url, "verification_required"),
+                                         ("Example", url + "other", "target_changed"),
+                                         ("Just a moment...", url, "passive_challenge")):
+            with self.subTest(expected=expected):
+                fixture = (f"global.location = new URL({current!r}); global.document = "
+                           f"{{title:{title!r}, querySelectorAll:()=>[], get body(){{throw Error('unexpected read')}}}};")
+                result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--", url], page_fixture=fixture)
+                self.assertEqual((result.returncode, result.stdout), (0, f'{{"status":"{expected}"}}\n'))
+
+    def test_guarded_read_returns_visible_text(self):
+        url = "https://example.com/"
+        fixture = f"""global.location = new URL({url!r});
+global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=>[], querySelector:()=>null,
+  body:{{innerText:'Example Domain', querySelectorAll:()=>[]}}}};
+"""
+        result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--", url], page_fixture=fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"text":"Example Domain"', result.stdout)
 
     def test_builtin_reads_and_snapshot_do_not_use_string_eval(self):
         for command in ("text", "links", "html", "snapshot"):

@@ -220,12 +220,18 @@ def loading_instructions():
     )
 
 
+class ConnectionRequired(ValueError):
+    def __init__(self, state, message):
+        super().__init__(message)
+        self.state = state
+
+
 def require_connection(state):
     if state == "loaded":
-        raise ValueError(f"The browser-cli extension is installed but not connected. Open a regular Chrome window in the profile where it is installed and make sure it is enabled at chrome://extensions/. Then run `{SETUP} --check`.")
+        raise ConnectionRequired(state, f"The browser-cli extension is installed but not connected. Open a regular Chrome window in the profile where it is installed and make sure it is enabled at chrome://extensions/. Then run `{SETUP} --check`.")
     if state == "pending":
-        raise ValueError(f"Chrome background setup is not complete. In the intended Chrome profile:\n{loading_instructions()}\nThen run `{SETUP} --check`.")
-    raise ValueError(f"Chrome background mode requires the browser-cli extension. Ask the user whether to set it up. Only after they confirm, run `{SETUP}`.")
+        raise ConnectionRequired(state, f"Chrome background setup is not complete. In the intended Chrome profile:\n{loading_instructions()}\nThen run `{SETUP} --check`.")
+    raise ConnectionRequired(state, f"Chrome background mode requires the browser-cli extension. Ask the user whether to set it up. Only after they confirm, run `{SETUP}`.")
 
 
 def offer_setup():
@@ -382,6 +388,11 @@ def main():
             native_host(*args)
         elif command == "open":
             return background_open(args[0], int(args[1]))
+    except ConnectionRequired as error:
+        print(f"browser-cli: {error}", file=sys.stderr)
+        if os.environ.get("BROWSER_CLI_MCP") == "1":
+            return {"missing": 20, "pending": 21, "loaded": 22}[error.state]
+        return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"browser-cli: {error}", file=sys.stderr)
         return 1

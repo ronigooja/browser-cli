@@ -55,6 +55,36 @@ by a tab and `created` or `reused`; use the returned ID with `--tab`.
 
 `browser-cli help` lists the supported commands, options, outputs, and exit codes.
 
+## OpenCode MCP (no skill)
+
+Keep `browser-cli`, `browser_mcp.py`, and `chrome-background/` together on the Mac with the
+browser. The server needs Python 3 and uses local stdio, not an HTTP listener. Register it in the
+target OpenCode project (add `--global` for a user-wide installation):
+
+```sh
+opencode mcp add browser_cli -- /absolute/path/to/browser-cli mcp
+opencode mcp list
+```
+
+Remove any separately installed `browser-cli` skill from OpenCode discovery if migrating. The
+server provides its own instructions and requires no skill. Code Mode exposes one tool:
+
+```js
+await tools.browser_cli.read_page({url: "https://example.com/", browser: "safari", include_links: true})
+```
+
+- `existing_tab` (default): read an exact matching tab without opening or focusing a browser.
+- `session_tab`: use for login-dependent access. In Chrome, first request a candidate without
+  `confirmed_tab_id`, then pass that ID only after the user confirms the tab and profile.
+- `public_background`: may background-open a missing public URL. Chrome requires the existing
+  extension setup; there is no automatic installation, foreground fallback, or tab cleanup.
+
+Non-`ok` statuses identify blockers without returning page text. Login and verification detection
+are heuristic; empty results, timeouts, and navigation changes are not proof that sign-in is needed.
+Text is limited to 12,000 UTF-16 code units; links are limited to 25 visible HTTP(S) links and
+8,000 combined label/URL code units. The server does
+not expose arbitrary JavaScript, shell, form actions, or browser storage.
+
 ## Browser differences
 
 | | Safari | Chrome |

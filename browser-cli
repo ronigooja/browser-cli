@@ -2,11 +2,17 @@
 # Drive the real, logged-in Safari or Google Chrome on macOS: manage tabs and run JavaScript.
 # Usage: see `browser-cli help` or README.md. JavaScript needs "Allow JavaScript from Apple Events".
 set -euo pipefail
-export LC_ALL=en_US.UTF-8
 
 VERSION=0.1.0
 DEFAULT_TIMEOUT=30
 
+if [ "${1-}" = mcp ] && [ "$#" -eq 1 ]; then
+  python="$(command -v python3)" || { echo 'browser-cli: mcp requires Python 3' >&2; exit 1; }
+  cli="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
+  exec "$python" "${cli%/*}/browser_mcp.py" "$cli"
+fi
+
+export LC_ALL=en_US.UTF-8
 WORK="$(mktemp -d)"
 cleanup() {
   local rc=$?
@@ -22,7 +28,7 @@ usage_error() { printf 'browser-cli: %s; see browser-cli help\n' "$*" >&2; exit 
 usage() {
   cat <<'EOF'
 browser-cli --browser safari|chrome <command> [options]
-browser-cli help | version
+browser-cli help | version | mcp
 
   tabs [--json]                 list tabs: <window>:<tab> <TAB> title <TAB> url
   open (--foreground | --background) <url>
@@ -36,6 +42,8 @@ browser-cli help | version
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
   info [--tab T]                print page metadata and detected challenge: none|cloudflare-passive|needs-human
+  read-page --tab T <exact-url> [--include-links]
+                                guarded JSON read; T is exact for Safari or id:<id> for Chrome
   text [--tab T]                print page text
   links [--tab T]               print link text and absolute URL, tab-separated, one per line
   html [--tab T]                print sanitized page HTML
@@ -57,7 +65,7 @@ browser-cli help | version
   status                        print on (exit 0), off (permission disabled, exit 1),
                                 or unknown (no tab to probe, exit 1)
 
---browser safari|chrome required except for help and version
+--browser safari|chrome required except for help, version and mcp
 --tab T     <window>:<tab>, URL substring, or id:<chrome-tab-id> (Chrome only; see `tabs --json`)
             indexes are 1-based; URL substrings select the first match across windows
             default: front window's active tab
@@ -89,7 +97,7 @@ EOF
 # ---- option parsing: sets BROWSER, TAB, TIMEOUT and ARGS (positional) ----
 BROWSER=""
 TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; FOREGROUND=0; TRUSTED=0; TRUSTED_SENDING=0; JSON=0; ARGS=()
-SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0
+SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0; INCLUDE_LINKS=0
 TO=""; TO_SET=0; BY=""; BY_SET=0
 OUT=""; OUT_SET=0
 parse() {
@@ -101,6 +109,7 @@ parse() {
       --foreground) FOREGROUND=1; shift ;;
       --trusted) TRUSTED=1; shift ;;
       --json) JSON=1; shift ;;
+      --include-links) INCLUDE_LINKS=1; shift ;;
       --tab) [ $# -ge 2 ] || usage_error '--tab requires a value'; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || usage_error '--timeout requires a value'; TIMEOUT="$2"; TIMEOUT_SET=1; shift 2 ;;
       --selector) [ $# -ge 2 ] || usage_error '--selector requires a value'; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
@@ -148,8 +157,10 @@ osa() {
   if [ "$rc" -ne 0 ]; then
     if [ -e "$WORK/timed-out" ]; then
       echo "browser-cli: timed out after ${limit}s" >&2
+      [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 24
     elif permission_blocked; then
       echo "$JS_PERMISSION_MESSAGE" >&2
+      [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 25
     else
       local message code
       message="$(sed -E 's/^[^ ]*: //; s/^execution error: //' "$err")"
@@ -223,6 +234,28 @@ browser_setup() {
 
 # Shared handler: resolve a tab spec to {window index, tab index, URL substring or empty}.
 resolve_handler() {
+  if [ "$cmd" = read-page ] && [ "$BROWSER" = safari ]; then
+    cat <<'AS'
+on resolve(spec)
+  set matched to {}
+  tell application "Safari"
+    considering case
+      repeat with w from 1 to count of windows
+        repeat with t from 1 to count of tabs of window w
+          if URL of tab t of window w is spec then
+            if matched is not {} then return {-2, 0}
+            set matched to {w as integer, t as integer}
+          end if
+        end repeat
+      end repeat
+    end considering
+  end tell
+  if matched is {} then return {-1, 0}
+  return matched
+end resolve
+AS
+    return
+  fi
   local resolve_id=''
   if [ "$BROWSER" = chrome ]; then
     resolve_id='  considering case
@@ -287,6 +320,10 @@ as_js() {
 
 cmd_tabs() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'tabs takes no positional arguments'
+  if [ "${BROWSER_CLI_MCP:-}" = 1 ] && ! pgrep -qx "$APP"; then
+    printf '[]\n'
+    return
+  fi
   local f; f="$(script tabs <<AS
 on run argv
   set jsonOutput to item 1 of argv is "1"
@@ -452,6 +489,15 @@ run_js() {
     shift
   fi
   local code="$1" limit="$2"
+  local guarded=''
+  if [ "$cmd" = read-page ]; then
+    guarded='  if item 1 of r is -2 then return "ok:{\"status\":\"tab_ambiguous\"}"
+  if item 1 of r is -1 then return "ok:{\"status\":\"target_changed\"}"'
+  fi
+  local target_ref='tab (item 2 of r) of window (item 1 of r)'
+  if [ "$cmd" = read-page ] && [ "$BROWSER" = chrome ]; then
+    target_ref='tab id (text 4 thru -1 of (item 1 of argv)) of window (item 1 of r)'
+  fi
   local trusted_tab_ref="tab ((item 1 of argv) as integer) of window id $AS_WINDOW_ID"
   if [ -n "${5-}" ]; then
     trusted_tab_ref='tab id (item 1 of argv) of window id (item 3 of argv)'
@@ -477,13 +523,14 @@ on run argv
     tell application "$APP" to return $(as_js code "$trusted_tab_ref")
   end if
   set r to resolve(item 1 of argv)
-  tell application "$APP" to return $(as_js code 'tab (item 2 of r) of window (item 1 of r)')
+$guarded
+  tell application "$APP" to return $(as_js code "$target_ref")
 end run
 $RESOLVE
 AS
 )"
   local out
-  osa "$limit" "$f" "${5:-$TAB}" "$WORK/code.js" "${4-}" >"$WORK/result" || return 1
+  osa "$limit" "$f" "${5:-$TAB}" "$WORK/code.js" "${4-}" >"$WORK/result" || return "$?"
   out="$(cat "$WORK/result"; printf '.')"
   out="${out%.}"
   out="${out%$'\n'}"
@@ -548,6 +595,65 @@ cmd_info() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'info takes no positional arguments'
   run_js --direct "(function(){ $CHALLENGE_JS
     return \"title: \" + document.title + \"\\nurl: \" + location.href + \"\\nreadyState: \" + document.readyState + \"\\ninnerText characters: \" + (document.body ? document.body.innerText.length : 0) + \"\\nouterHTML characters: \" + (document.documentElement ? document.documentElement.outerHTML.length : 0) + \"\\nchallenge: \" + challengeState() + \"\\n\"; })()" "$TIMEOUT"
+}
+
+cmd_read_page() {
+  [ ${#ARGS[@]} -eq 1 ] || usage_error 'read-page requires an exact URL'
+  [[ "${ARGS[0]}" =~ ^https?:// ]] || usage_error 'read-page requires an HTTP(S) URL'
+  if [ "$BROWSER" = chrome ]; then
+    [[ "$TAB" = id:* ]] || usage_error 'read-page requires --tab id:<id> in Chrome'
+  else
+    [ "$TAB" = "${ARGS[0]}" ] || usage_error 'read-page requires the same exact --tab URL in Safari'
+  fi
+  js_string "${ARGS[0]}"
+  local expected="$JS_STRING" code
+  code="(function(){ $CHALLENGE_JS
+    if (location.href !== $expected) return {status:'target_changed'};
+    var challenge = challengeState();
+    if (challenge === 'needs-human') return {status:'verification_required'};
+    if (challenge === 'cloudflare-passive') return {status:'passive_challenge'};
+    function visible(e) {
+      var s = getComputedStyle(e), r = e.getBoundingClientRect();
+      return s.visibility === 'visible' && r.width > 0 && r.height > 0 && !e.closest('[aria-hidden=\"true\"]');
+    }
+    var body = document.body;
+    if (!body || document.readyState === 'loading') return {status:'page_loading'};
+    var gate = /(?:^|\/)(?:login|log-in|signin|sign-in)(?:\/|$)/i.test(location.pathname);
+    var passwords = Array.from(body.querySelectorAll('input[type=password]'));
+    var dialogs = Array.from(body.querySelectorAll('dialog, [role=dialog]'));
+    var signInDialog = dialogs.some(function(e) {
+      if (!visible(e)) return false;
+      var title = e.getAttribute('aria-label') || (e.querySelector('h1,h2,h3,[role=heading]') || {}).innerText || '';
+      return /^(?:(?:please )?(?:log ?in|sign ?in)(?: to continue)?|请登录|登录后继续|登录|扫码登录)[.!。！]?$/i.test(title.trim());
+    });
+    if (gate || signInDialog || passwords.some(function(e){return visible(e) && e.closest('dialog, [role=dialog]');})) {
+      return {status:'login_required'};
+    }
+    var text = body.innerText || '';
+    if (!text.trim()) return {status:'no_content'};
+    function safeUrl(value) {
+      try { var u = new URL(value); return /^https?:$/.test(u.protocol) && !u.username && !u.password && u.href.length <= 2048; }
+      catch (_) { return false; }
+    }
+    var result = {status:'ok', title:document.title.slice(0,500), final_url:location.href,
+                  text:text.slice(0,12000), truncated:text.length > 12000 || document.title.length > 500};
+    if ($INCLUDE_LINKS) {
+      result.links = [];
+      var budget = 8000;
+      var anchors = body.querySelectorAll('a[href]');
+      for (var i = 0; i < anchors.length; i++) {
+        var a = anchors[i];
+        if (!visible(a) || !safeUrl(a.href)) continue;
+        var label = (a.innerText || '').trim();
+        budget -= Math.min(label.length,200) + a.href.length;
+        if (result.links.length === 25 || budget < 0) { result.truncated = true; break; }
+        if (label.length > 200) result.truncated = true;
+        result.links.push({text:label.slice(0,200), url:a.href});
+      }
+    }
+    return result;
+  })()"
+  run_js --direct "$code" "$TIMEOUT"
 }
 
 cmd_read() {
@@ -1394,9 +1500,10 @@ cmd="$1"; shift
 case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
+  mcp) usage_error 'mcp takes no options or arguments' ;;
   install-background) cmd_install_background "$@" ;;
   uninstall-background) cmd_uninstall_background "$@" ;;
-  tabs|open|close|eval|file|wait|wait-challenge|status|info|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
+  tabs|open|close|eval|file|wait|wait-challenge|status|info|read-page|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
     parse "$@"
     [ -n "$BROWSER" ] || { echo 'browser-cli: --browser safari|chrome is required' >&2; exit 2; }
     if [[ "$TAB" = id:* ]]; then
@@ -1411,6 +1518,7 @@ case "$cmd" in
     [ "$FOREGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'browser-cli: --foreground only applies to open' >&2; exit 2; }
     [ "$cmd" != open ] || [ "$FOREGROUND$BACKGROUND" != 00 ] || { echo 'browser-cli: open needs --foreground or --background' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'browser-cli: --json only applies to tabs' >&2; exit 2; }
+    [ "$INCLUDE_LINKS" = 0 ] || [ "$cmd" = read-page ] || usage_error '--include-links only applies to read-page'
     [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'browser-cli: --selector only applies to text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
     [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'browser-cli: --out only applies to screenshot' >&2; exit 2; }
     if [ "$cmd" = scroll ]; then
