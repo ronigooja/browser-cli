@@ -19,18 +19,19 @@ class Setup:
     def __init__(self, service, clock=time.monotonic):
         self.service = service
         self.grants = Capabilities(clock, GRANT_SECONDS, 64)
+        self.staged_update = None
 
     def call(self, args, scope):
-        allowed = {"check": set(), "prepare": {"approved"}, "install": {"grant", "profile"}}
+        allowed = {"check": set(), "prepare": {"approved", "update"}, "install": {"grant", "profile"}}
         if not isinstance(args, dict) or args.get("browser") not in BROWSERS:
             raise ValueError("Choose safari or chrome for setup_extension.")
         browser, action = args["browser"], args.get("action")
         if not isinstance(action, str) or action not in allowed or args.keys() - allowed[action] - {"action", "browser"}:
             raise ValueError("Choose check, prepare, or install with the appropriate setup arguments.")
-        if browser == "safari" and (action == "install" or "approved" in args):
+        if browser == "safari" and (action == "install" or {"approved", "update"} & args.keys()):
             raise ValueError("Safari setup is manual; use check for production setup guidance.")
-        if action == "prepare" and type(args.get("approved", False)) is not bool:
-            raise ValueError("approved must be a boolean.")
+        if action == "prepare" and any(type(args.get(key, False)) is not bool for key in ("approved", "update")):
+            raise ValueError("approved and update must be booleans.")
         if action == "install" and (not token_valid(args.get("grant")) or (
                 "profile" in args and not profile_directory(args["profile"]))):
             raise ValueError("Use the grant and profile returned by prepare.")
@@ -38,39 +39,45 @@ class Setup:
             if action == "check" or browser == "safari":
                 return self.check(browser)
             if action == "prepare":
-                return self.prepare(args.get("approved", False), scope)
+                return self.prepare(args.get("approved", False), args.get("update", False), scope)
             return self.install(args["grant"], args.get("profile"), scope)
         except (OSError, EOFError, ValueError, TypeError, RuntimeError, KeyError, AttributeError):
             return result("setup_error", browser, "Setup could not finish. Check the connection before making any further changes.", next_action="check")
 
-    def pending(self, backend, profile=None):
+    def pending(self, backend, profile=None, update=False):
         instructions = backend.loading_instructions()
         if not isinstance(instructions, str) or len(instructions) > 4096:
             raise ValueError("Invalid loading instructions")
+        action = ("Reload the existing Agent Browser extension at chrome://extensions/ to finish updating; do not load a second copy.\n"
+                  if update else "")
         return result("extension_pending", "chrome", "Finish loading the extension in Chrome; do not reinstall.",
                       instructions=("In the intended regular Chrome profile, verify the profile is correct. "
                                     "If the extensions page did not open there, switch to that profile and go to chrome://extensions/.\n"
-                                    f"{instructions}\nAfter loading it, use setup_extension with action=check."),
+                                    f"{action}{instructions}\nAfter loading or reloading it, use setup_extension with action=check."),
                       next_action="check", **({"profile": profile} if profile else {}))
 
     def check(self, browser):
         reply = self.service.request(browser, "status")
         state = reply["status"]
         if state == "ok":
+            if browser == "chrome":
+                self.staged_update = None
             return result("extension_connected", browser, "The browser extension is connected.")
         if browser == "safari" and state in ("extension_required", "extension_pending", "extension_disconnected", "permission_required"):
             return result(state, browser, "Use the production Safari extension, not the development probe.",
                           instructions=("In Safari > Settings > Extensions, enable Agent Browser once and allow its website access on all websites once. "
                                         "Afterward, use setup_extension with action=check. No per-site permission or automatic install is offered."),
                           next_action="check")
+        if browser == "chrome" and self.staged_update and state in ("extension_pending", "extension_disconnected"):
+            return self.pending(self.service.backends[browser], self.staged_update, update=True)
         if state == "extension_pending":
             return self.pending(self.service.backends[browser])
         if state == "extension_disconnected" and reply.get("update_required") is not True:
             return result(state, browser, "Do not reinstall. In the intended regular Chrome profile, open a regular window and ensure Agent Browser is enabled at chrome://extensions/. Keep it enabled in only one profile and check again.",
                           next_action="check")
         output = blocker(browser, reply)
-        if state in ("extension_required", "extension_disconnected"):
-            output["next_action"] = "prepare" if state == "extension_required" else "check"
+        if state == "extension_required" or output.get("update_required") is True:
+            output["next_action"] = "prepare"
         return output
 
     def profiles(self):
@@ -84,28 +91,38 @@ class Setup:
     def choices(profiles):
         return [{"directory": key, "name": clipped(name, 200)} for key, name in profiles.items()]
 
-    def prepare(self, approved, scope):
+    def prepare(self, approved, update, scope):
         self.grants.revoke_scope(scope)
         if not approved:
-            return result("consent_required", "chrome", "Ask the user before staging the extension files and registering the local native messaging host. The user loads the extension themselves; setup does not open the requested page.",
+            message = ("Ask the user before staging an update to the existing extension and its native messaging host. The user reloads the extension themselves."
+                       if update else "Ask the user before staging the extension files and registering the local native messaging host. The user loads the extension themselves; setup does not open the requested page.")
+            return result("consent_required", "chrome", message,
                           next_action="prepare")
         state = self.check("chrome")
-        if state["status"] != "extension_required":
+        if not self.can_stage(state, update):
             return state
         profiles = self.profiles()
-        grant = self.grants.issue(scope, profiles)
+        grant = self.grants.issue(scope, (profiles, update))
         if not grant:
             return result("setup_error", "chrome", "Too many outstanding setup approvals. No changes were made.")
         multi = len(profiles) > 1
         return result("profile_required" if multi else "install_ready", "chrome",
                       "Ask which regular Chrome profile to use. Do not guess." if multi else "Use the only listed Chrome profile.",
-                      profiles=self.choices(profiles), grant=grant, expires_in_seconds=GRANT_SECONDS, next_action="install")
+                      profiles=self.choices(profiles), grant=grant, expires_in_seconds=GRANT_SECONDS, next_action="install",
+                      **({"update_required": True} if update else {}))
+
+    @staticmethod
+    def can_stage(state, update):
+        if update:
+            return state["status"] == "extension_disconnected" and state.get("update_required") is True
+        return state["status"] == "extension_required"
 
     def install(self, grant, profile, scope):
         missing = result("grant_required", "chrome", "This session has no valid grant. Obtain fresh user approval before preparing again.", next_action="prepare")
-        profiles = self.grants.get(grant, scope)
-        if profiles is None:
+        entry = self.grants.get(grant, scope)
+        if entry is None:
             return missing
+        profiles, update = entry
         if profile is None and len(profiles) > 1:
             return result("profile_required", "chrome", "Ask which listed Chrome profile to use before installing.",
                           profiles=self.choices(profiles), next_action="install")
@@ -115,10 +132,13 @@ class Setup:
         # A valid install attempt consumes consent even if the subsequent preflight fails.
         self.grants.discard(grant)
         state = self.check("chrome")
-        if state["status"] != "extension_required":
+        if not self.can_stage(state, update):
             return state
         if self.profiles() != profiles:
             return result("profiles_changed", "chrome", "Chrome profiles changed. Ask for fresh approval and profile selection.", next_action="prepare")
         backend = self.service.backends["chrome"]
         backend.install(profile)
-        return self.pending(backend, self.choices({profile: profiles[profile]})[0])
+        choice = self.choices({profile: profiles[profile]})[0]
+        if update:
+            self.staged_update = choice
+        return self.pending(backend, choice, update=update)

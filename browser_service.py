@@ -49,7 +49,7 @@ def blocker(browser, reply):
         fields["reason"] = ("safari_production_host_unavailable" if browser == "safari"
                             else "chrome_transport_unavailable")
     if browser == "chrome" and status == "extension_disconnected" and reply.get("update_required") is True:
-        return result(status, browser, "The staged Chrome extension is from an older release. Update it through the project's documented upgrade process and reload it before checking the connection.", update_required=True)
+        return result(status, browser, "The Chrome extension needs an update. Use setup_extension to check and obtain explicit approval before staging the update, then have the user reload the extension.", update_required=True)
     return result(status, browser, BLOCKERS[status], **fields)
 
 
@@ -135,7 +135,8 @@ class BrowserService:
             return {"status": "browser_error"}
         if not isinstance(reply, dict) or not isinstance(reply.get("status"), str):
             return {"status": "browser_error"}
-        normalized = {"pending": "extension_pending", "disconnected": "extension_disconnected"}.get(reply["status"])
+        normalized = {"missing": "extension_required", "pending": "extension_pending",
+                      "disconnected": "extension_disconnected", "ambiguous": "extension_ambiguous"}.get(reply["status"])
         if normalized:
             return dict(reply, status=normalized)
         return reply

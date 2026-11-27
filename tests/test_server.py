@@ -22,6 +22,7 @@ class Fake:
     def __init__(self):
         self.calls = []
         self.state = "ok"
+        self.update_required = False
         self.tabs = [tab()]
         self.pages = []
         self.opened = None
@@ -32,7 +33,7 @@ class Fake:
     def request(self, operation, payload, timeout):
         self.calls.append((operation, dict(payload), timeout))
         if operation == "status":
-            return {"status": self.state}
+            return {"status": self.state, **({"update_required": True} if self.update_required else {})}
         if operation == "find":
             return {"status": "ok", "tabs": self.tabs}
         if operation == "open":
@@ -256,6 +257,52 @@ class ServerTest(unittest.TestCase):
         self.chrome.profile_map = {"Profile 2": "Personal"}
         self.assertEqual(self.setup("install", grant=grant)["status"], "profiles_changed")
         self.assertEqual(self.setup("install", grant=grant)["status"], "grant_required")
+        self.assertEqual(self.chrome.install_calls, [])
+
+    def test_chrome_bridge_statuses_normalize_without_opening(self):
+        states = {"extension_required": "extension_required", "missing": "extension_required",
+                  "pending": "extension_pending", "disconnected": "extension_disconnected",
+                  "ambiguous": "extension_ambiguous"}
+        for native, expected in states.items():
+            with self.subTest(native=native):
+                self.chrome.state = native
+                self.assertEqual(self.read()["status"], expected)
+                self.assertEqual(self.setup("check")["status"], expected)
+        self.assertEqual({call[0] for call in self.chrome.calls}, {"status"})
+
+    def test_old_protocol_update_requires_explicit_approval_and_single_use_grant(self):
+        self.chrome.state, self.chrome.update_required = "disconnected", True
+        self.assertTrue(self.read()["update_required"])
+        self.assertEqual(self.setup("check")["next_action"], "prepare")
+        self.assertEqual(self.setup("prepare", update=True)["status"], "consent_required")
+        self.assertNotIn("grant", self.setup("prepare", approved=True))
+        prepared = self.setup("prepare", update=True, approved=True)
+        self.assertEqual(prepared["status"], "install_ready")
+        grant = prepared["grant"]
+        self.assertEqual(self.setup("install", owner="other", grant=grant)["status"], "grant_required")
+        staged = self.setup("install", grant=grant)
+        self.assertEqual(staged["status"], "extension_pending")
+        self.assertIn("Reload the existing", staged["instructions"])
+        self.assertEqual(self.setup("install", grant=grant)["status"], "grant_required")
+        self.chrome.state = "disconnected"  # Old native process may still answer until reload.
+        self.assertEqual(self.setup("check")["status"], "extension_pending")
+        self.assertNotIn("grant", self.setup("prepare", update=True, approved=True))
+        self.chrome.state, self.chrome.update_required = "ok", False
+        self.assertEqual(self.setup("check")["status"], "extension_connected")
+        self.assertEqual(self.chrome.install_calls, ["Default"])
+
+    def test_ordinary_disconnection_never_reinstalls_and_grant_intent_cannot_change(self):
+        self.chrome.state = "disconnected"
+        self.assertEqual(self.setup("check")["next_action"], "check")
+        self.assertNotIn("grant", self.setup("prepare", update=True, approved=True))
+        self.assertNotIn("grant", self.setup("prepare", approved=True))
+        self.chrome.state, self.chrome.update_required = "disconnected", True
+        update = self.setup("prepare", update=True, approved=True)["grant"]
+        self.chrome.state, self.chrome.update_required = "extension_required", False
+        self.assertEqual(self.setup("install", grant=update)["status"], "extension_required")
+        install = self.setup("prepare", approved=True)["grant"]
+        self.chrome.state, self.chrome.update_required = "disconnected", True
+        self.assertEqual(self.setup("install", grant=install)["status"], "extension_disconnected")
         self.assertEqual(self.chrome.install_calls, [])
 
     def test_default_safari_fails_closed_and_production_setup_is_manual(self):
