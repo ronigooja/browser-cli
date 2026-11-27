@@ -3,7 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import browser_mcp as mcp
@@ -54,10 +54,22 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(self.reader.read(dict(args, confirmed_tab_id="42"))["status"], "ok")
         self.run_cli.assert_called_with("chrome", "read-page", "--tab", "id:42", "--", URL)
 
-    def test_default_never_opens_missing_tab(self):
-        self.run_cli.return_value = "[]"
-        self.assertEqual(self.reader.read({"url": URL, "browser": "safari"})["status"], "open_tab_required")
-        self.run_cli.assert_called_once_with("safari", "tabs", "--json")
+    def test_browser_choice_then_default_background_open(self):
+        self.assertEqual(self.reader.read({"url": URL})["status"], "browser_required")
+        self.run_cli.assert_not_called()
+        self.run_cli.side_effect = ["[]", "1:2\tcreated", json.dumps([TAB]), json.dumps(PAGE)]
+        self.assertEqual(self.reader.read({"url": URL, "browser": "safari"})["status"], "ok")
+        self.assertEqual(self.run_cli.call_args_list, [
+            call("safari", "tabs", "--json"), call("safari", "open", "--background", "--", URL),
+            call("safari", "tabs", "--json"), call("safari", "read-page", "--tab", URL, "--", URL),
+        ])
+
+    def test_existing_and_session_modes_never_open_missing_tab(self):
+        for mode in ("existing_tab", "session_tab"):
+            self.run_cli.reset_mock()
+            self.run_cli.return_value = "[]"
+            self.assertEqual(self.reader.read({"url": URL, "browser": "safari", "mode": mode})["status"], "open_tab_required")
+            self.run_cli.assert_called_once_with("safari", "tabs", "--json")
 
     def test_public_background_never_falls_back_or_installs(self):
         self.run_cli.side_effect = ["[]", mcp.CliFailure(20)]
@@ -95,5 +107,6 @@ class StdioTest(unittest.TestCase):
         self.assertEqual(completed.stderr, "")
         self.assertEqual(init["result"]["protocolVersion"], "2025-11-25")
         self.assertEqual([tool["name"] for tool in listing["result"]["tools"]], ["read_page"])
+        self.assertEqual(listing["result"]["tools"][0]["inputSchema"]["properties"]["mode"]["default"], "public_background")
         self.assertEqual(call["result"]["structuredContent"]["status"], "browser_required")
         self.assertEqual(refused["error"]["code"], -32602)

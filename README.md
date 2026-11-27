@@ -74,11 +74,13 @@ provides its own instructions. Code Mode exposes one tool:
 await tools.browser_cli.read_page({url: "https://example.com/", browser: "safari", include_links: true})
 ```
 
-- `existing_tab` (default): read an exact matching tab without opening or focusing a browser.
+- `public_background` (default): reuse an exact matching tab or background-open a missing public
+  URL. If no browser is specified, ask only which browser to use. Chrome requires the existing
+  extension setup; there is no automatic installation, foreground fallback, or tab cleanup.
+- `existing_tab`: read an exact matching tab without opening or focusing a browser.
 - `session_tab`: use for login-dependent access. In Chrome, first request a candidate without
   `confirmed_tab_id`, then pass that ID only after the user confirms the tab and profile.
-- `public_background`: may background-open a missing public URL. Chrome requires the existing
-  extension setup; there is no automatic installation, foreground fallback, or tab cleanup.
+  Ask the user to open a missing tab in the correct browser/profile; do not open it for them.
 
 Non-`ok` statuses identify blockers without returning page text. Login and verification detection
 are heuristic; empty results, timeouts, and navigation changes are not proof that sign-in is needed.
