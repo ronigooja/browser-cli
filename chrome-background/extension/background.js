@@ -6,42 +6,6 @@ const version = 1;
 const frameLimit = 65536;
 let port;
 
-async function openBackground({ url, expires }) {
-  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
-    throw new Error("Chrome background open requires an HTTP(S) URL");
-  }
-  const target = new URL(url);
-  if (target.username || target.password) {
-    throw new Error("URLs with embedded credentials are not supported");
-  }
-
-  const tabs = await chrome.tabs.query({ windowType: "normal" });
-  const match = tabs.find(tab => !tab.incognito &&
-    (tab.pendingUrl ?? tab.url) === target.href);
-  if (match) return { id: match.id, action: "reused" };
-
-  const normal = { windowTypes: ["normal"] };
-  const windows = (await chrome.windows.getAll(normal)).filter(window => !window.incognito);
-  if (!windows.length) {
-    if (!Number.isFinite(expires) || Date.now() >= expires) {
-      throw new Error("Chrome background request expired before opening a tab");
-    }
-    const created = await chrome.windows.create({ url: target.href, type: "normal", incognito: false, focused: false });
-    const id = created?.tabs?.[0]?.id;
-    if (!Array.isArray(created?.tabs) || created.tabs.length !== 1 || !Number.isSafeInteger(id) || id < 0) {
-      throw new Error("Chrome did not return a single created tab with a valid integer ID; inspect Chrome before retrying");
-    }
-    return { id, action: "created" };
-  }
-  const lastFocused = await chrome.windows.getLastFocused(normal).catch(() => null);
-  const window = windows.find(window => window.id === lastFocused?.id) ?? windows[0];
-  if (!Number.isFinite(expires) || Date.now() >= expires) {
-    throw new Error("Chrome background request expired before opening a tab");
-  }
-  const tab = await chrome.tabs.create({ windowId: window.id, url: target.href, active: false });
-  return { id: tab.id, action: "created" };
-}
-
 function httpURL(value) {
   if (typeof value !== "string" || !/^https?:\/\//i.test(value) || /[\\\s\x00-\x1f\x7f]/u.test(value)) return null;
   try {
@@ -290,23 +254,14 @@ function connect() {
   navigateTab = state.navigated;
   connection.onMessage.addListener(async request => {
     let response;
-    if (request?.v === undefined) {
-      // Compatibility for the old background-open CLI only.
-      try {
-        response = await openBackground(request);
-      } catch (error) {
-        response = { error: error.message };
-      }
-    } else {
-      const id = typeof request.id === "string" && request.id.length <= 36 ? request.id : "";
-      let result;
-      try {
-        result = request.v === version ? await operation(state, request) : { status: "protocol_mismatch" };
-      } catch (_) {
-        result = { status: request.operation === "close" ? "cleanup_unconfirmed" : "browser_error" };
-      }
-      response = withinBudget({ v: version, id, ...result });
+    const id = typeof request?.id === "string" && request.id.length <= 36 ? request.id : "";
+    let result;
+    try {
+      result = request?.v === version ? await operation(state, request) : { status: "protocol_mismatch" };
+    } catch (_) {
+      result = { status: request?.operation === "close" ? "cleanup_unconfirmed" : "browser_error" };
     }
+    response = withinBudget({ v: version, id, ...result });
     if (port === connection) connection.postMessage(response);
   });
   connection.onDisconnect.addListener(() => {

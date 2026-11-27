@@ -9,98 +9,6 @@ const script = fs.readFileSync(path.join(__dirname, "../chrome-background/extens
 const shared = fs.readFileSync(path.join(__dirname, "../extension/shared/read-page.js"), "utf8");
 const noop = { addListener() {} };
 
-function extension(tabs, windows, focused, createdWindow = { tabs: [{ id: 43 }] }) {
-  let receive, reply;
-  const creations = [];
-  const windowCreations = [];
-  const port = {
-    onMessage: { addListener(fn) { receive = fn; } },
-    onDisconnect: noop,
-    postMessage(message) { reply = JSON.parse(JSON.stringify(message)); },
-  };
-  const chrome = {
-    runtime: { connectNative: () => port, onStartup: noop, onInstalled: noop },
-    alarms: { onAlarm: noop },
-    tabs: {
-      query: async options => { assert.equal(options.windowType, "normal"); return tabs; },
-      create: async options => { creations.push({ ...options }); return { id: 42 }; },
-    },
-    windows: {
-      getAll: async () => windows,
-      getLastFocused: async () => focused,
-      create: async options => { windowCreations.push({ ...options }); return createdWindow; },
-    },
-  };
-  vm.runInNewContext(script, { chrome, URL, crypto: webcrypto, importScripts() {} });
-  return {
-    creations,
-    windowCreations,
-    async open(url, expires = Date.now() + 1000) {
-      await receive({ url, expires });
-      return reply;
-    },
-  };
-}
-
-test("reuse a matching tab without changing it", async () => {
-  const browser = extension([{ id: 4, url: "https://example.com/path" },
-    { id: 5, url: "https://example.com/" }], []);
-  assert.deepEqual(await browser.open("https://example.com"), { id: 5, action: "reused" });
-  assert.deepEqual(browser.creations, []);
-});
-
-test("a Chrome profile path prefix does not reuse an individual post tab", async () => {
-  const browser = extension([
-    { id: 5, url: "https://example.com/user/status/123" },
-    { id: 6, url: "https://example.com/user?view=posts" },
-    { id: 7, url: "https://example.com/user#posts" },
-  ], [{ id: 1 }]);
-  assert.deepEqual(await browser.open("https://example.com/user"), { id: 42, action: "created" });
-  assert.deepEqual(browser.creations, [{ windowId: 1, url: "https://example.com/user", active: false }]);
-});
-
-test("prefer the exact pending navigation over the committed URL", async () => {
-  const browser = extension([
-    { id: 4, url: "https://example.com/user", pendingUrl: "https://example.com/user/status/123" },
-    { id: 5, url: "https://example.com/user/status/456", pendingUrl: "https://example.com/user" },
-  ], []);
-  assert.deepEqual(await browser.open("https://example.com/user"), { id: 5, action: "reused" });
-  assert.deepEqual(browser.creations, []);
-});
-
-test("create an inactive tab in the last focused normal window", async () => {
-  const browser = extension([], [{ id: 1 }, { id: 2 }], { id: 2 });
-  assert.deepEqual(await browser.open("https://example.com"), { id: 42, action: "created" });
-  assert.deepEqual(browser.creations, [{ windowId: 2, url: "https://example.com/", active: false }]);
-});
-
-test("create an unfocused normal window when no regular window exists", async () => {
-  const browser = extension([], [{ id: 1, incognito: true }]);
-  assert.deepEqual(await browser.open("https://example.com"), { id: 43, action: "created" });
-  assert.deepEqual(browser.windowCreations, [{ url: "https://example.com/", type: "normal", incognito: false, focused: false }]);
-  assert.deepEqual(browser.creations, []);
-});
-
-test("reject malformed window creation responses", async () => {
-  for (const result of [null, {}, { tabs: [] }, { tabs: [{ id: 1 }, { id: 2 }] }, { tabs: [{}] },
-    { tabs: [{ id: 1.5 }] }, { tabs: [{ id: -1 }] }]) {
-    const browser = extension([], [], undefined, result);
-    assert.match((await browser.open("https://example.com")).error, /single created tab.*integer ID/);
-    assert.equal(browser.windowCreations.length, 1);
-  }
-});
-
-test("reject unsupported and stale requests", async () => {
-  const empty = extension([], []);
-  assert.match((await empty.open("file:///tmp/test")).error, /HTTP\(S\)/);
-  assert.match((await empty.open("https://name:password@example.com")).error, /credentials/);
-  assert.match((await empty.open("https://example.com", 0)).error, /expired/);
-  assert.deepEqual(empty.windowCreations, []);
-  const browser = extension([], [{ id: 1 }]);
-  assert.match((await browser.open("https://example.com", 0)).error, /expired/);
-  assert.deepEqual(browser.creations, []);
-});
-
 function production(initialTabs = []) {
   const url = "https://example.com/";
   const tabs = new Map(initialTabs.map(tab => [tab.id, { url, incognito: false, windowId: 1, ...tab }]));
@@ -184,6 +92,7 @@ function production(initialTabs = []) {
     setAllSites(value) { allSites = value; },
     windows(value) { windows = value; },
     reconnect() { disconnect(); events.alarm({ name: "reconnect-native-host" }); },
+    async raw(message) { await receive(message); return reply; },
     async request(operation, payload = {}, expires = Date.now() + 1000) {
       reply = undefined;
       await receive({ v: 1, id: "request", operation, payload, expires });
@@ -293,4 +202,11 @@ test("read remains framed with worst-case JSON escapes rather than dropping the 
     assert.ok(read.text.length > 0);
     assert.ok(JSON.stringify({ v: 1, id: "request", ...read }).replace(/[<>&\x7f-\uffff]/g, "\\u0000").length <= 65536);
   }
+});
+
+ test("unversioned open is rejected without browser activity", async () => {
+  const browser = production();
+  assert.deepEqual(await browser.raw({ url: browser.url, expires: Date.now() + 1000 }),
+    { v: 1, id: "", status: "protocol_mismatch" });
+  assert.deepEqual(browser.calls.create, []);
 });

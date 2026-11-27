@@ -13,27 +13,17 @@ import signal
 import socket
 import stat
 import struct
-import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import urlsplit
 
 
 HOST = "com.agent_browser.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-background"
-SETUP = f"{shlex.quote(os.environ.get('AGENT_BROWSER_PATH', './agent-browser'))} --browser chrome install-background"
-REMOVE = f"{shlex.quote(os.environ.get('AGENT_BROWSER_PATH', './agent-browser'))} --browser chrome uninstall-background"
 LIMIT = 65536
 PROTOCOL = 1
 OPERATIONS = {"status", "find", "open", "read", "close"}
-WAKE_WAIT = 2
-WAKE_POLL = 0.05
-CHROME_WINDOWS = (
-    'if application id "com.google.Chrome" is not running then return "not-running"',
-    'tell application id "com.google.Chrome" to return count of windows',
-)
 
 
 def runtime_dir(*, create=True):
@@ -81,37 +71,21 @@ def receive(fd, deadline):
     return result
 
 
-def validate_url(url):
-    if not isinstance(url, str) or "\\" in url or any(ord(c) <= 32 or ord(c) == 127 for c in url):
-        raise ValueError("Chrome background open requires an HTTP(S) URL without backslashes, spaces or control characters")
-    parsed = urlsplit(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname or not url.lower().startswith(("http://", "https://")):
-        raise ValueError("Chrome background open requires an HTTP(S) URL")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("URLs with embedded credentials are not supported")
-
-
 def native_request(message):
     expires = message.get("expires")
     remaining = (expires - int(time.time() * 1000)) / 1000 if type(expires) is int else 0
     if not 0 < remaining <= 86400:
         raise ValueError("Invalid or expired Chrome background deadline")
-    if "v" in message:
-        if (type(message["v"]) is not int or message["v"] != PROTOCOL
-                or message.keys() != {"v", "id", "operation", "payload", "expires"}
-                or not isinstance(message["id"], str) or len(message["id"]) != 32
-                or not isinstance(message["operation"], str) or message["operation"] not in OPERATIONS
-                or not isinstance(message["payload"], dict)):
-            raise ValueError("Invalid Chrome background request")
-        return frame(message), remaining
-    url = message.get("url")
-    validate_url(url)
-    return frame({"url": url, "expires": expires}), remaining
+    if (type(message.get("v")) is not int or message["v"] != PROTOCOL
+            or message.keys() != {"v", "id", "operation", "payload", "expires"}
+            or not isinstance(message["id"], str) or len(message["id"]) != 32
+            or not isinstance(message["operation"], str) or message["operation"] not in OPERATIONS
+            or not isinstance(message["payload"], dict)):
+        raise ValueError("Invalid Chrome background request")
+    return frame(message), remaining
 
 
 def response_too_large(request):
-    if "v" not in request:
-        return {"error": "Chrome background reply was too large; check Chrome before retrying"}
     operation = request.get("operation")
     status = ("open_unconfirmed" if operation == "open" else
               "cleanup_unconfirmed" if operation == "close" else "response_too_large")
@@ -135,13 +109,10 @@ def serve(listener):
             try:
                 request_bytes, remaining = native_request(request)
             except ValueError as error:
-                if "v" in request:
-                    status = "timeout" if type(request.get("expires")) is int and request["expires"] <= time.time() * 1000 else "invalid_request"
-                    if request.get("operation") == "close":
-                        status = "cleanup_unconfirmed"
-                    reply = {"v": PROTOCOL, "id": request.get("id"), "status": status}
-                else:
-                    reply = {"error": str(error)}
+                status = "timeout" if type(request.get("expires")) is int and request["expires"] <= time.time() * 1000 else "invalid_request"
+                if request.get("operation") == "close":
+                    status = "cleanup_unconfirmed"
+                reply = {"v": PROTOCOL, "id": request.get("id"), "status": status}
             else:
                 # A missing reply terminates this connection; a late reply cannot
                 # be mistaken for the next operation. The extension reconnects.
@@ -277,43 +248,6 @@ def request(operation, payload, timeout):
         return {"status": "disconnected"}
 
 
-def deliver_background_request(client, request, deadline):
-    client.settimeout(remaining_time(deadline))
-    try:
-        client.sendall(request)
-        reply = receive(client.fileno(), deadline)
-    except (OSError, EOFError):
-        raise ValueError("Chrome background connection timed out or closed; check Chrome before retrying (a tab may already have opened)") from None
-    except ValueError:
-        raise ValueError("Unexpected reply from Chrome background extension; check Chrome before retrying (a tab may already have opened)") from None
-    if "error" in reply:
-        raise ValueError(str(reply["error"]))
-    if type(reply.get("id")) is not int or reply["id"] < 0 or reply.get("action") not in ("created", "reused"):
-        raise ValueError("Unexpected reply from Chrome background extension; check Chrome before retrying (a tab may already have opened)")
-    print(f'id:{reply["id"]}\t{reply["action"]}')
-    return 0
-
-
-def background_open(url, timeout):
-    validate_url(url)
-    if not 0 < timeout <= 86400:
-        raise ValueError("Chrome background timeout must be at most 86400 seconds")
-    deadline = time.monotonic() + timeout
-    request = frame({"url": url, "expires": int((time.time() + timeout) * 1000)})
-    mcp = os.environ.get("AGENT_BROWSER_MCP") == "1"
-    try:
-        with connected_client(deadline) as client:
-            if client is not None:
-                return deliver_background_request(client, request, deadline)
-        if mcp:
-            return recover_background_open(request, deadline)
-    except TimeoutError:
-        if mcp:
-            recovery_refused("The deadline expired before the URL could be sent.")
-        raise ValueError("Chrome background connection timed out before sending the URL") from None
-    return offer_setup()
-
-
 def extension_origin(directory):
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     digest = hashlib.sha256(base64.b64decode(manifest["key"], validate=True)).hexdigest()[:32]
@@ -342,11 +276,9 @@ def loaded_profiles(origin, *, strict=False, ignore_empty=False):
                 continue
 
 
-def setup_state(*, ignore_empty=None):
+def setup_state(*, ignore_empty=True):
     origin = extension_origin(Path(__file__).resolve().parent / "extension")
-    # Chrome can leave an empty entry after removal. Keep strict uninstall checks unchanged.
-    if ignore_empty is None:
-        ignore_empty = os.environ.get("AGENT_BROWSER_MCP") == "1"
+    # Chrome can leave an empty entry after removal.
     if any(loaded_profiles(origin, ignore_empty=ignore_empty)):
         return "loaded"
     if host_manifest().is_file() and (INSTALL / "extension/manifest.json").is_file():
@@ -384,39 +316,14 @@ class ConnectionRequired(ValueError):
         self.state = state
 
 
-def require_connection(state):
-    if state == "loaded":
-        raise ConnectionRequired(state, f"The agent-browser extension is installed but not connected. Open a regular Chrome window in the profile where it is installed and make sure it is enabled at chrome://extensions/. Then run `{SETUP} --check`.")
-    if state == "pending":
-        raise ConnectionRequired(state, f"Chrome background setup is not complete. In the intended Chrome profile:\n{loading_instructions()}\nThen run `{SETUP} --check`.")
-    raise ConnectionRequired(state, f"Chrome background mode requires the agent-browser extension. Ask the user whether to set it up. Only after they confirm, run `{SETUP}`.")
-
-
-def offer_setup():
-    state = setup_state()
-    if state != "missing" or not sys.stdin.isatty() or not sys.stderr.isatty():
-        require_connection(state)
-    print("Chrome background mode requires the agent-browser extension. Set it up now? [y/N] ",
-          end="", file=sys.stderr, flush=True)
-    try:
-        confirmed = input().strip().lower() in ("y", "yes")
-    except EOFError:
-        confirmed = False
-    if not confirmed:
-        raise ValueError("Setup declined; no changes made")
-    install()
-    print("The original page was not opened.", file=sys.stderr)
-    return 1
-
-
 def check_setup():
     result = request("status", {}, 1)
     if result["status"] == "ok":
-        print("Chrome background setup complete. You can retry open --background.")
+        print("Chrome background setup complete.")
         return True
     if result.get("update_required"):
         raise ConnectionRequired("loaded", "Agent Browser must be updated before connecting. With the user's approval, "
-                                 f"stage the current version via `{SETUP}`, then reload it in the intended regular Chrome profile.")
+                                 "stage the current version using the setup service, then reload it in the intended regular Chrome profile.")
     if result["status"] == "ambiguous":
         raise AmbiguousConnection("Leave Agent Browser enabled in only one regular Chrome profile before checking again.")
     return False
@@ -436,93 +343,6 @@ def discover_profiles():
     return {key: names[key] for key in sorted(names, key=lambda key: (key != profile.get("last_used"), key))}
 
 
-def recovery_refused(reason):
-    raise ConnectionRequired("loaded", f"Chrome background recovery: {reason} The URL was not sent. "
-                             f"Check the extension in the intended regular Chrome profile, then run `{SETUP} --check`.")
-
-
-def recovery_profile():
-    origin = extension_origin(Path(__file__).resolve().parent / "extension")
-    try:
-        profiles = set(loaded_profiles(origin, strict=True, ignore_empty=True))
-    except ValueError:
-        recovery_refused("Could not verify which Chrome profiles have the extension installed.")
-    if not profiles:
-        require_connection(setup_state())
-    if len(profiles) != 1:
-        recovery_refused("The extension is recorded in more than one Chrome profile; no profile was chosen.")
-    profile, = profiles
-    try:
-        known = profile in discover_profiles() and not (CHROME / profile).is_symlink()
-    except (OSError, ValueError, AttributeError, TypeError):
-        known = False
-    if not known:
-        recovery_refused("The extension's profile could not be verified as a discoverable regular Chrome profile.")
-    if profile.startswith("-") or not profile.isprintable() or "\\" in profile:
-        recovery_refused("The extension's profile directory could not be safely passed to Chrome.")
-
-    manifest = host_manifest()
-    launcher = INSTALL / "native-host"
-    extension = INSTALL / "extension"
-    files = (manifest, launcher, INSTALL / "bridge.py", extension / "manifest.json")
-    try:
-        registration = None
-        if all(path.is_file() and not path.is_symlink() for path in files) and extension_origin(extension) == origin:
-            registration = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError, KeyError, TypeError):
-        registration = None
-    if (not isinstance(registration, dict) or registration.get("name") != HOST
-            or registration.get("type") != "stdio" or registration.get("path") != str(launcher)
-            or registration.get("allowed_origins") != [origin] or not os.access(launcher, os.X_OK)):
-        recovery_refused("The existing Chrome native host registration could not be verified.")
-    return profile
-
-
-def recover_background_open(request, deadline):
-    profile = recovery_profile()
-    # The running guard is in the same script as the count so an already stopped
-    # Chrome is never targeted with a window-count Apple event.
-    try:
-        windows = subprocess.run(["/usr/bin/osascript", "-e", CHROME_WINDOWS[0], "-e", CHROME_WINDOWS[1]],
-                                 check=True, capture_output=True, text=True,
-                                 timeout=remaining_time(deadline)).stdout.strip()
-    except (TimeoutError, subprocess.TimeoutExpired):
-        recovery_refused("Could not confirm zero Chrome windows before the deadline.")
-    except (OSError, ValueError, subprocess.CalledProcessError):
-        recovery_refused("Could not confirm zero Chrome windows; the window-count query failed.")
-    if windows == "not-running":
-        recovery_refused("Chrome is not running; it was not launched.")
-    if windows != "0":
-        if windows.isascii() and windows.isdecimal():
-            recovery_refused("Chrome already has an open window; it was not woken.")
-        recovery_refused("Could not confirm zero Chrome windows.")
-
-    # A host may have connected while the window count was being checked.
-    with connected_client(deadline) as client:
-        if client is not None:
-            return deliver_background_request(client, request, deadline)
-
-    try:
-        subprocess.run(["/usr/bin/open", "-g", "-n", "-a", "Google Chrome", "--args",
-                        f"--profile-directory={profile}", "--no-startup-window"],
-                       check=True, capture_output=True, timeout=remaining_time(deadline))
-    except (TimeoutError, subprocess.TimeoutExpired):
-        recovery_refused("The deadline expired while attempting the background wake.")
-    except (OSError, subprocess.CalledProcessError):
-        recovery_refused("The Chrome background wake command failed.")
-
-    reconnect_deadline = min(deadline, time.monotonic() + WAKE_WAIT)
-    try:
-        while time.monotonic() < reconnect_deadline:
-            with connected_client(reconnect_deadline) as client:
-                if client is not None:
-                    return deliver_background_request(client, request, deadline)
-            time.sleep(min(WAKE_POLL, max(0, reconnect_deadline - time.monotonic())))
-    except TimeoutError:
-        pass
-    recovery_refused("The Chrome background wake did not reconnect the native host in time.")
-
-
 def choose_profile(selected=None):
     names = discover_profiles()
     if not names:
@@ -539,11 +359,11 @@ def choose_profile(selected=None):
         return key, labels[key]
     for index, key in enumerate(profiles, 1):
         # Escape control characters from the profile name before writing to a terminal.
-        print(f"  {index}. {labels[key]} — --profile {shlex.quote(key)}", file=sys.stderr)
+        print(f"  {index}. {labels[key]} — profile directory {key!r}", file=sys.stderr)
     if selected is not None:
-        raise ValueError("Unknown Chrome profile directory; choose one of the listed --profile values")
+        raise ValueError("Unknown Chrome profile directory; choose one of the listed profile directories")
     if not sys.stdin.isatty() or not sys.stderr.isatty():
-        raise ValueError(f"Multiple Chrome profiles found. Ask the user which profile to use, then run `{SETUP} --profile <directory>` with its listed directory. No changes made.")
+        raise ValueError("Multiple Chrome profiles found. Ask the user which profile directory to use. No changes made.")
     try:
         print("Choose a Chrome profile number: ", end="", file=sys.stderr, flush=True)
         choice = int(input())
@@ -568,15 +388,15 @@ def atomic_write(path, content, mode):
                 temporary.unlink()
 
 
-def install(selected=None, *, open_settings=True, timeout=None):
+def install(selected=None, *, open_settings=False, timeout=None):
     """Stage bundled files without touching Chrome preferences; caller must obtain consent.
 
-    Raises ValueError for profile selection, OSError for staging, and
-    subprocess.SubprocessError for a settings launch failure (files may be staged).
-    Pass open_settings=False to stage and print instructions without launching Chrome.
+    Raises ValueError for profile selection and OSError for staging. Chrome is never launched.
     """
+    if open_settings:
+        raise ValueError("Launching Chrome is not supported")
     source = Path(__file__).resolve().parent
-    profile, label = choose_profile(selected)
+    _, label = choose_profile(selected)
     extension = INSTALL / "extension"
     files = {name: (source / "extension" / name).read_bytes() for name in ("manifest.json", "background.js")}
     files["read-page.js"] = (source.parent / "extension/shared/read-page.js").read_bytes()
@@ -595,72 +415,17 @@ def install(selected=None, *, open_settings=True, timeout=None):
     atomic_write(destination, (json.dumps(manifest, indent=2) + "\n").encode(), 0o644)
 
     print(f"Finish setup in Chrome profile {label}.")
-    print("If the extensions page does not open in that profile, go to chrome://extensions/ there.")
+    print("Go to chrome://extensions/ in that profile.")
     print(loading_instructions(), flush=True)
-    if open_settings:
-        subprocess.run(["/usr/bin/open", "-na", "Google Chrome", "--args",
-                        f"--profile-directory={profile}", "chrome://extensions/"], check=True, timeout=timeout)
-    print(f"Setup is pending until Chrome loads and connects the extension. After loading it, run `{SETUP} --check`.")
-
-
-def uninstall():
-    origin = extension_origin(Path(__file__).resolve().parent / "extension")
-    profiles = sorted(set(loaded_profiles(origin, strict=True)))
-    with connected_client(time.monotonic() + 1) as client:
-        connected = client is not None
-    if profiles or connected:
-        where = " (" + ", ".join(map(repr, profiles)) + ")" if profiles else ""
-        raise ValueError(f"Remove Agent Browser in chrome://extensions/ in each profile where it is loaded{where}, then run `{REMOVE}` again. No files removed.")
-
-    destination = host_manifest()
-    # Do not follow directory symlinks into other locations or remove another host's registration.
-    for directory in (CHROME, destination.parent, INSTALL.parent, INSTALL, INSTALL / "extension"):
-        if directory.is_symlink():
-            raise ValueError(f"Refusing to remove files through a symlink: {directory}")
-    if destination.is_symlink():
-        raise ValueError(f"Refusing to remove a symlinked host registration: {destination}")
-    if destination.exists():
-        registration = json.loads(destination.read_text(encoding="utf-8"))
-        if (not isinstance(registration, dict) or registration.get("name") != HOST
-                or registration.get("path") != str(INSTALL / "native-host")
-                or registration.get("allowed_origins") != [origin]):
-            raise ValueError(f"Unrecognized host registration; no files removed: {destination}")
-    files = [destination, INSTALL / "native-host", INSTALL / "bridge.py",
-             INSTALL / "extension/manifest.json", INSTALL / "extension/background.js", INSTALL / "extension/read-page.js"]
-    if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in files):
-        raise ValueError("Unexpected file type in Chrome background setup; no files removed")
-    for path in files:
-        path.unlink(missing_ok=True)
-    for directory in (INSTALL / "extension", INSTALL):
-        if directory.is_dir() and not any(directory.iterdir()):
-            directory.rmdir()
-    print("Chrome background setup files and host registration removed (if present).")
-
+    print("Setup is pending until Chrome loads and connects the extension. Check its status using the setup service.")
 
 def main():
-    command, *args = sys.argv[1:]
     try:
-        if command == "install":
-            install(*args)
-        elif command == "uninstall":
-            uninstall()
-        elif command == "check":
-            if not check_setup():
-                require_connection(setup_state())
-        elif command == "host":
-            native_host(*args)
-        elif command == "open":
-            return background_open(args[0], int(args[1]))
-    except ConnectionRequired as error:
+        if len(sys.argv) != 3 or sys.argv[1] != "host":
+            raise ValueError("Only native host startup is supported")
+        native_host(sys.argv[2])
+    except (OSError, ValueError) as error:
         print(f"agent-browser: {error}", file=sys.stderr)
-        if os.environ.get("AGENT_BROWSER_MCP") == "1":
-            return {"missing": 20, "pending": 21, "loaded": 22}[error.state]
-        return 1
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
-        print(f"agent-browser: {error}", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        print("\nagent-browser: interrupted", file=sys.stderr)
         return 1
     return 0
 
