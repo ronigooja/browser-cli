@@ -248,6 +248,9 @@ function validPayload(operation, data) {
 async function operation(state, { operation, payload, expires }) {
   if (!validPayload(operation, payload) || !Number.isSafeInteger(expires)) return { status: "invalid_request" };
   if (Date.now() >= expires) return { status: operation === "close" ? "cleanup_unconfirmed" : "timeout" };
+  if (operation !== "close" && !await chrome.permissions.contains({ origins: ["http://*/*", "https://*/*"] })) {
+    return { status: "permission_required" };
+  }
   if (operation === "status") return { status: "ok" };
   if (operation === "read") return guardedRead(state, payload, expires);
   if (operation === "close") return closeOwned(state, payload, expires);

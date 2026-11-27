@@ -112,6 +112,7 @@ function production(initialTabs = []) {
   let probe = { status: "ok", final_url: url, text: "Visible text", title: "Example" };
   let duringInjection = () => {};
   let failClose = false;
+  let allSites = true;
   let windows = [{ id: 1, type: "normal", incognito: false }];
   let context;
   const chrome = {
@@ -124,6 +125,10 @@ function production(initialTabs = []) {
       onInstalled: noop, onStartup: noop,
     },
     alarms: { onAlarm: alarm, create: () => {} },
+    permissions: { contains: async ({ origins }) => {
+      assert.equal(origins.join(","), "http://*/*,https://*/*");
+      return allSites;
+    } },
     tabs: {
       query: async options => { assert.equal(options.windowType, "normal"); return [...tabs.values()]; },
       get: async id => { if (!tabs.has(id)) throw Error("gone"); return { ...tabs.get(id) }; },
@@ -176,6 +181,7 @@ function production(initialTabs = []) {
     probe(next) { probe = { ...probe, ...next }; },
     duringInjection(fn) { duringInjection = fn; },
     failClose() { failClose = true; },
+    setAllSites(value) { allSites = value; },
     windows(value) { windows = value; },
     reconnect() { disconnect(); events.alarm({ name: "reconnect-native-host" }); },
     async request(operation, payload = {}, expires = Date.now() + 1000) {
@@ -190,6 +196,16 @@ function production(initialTabs = []) {
     },
   };
 }
+
+test("setup and page operations refuse missing all-site access without opening a tab", async () => {
+  const browser = production();
+  browser.setAllSites(false);
+  assert.equal((await browser.request("status")).status, "permission_required");
+  assert.equal((await browser.request("open", { url: browser.url })).status, "permission_required");
+  assert.deepEqual(browser.calls.create, []);
+  browser.setAllSites(true);
+  assert.equal((await browser.request("status")).status, "ok");
+});
 
 test("find returns same origin and path candidates with generation-scoped references and excludes private tabs", async () => {
   const browser = production([{ id: 1 }, { id: 2, url: "https://example.com/?added=1" },

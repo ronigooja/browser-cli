@@ -53,7 +53,9 @@ class Setup:
         return result("extension_pending", "chrome", "Finish loading the extension in Chrome; do not reinstall.",
                       instructions=("In the intended regular Chrome profile, verify the profile is correct. "
                                     "If the extensions page did not open there, switch to that profile and go to chrome://extensions/.\n"
-                                    f"{action}{instructions}\nAfter loading or reloading it, use setup_extension with action=check."),
+                                     f"{action}{instructions}\n"
+                                     "In the extension's Details, make sure Site access is set to On all sites once. "
+                                     "Do not make per-site grants. After loading or reloading it, use setup_extension with action=check."),
                       next_action="check", **({"profile": profile} if profile else {}))
 
     def check(self, browser):
@@ -63,6 +65,9 @@ class Setup:
             if browser == "chrome":
                 self.staged_update = None
             return result("extension_connected", browser, "The browser extension is connected.")
+        if browser == "chrome" and state == "permission_required":
+            return result(state, browser, "Open the Agent Browser extension's Details and set Site access to On all sites once. Then check the connection again.",
+                          next_action="check")
         if browser == "safari" and state in ("extension_required", "extension_pending", "extension_disconnected", "permission_required"):
             return result(state, browser, "Use the production Safari extension, not the development probe.",
                           instructions=("In Safari > Settings > Extensions, enable Agent Browser once and allow its website access on all websites once. "
