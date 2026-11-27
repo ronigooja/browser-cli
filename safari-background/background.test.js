@@ -24,7 +24,8 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
       create: async ({url: target}) => {
         creates++;
         const tab = {...existing, id: 2, active: false, url: target};
-        window().tabs.push(tab);
+        // Safari returns value snapshots; a later create cannot mutate the prior one.
+        windows = [{...window(), tabs: [...window().tabs, tab]}];
         return tab;
       },
       remove: async () => { closes++; }},

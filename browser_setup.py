@@ -68,10 +68,12 @@ class Setup:
         if browser == "chrome" and state == "permission_required":
             return result(state, browser, "Open the Agent Browser extension's Details and set Site access to On all sites once. Then check the connection again.",
                           next_action="check")
-        if browser == "safari" and state in ("extension_required", "extension_pending", "extension_disconnected", "permission_required"):
+        if browser == "safari" and state in ("extension_required", "extension_pending", "extension_disconnected", "permission_required", "profile_required"):
             return result(state, browser, "Use the production Safari extension, not the development probe.",
-                          instructions=("In Safari > Settings > Extensions, enable Agent Browser once and allow its website access on all websites once. "
-                                        "Afterward, use setup_extension with action=check. No per-site permission or automatic install is offered."),
+                          instructions=("Open the signed AgentBrowserSafari app once. In Safari > Settings > Extensions, enable Agent Browser "
+                                        "in the intended named profile only and leave private access off. In the Agent Browser Safari Setup popup, "
+                                        "grant all HTTP(S) access once. Set AGENT_BROWSER_SAFARI_PROFILE in the MCP environment to the UUID shown there. "
+                                        "Then use setup_extension with action=check. No per-site permission or automatic install is offered."),
                           next_action="check")
         if browser == "chrome" and self.staged_update and state in ("extension_pending", "extension_disconnected"):
             return self.pending(self.service.backends[browser], self.staged_update, update=True)

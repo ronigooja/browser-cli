@@ -20,6 +20,7 @@ BLOCKERS = {
     "permission_required": "Ask the user to enable website access for all sites once in the browser's extension settings, then check the connection. Do not request a per-site grant.",
     "background_unavailable": "The browser has no verified way to open this page in the background. No foreground fallback was attempted.",
     "profile_required": "Select the intended named Safari profile in the Agent Browser setup popup and configure the displayed profile UUID in the MCP process environment.",
+    "private_access_enabled_or_unverified": "Disable the Safari extension's access to Private Browsing and check again. No page was accessed.",
     "busy": "Another request is already using this browser context. No new operation was sent.",
     "read_unavailable": "The browser could not verify or access the selected document. No page content was returned.",
     "open_unconfirmed": "The browser could not confirm whether a tab opened. Inspect the browser before trying again; never fall back to a foreground open.",
@@ -139,6 +140,7 @@ class BrowserService:
         if not isinstance(reply, dict) or not isinstance(reply.get("status"), str):
             return {"status": "browser_error"}
         normalized = {"missing": "extension_required", "pending": "extension_pending", "no_regular_window": "background_unavailable",
+                      "window_snapshot_unavailable": "background_unavailable", "site_access_required": "permission_required",
                       "disconnected": "extension_disconnected", "ambiguous": "extension_ambiguous"}.get(reply["status"])
         if normalized:
             return dict(reply, status=normalized)
