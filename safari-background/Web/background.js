@@ -275,7 +275,9 @@ async function execute(request) {
   const {operation, payload, expires} = request;
   if (!validPayload(operation, payload) || !Number.isSafeInteger(expires)) return {status: "invalid_request"};
   if (expired(expires)) return {status: "timeout"};
+  const selection = selectionEpoch;
   const status = await setupStatus();
+  if (selection !== selectionEpoch) return {status: "disconnected"};
   if (status !== "ok") return {status};
   if (expired(expires)) return {status: "timeout"};
   if (operation === "status") return {status: "ok"};

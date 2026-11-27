@@ -128,10 +128,16 @@ func verifyGate() -> Bool {
     var lease = IPC.Lease(id: id, profile: profile, instance: instance, expires: 200, request: Data(), claim: nil, result: nil)
     guard !lease.take(wrongProfile, now: 100), !lease.take(wrongInstance, now: 100),
           !lease.take(target, now: 200), lease.take(target, now: 100), !lease.take(target, now: 100),
-          !lease.accepts(wrongInstance, id: id, now: 100), !lease.accepts(target, id: "wrong", now: 100),
+          !lease.accepts(wrongProfile, id: id, now: 100), !lease.accepts(wrongInstance, id: id, now: 100),
+          !lease.accepts(target, id: "wrong", now: 100),
           !lease.accepts(target, id: id, now: 200), lease.accepts(target, id: id, now: 100) else { return false }
     lease.result = Data()
-    return !lease.accepts(target, id: id, now: 100)
+    guard !lease.accepts(target, id: id, now: 100) else { return false }
+    // A read-only lease allows either instance to claim, but binds its result to the claimant.
+    var unbound = IPC.Lease(id: id, profile: profile, instance: nil, expires: 200, request: Data(), claim: nil, result: nil)
+    return !unbound.take(wrongProfile, now: 100) && unbound.take(wrongInstance, now: 100) &&
+        !unbound.take(target, now: 100) && !unbound.accepts(target, id: id, now: 100) &&
+        unbound.accepts(wrongInstance, id: id, now: 100)
 }
 
 let args = Array(CommandLine.arguments.dropFirst()).filter { !$0.hasPrefix("-psn_") }
