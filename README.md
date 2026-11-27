@@ -87,6 +87,12 @@ time. Chrome pins the tab by ID. `selector` scopes returned text and links, but 
 or verification check. The server checks browser permission before reading and waits up to
 600 seconds for a passive challenge; human verification always stops the read.
 
+For asynchronously rendered content, set `wait_for_selector` to a CSS selector that identifies
+the requested content. MCP checks for any visible match on the same tab for up to eight seconds
+after target selection, independently of `selector`, and reports `content_not_ready` on expiry.
+For example, an X timeline read can use `wait_for_selector: 'main a[href*="/status/"]'` and
+`selector: 'main'`; the condition does not establish that the full timeline has loaded.
+
 Chrome background setup requires explicit user approval. Use `setup_chrome_background` to
 `prepare` after approval, `install` with the returned grant and selected profile, and `check`
 after the user loads it. Relay the returned instructions in full. It never reinstalls a pending or

@@ -45,7 +45,7 @@ browser-cli help | version | mcp
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
   info [--tab T]                print page metadata and detected challenge: none|cloudflare-passive|needs-human
-  read-page --tab T [--selector CSS] [--include-links] -- <exact-url>
+  read-page --tab T [--selector CSS] [--wait-for-selector CSS] [--include-links] -- <exact-url>
                                 guarded JSON read; T is a unique case-sensitive URL substring
                                 for Safari or id:<id> for Chrome
   text [--tab T]                print page text
@@ -102,6 +102,7 @@ EOF
 BROWSER=""
 TAB=""; TIMEOUT="$DEFAULT_TIMEOUT"; TIMEOUT_SET=0; BACKGROUND=0; FOREGROUND=0; TRUSTED=0; TRUSTED_SENDING=0; JSON=0; ARGS=()
 SELECTOR=""; SELECTOR_SET=0; MAX_CHARS=""; MAX_CHARS_SET=0; RAW=0; INCLUDE_LINKS=0
+WAIT_SELECTOR=""; WAIT_SELECTOR_SET=0
 TO=""; TO_SET=0; BY=""; BY_SET=0
 OUT=""; OUT_SET=0
 parse() {
@@ -117,6 +118,7 @@ parse() {
       --tab) [ $# -ge 2 ] || usage_error '--tab requires a value'; TAB="$2"; shift 2 ;;
       --timeout) [ $# -ge 2 ] || usage_error '--timeout requires a value'; TIMEOUT="$2"; TIMEOUT_SET=1; shift 2 ;;
       --selector) [ $# -ge 2 ] || usage_error '--selector requires a value'; SELECTOR="$2"; SELECTOR_SET=1; shift 2 ;;
+      --wait-for-selector) [ $# -ge 2 ] || usage_error '--wait-for-selector requires a value'; WAIT_SELECTOR="$2"; WAIT_SELECTOR_SET=1; shift 2 ;;
       --out) [ $# -ge 2 ] || usage_error '--out requires a value'; OUT="$2"; OUT_SET=1; shift 2 ;;
       --to) [ $# -ge 2 ] || usage_error '--to requires a value'; TO="$2"; TO_SET=1; shift 2 ;;
       --by) [ $# -ge 2 ] || usage_error '--by requires a value'; BY="$2"; BY_SET=1; shift 2 ;;
@@ -685,8 +687,9 @@ cmd_read_page() {
     [ -n "$TAB" ] || usage_error 'read-page requires a --tab URL substring in Safari'
   fi
   js_string "${ARGS[0]}"
-  local expected="$JS_STRING" selector code
+  local expected="$JS_STRING" selector wait_selector code
   js_string "$SELECTOR"; selector="$JS_STRING"
+  js_string "$WAIT_SELECTOR"; wait_selector="$JS_STRING"
   code="(function(){ $CHALLENGE_JS
     if (location.href !== $expected) return {status:'target_changed'};
     var challenge = challengeState();
@@ -708,6 +711,21 @@ cmd_read_page() {
     });
     if (gate || signInDialog || passwords.some(function(e){return visible(e) && e.closest('dialog, [role=dialog]');})) {
       return {status:'login_required'};
+    }
+    if ($WAIT_SELECTOR_SET) {
+      try {
+        var matches = document.querySelectorAll($wait_selector);
+        if (!Array.prototype.some.call(matches, function(e) {
+          if (!visible(e) || e.closest('[hidden]')) return false;
+          for (var node = e; node; node = node.parentElement) {
+            if (Number(getComputedStyle(node).opacity) === 0) return false;
+          }
+          return true;
+        })) return {status:'content_not_ready'};
+      } catch (e) {
+        if (e.name === 'SyntaxError') return {status:'invalid_wait_selector'};
+        throw e;
+      }
     }
     var root = body;
     if ($SELECTOR_SET) {
@@ -1624,6 +1642,7 @@ case "$cmd" in
     [ "$cmd" != open ] || [ "$FOREGROUND$BACKGROUND" != 00 ] || { echo 'browser-cli: open needs --foreground or --background' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'browser-cli: --json only applies to tabs' >&2; exit 2; }
     [ "$INCLUDE_LINKS" = 0 ] || [ "$cmd" = read-page ] || usage_error '--include-links only applies to read-page'
+    [ "$WAIT_SELECTOR_SET" = 0 ] || [ "$cmd" = read-page ] || usage_error '--wait-for-selector only applies to read-page'
     [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(read-page|text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'browser-cli: --selector only applies to read-page, text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
     [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'browser-cli: --out only applies to screenshot' >&2; exit 2; }
     if [ "$cmd" = scroll ]; then

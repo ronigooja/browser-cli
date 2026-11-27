@@ -236,6 +236,46 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(self.reader.read({"url": URL, "browser": "chrome"})["status"], "no_content")
         self.assertEqual(self.run_cli.call_count, 4)
 
+    def test_explicit_readiness_waits_on_existing_tab_without_navigation(self):
+        now = [0]
+        selector = 'main a[href*="/status/"]'
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "content_not_ready"}), json.dumps(PAGE)]
+        with patch.object(mcp.time, "monotonic", side_effect=lambda: now[0]), \
+                patch.object(mcp.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
+            page = self.reader.read({"url": URL, "browser": "chrome", "mode": "existing_tab",
+                                     "selector": "main", "wait_for_selector": selector})
+        self.assertEqual((page["status"], now[0]), ("ok", 0.5))
+        probe = ("chrome", "read-page", "--tab", "id:42", "--selector", "main", "--wait-for-selector", selector, "--", URL)
+        self.assertEqual(self.run_cli.call_args_list, [call("chrome", "tabs", "--json"), call(*probe), call(*probe, timeout=5)])
+
+    def test_readiness_timeout_keeps_created_tab_cleanup_token(self):
+        now = [0]
+        self.run_cli.side_effect = ["[]", "id:42\tcreated", json.dumps([TAB]),
+                                    *([json.dumps({"status": "content_not_ready"})] * 16)]
+        with patch.object(mcp.time, "monotonic", side_effect=lambda: now[0]), \
+                patch.object(mcp.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
+            page = self.reader.read({"url": URL, "browser": "chrome", "wait_for_selector": "article"})
+        self.assertEqual((page["status"], now[0]), ("content_not_ready", 8))
+        self.assertNotIn("text", page)
+        self.assertTrue(page["cleanup_token"])
+
+    def test_readiness_does_not_reopen_closed_target(self):
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "content_not_ready"}), mcp.CliFailure(26), "[]"]
+        with patch.object(mcp.time, "sleep"):
+            page = self.reader.read({"url": URL, "browser": "chrome", "wait_for_selector": "article"})
+        self.assertEqual(page["status"], "open_tab_required")
+        self.assertEqual(self.run_cli.call_count, 4)
+
+    def test_readiness_stops_for_login_verification_and_navigation(self):
+        for status in ("login_required", "verification_required", "target_changed", "invalid_wait_selector"):
+            self.run_cli.reset_mock()
+            self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "content_not_ready"}), json.dumps({"status": status})]
+            with self.subTest(status=status), patch.object(mcp.time, "sleep"):
+                page = self.reader.read({"url": URL, "browser": "chrome", "wait_for_selector": "article"})
+                self.assertEqual(page["status"], status)
+                self.assertNotIn("text", page)
+                self.assertEqual(self.run_cli.call_count, 3)
+
     def test_reused_and_safari_indices_never_grant_cleanup(self):
         for browser, opening in (("chrome", "id:42\treused"), ("safari", "1:2\tcreated")):
             self.run_cli.side_effect = ["[]", opening, json.dumps([TAB]), json.dumps(PAGE)]
@@ -267,6 +307,8 @@ class StdioTest(unittest.TestCase):
         self.assertEqual(init["result"]["protocolVersion"], "2025-11-25")
         self.assertEqual([tool["name"] for tool in listing["result"]["tools"]],
                          ["read_page", mcp.SETUP_TOOL["name"], "cleanup_tab"])
-        self.assertEqual(listing["result"]["tools"][0]["inputSchema"]["properties"]["mode"]["default"], "public_background")
+        properties = listing["result"]["tools"][0]["inputSchema"]["properties"]
+        self.assertEqual(properties["mode"]["default"], "public_background")
+        self.assertEqual(properties["wait_for_selector"]["type"], "string")
         self.assertEqual(call["result"]["structuredContent"]["status"], "browser_required")
         self.assertEqual(refused["error"]["code"], -32602)

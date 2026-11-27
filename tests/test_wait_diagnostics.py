@@ -117,6 +117,30 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"text":"Example Domain"', result.stdout)
 
+    def test_readiness_rejects_shell_and_accepts_any_visible_match(self):
+        url = "https://example.com/"
+        selector = 'main a[href*="/status/"]'
+        for condition in ("missing", "hidden", "visible", "invalid"):
+            with self.subTest(condition=condition):
+                fixture = f"""global.location = new URL({url!r});
+const mode = {condition!r};
+const node = {{closest:()=>null, getBoundingClientRect:()=>({{width:1,height:1}})}};
+const hidden = {{...node, parentElement:{{opacity:0}}}};
+global.getComputedStyle = e => ({{visibility:'visible',opacity:e.opacity ?? 1}});
+global.document = {{title:'Example', readyState:'complete', querySelector:()=>null,
+  querySelectorAll:s=>{{if(s !== {selector!r}) return [];
+    if(mode === 'invalid') throw SyntaxError('invalid');
+    return mode === 'missing' ? [] : mode === 'hidden' ? [hidden] : [hidden,node];}},
+  body:{{get innerText(){{if(mode !== 'visible') throw Error('keyboard shell was read'); return 'Post body';}},
+    querySelectorAll:()=>[]}}}};
+"""
+                result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--wait-for-selector", selector,
+                                                           "--", url], page_fixture=fixture)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                page = json.loads(result.stdout)
+                self.assertEqual(page["status"], {"visible": "ok", "invalid": "invalid_wait_selector"}.get(condition, "content_not_ready"))
+                self.assertEqual(page.get("text"), "Post body" if condition == "visible" else None)
+
     def test_safari_guarded_read_resolves_unique_case_sensitive_url_substring(self):
         url = "https://example.com/Path"
         calls = []
