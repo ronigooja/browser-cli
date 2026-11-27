@@ -53,6 +53,11 @@ test('classic script defines a global and CommonJS exports the function', () => 
   assert.equal(typeof readPage, 'function');
 });
 
+test('serialized function reads without module-scope dependencies', () => {
+  const p = probe({ body: element({ innerText: 'isolated' }) });
+  assert.equal(p.run({ expectedURL: 'https://example.com/' }).text, 'isolated');
+});
+
 test('URL guard runs before any document access', () => {
   const context = { location: { href: 'https://other/' }, document: new Proxy({}, {
     get() { throw new Error('unexpected DOM access'); },
