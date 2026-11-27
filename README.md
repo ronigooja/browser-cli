@@ -86,7 +86,7 @@ that need a tab fail. Two states exist:
 | `open --foreground <url>` or Safari `open --background <url>` | creates a window | a new window replaces the empty one |
 | Chrome `open --background <url>` | fails without creating a window | not applicable |
 | other tab commands | fail with a no-window error | can fail with localized AppleScript error `-1728` |
-| `wait`, `wait-challenge` | poll until success or timeout; `wait-challenge` reports its last state on timeout | same |
+| `wait`, `wait-challenge` | poll until timeout because there is no tab to probe | same |
 
 ## Real input
 
@@ -148,8 +148,9 @@ badges count as `none`. `cloudflare-passive` means a self-clearing interstitial 
 "Just a moment...") and is waited out silently. `needs-human` means an interactive
 Turnstile/reCAPTCHA/hCaptcha widget or a Cloudflare block page.
 
-`wait-challenge` polls until the state is `none`. On `needs-human` it emits a diagnostic and sends
-one macOS notification without interacting with the widget.
+`wait-challenge` waits while a passive challenge is detected and prints `challenge: none` when no
+known challenge is detected. On `needs-human` it stops with an error and attempts one macOS
+notification without interacting with the widget.
 
 ## Permissions
 
@@ -159,7 +160,7 @@ one macOS notification without interacting with the widget.
 | Allow JavaScript from Apple Events (browser setting) | JavaScript-backed commands | the diagnostic names the setting |
 | Screen Recording | `screenshot` | capture fails |
 | Accessibility | `--trusted` | real input is not sent |
-| Notifications | `wait-challenge` alert | the alert is skipped; the command still waits |
+| Notifications | `wait-challenge` alert | the alert is skipped; the error is still printed |
 
 Permissions are per application: a different terminal or host program needs its own grants.
 

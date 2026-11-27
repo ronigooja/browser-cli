@@ -32,7 +32,7 @@ browser-cli help | version
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
-  info [--tab T]                print page metadata and challenge: none|cloudflare-passive|needs-human
+  info [--tab T]                print page metadata and detected challenge: none|cloudflare-passive|needs-human
   text [--tab T]                print page text
   links [--tab T]               print link text and absolute URL, tab-separated, one per line
   html [--tab T]                print sanitized page HTML
@@ -44,12 +44,13 @@ browser-cli help | version
   fill [--tab T] <css> <text>   fill an input, textarea, or editable element
   select [--tab T] <css> <value>  select an option by value or label
   press [--tab T] <key> [--selector CSS]
-                                send Enter, Escape, Tab, arrow keys, Backspace, Space or one character
+                                dispatch key events for Enter, Escape, Tab, arrows, Backspace, Space or one character
   scroll [--tab T] [--selector CSS] (--to top|bottom | --by N)  scroll page or element
-  submit [--tab T] <css>        submit a form or its owning form
+  submit [--tab T] <css>        request submission of the matched form or the element's form
   wait [--tab T] <js>           poll until the expression is truthy; no output on success
   wait-challenge [--tab T] [--timeout N]
-                                wait without interacting; prints challenge: cleared on success
+                                wait while a passive challenge is detected; exit 1 if human verification is needed
+                                prints challenge: none when no known challenge is detected
   status                        print on (exit 0), off (permission disabled, exit 1),
                                 or unknown (no tab to probe, exit 1)
 
@@ -65,16 +66,18 @@ browser-cli help | version
 --foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)
 --json      tabs only: array of {window,tab,title,url,id}; id is a string in Chrome, null in Safari
---timeout N positive integer seconds before commands give up (default 30; wait-challenge 600)
+--timeout N positive integer seconds: total for wait, wait-challenge and Chrome background open;
+            otherwise applies to individual browser calls (default 30; wait-challenge 600)
 --selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
---out PATH  screenshot only: PNG destination (default: a new file in the system temp directory)
+--out PATH  screenshot only: PNG destination; overwrites an existing file (default: a new temp file)
 --to top|bottom, --by N scroll only: choose destination or integer distance
 --max-chars N limit output characters (default 20000 for text, links, html and snapshot;
               no limit for eval and file unless specified)
 --raw       html only: return unmodified outerHTML
 --          end option parsing
 With no tabs, tabs succeeds with empty output (or [] with --json).
-eval and file are synchronous; promises are not awaited.
+eval and file are synchronous and may be blocked by the page's security policy; promises are not awaited.
+By default, page actions use JavaScript, not real input. Synthetic key events don't type or move focus like a keyboard.
 Exit status: 0 success, 1 operation failed or status off/unknown, 2 invalid usage.
 Results go to stdout; diagnostics go to stderr.
 EOF
@@ -1070,7 +1073,7 @@ cmd_action() {
       element.focus();
       var r = element.getBoundingClientRect(), opts = {bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2};
       ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(type){ element.dispatchEvent(type.indexOf('pointer') === 0 ? new PointerEvent(type, opts) : new MouseEvent(type, opts)); });
-      return 'clicked ' + element.tagName.toLowerCase() + ' \"' + (element.innerText || element.getAttribute('aria-label') || element.value || '').trim().replace(/\\s+/g,' ').slice(0,40) + '\"\\n';
+      return 'dispatched click events on ' + element.tagName.toLowerCase() + '\\n';
     }
     if (command === 'fill') {
       element.focus();
@@ -1103,7 +1106,7 @@ cmd_action() {
       allowed = element.dispatchEvent(new KeyboardEvent('keyup',keyopts)) && allowed;
       var form = element.form || element.closest('form');
       if (key === 'Enter' && allowed && form) form.requestSubmit();
-      return 'pressed ' + arg + '\\n';
+      return 'dispatched key events for ' + arg + '\\n';
     }
     if (command === 'scroll') {
       var target = element || document.scrollingElement, max = Math.max(0,target.scrollHeight-target.clientHeight);
@@ -1113,7 +1116,7 @@ cmd_action() {
     }
     var form = element instanceof HTMLFormElement ? element : (element.form || element.closest('form'));
     if (!form) throw new Error('element has no form');
-    form.requestSubmit(); return 'submitted form\\n';
+    form.requestSubmit(); return 'requested form submission\\n';
   })()"
   run_js "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
   out="$(cat "$WORK/action-output"; printf '.')"; out="${out%.}"
@@ -1142,7 +1145,7 @@ end run
 $RESOLVE
 AS
 )"
-  local not_active="$APP window capture does not match the viewport; screenshot requires the target tab to be visible in the active browser"
+  local mismatch="could not match the $APP window capture to the page viewport; check that the target tab is visible in the active browser"
   cat >"$WORK/window.js" <<'JS'
 ObjC.import('CoreGraphics'); ObjC.import('Foundation');
 function run(a) {
@@ -1213,7 +1216,10 @@ JS
       dimensions="0 0"
     else
       dimensions="$(osascript -l JavaScript "$WORK/image.js" "$WORK/capture.png" 2>/dev/null)" || dimensions=invalid
-      case "$dimensions" in black|invalid|'') die 'screen capture is empty or black; check System Settings > Privacy & Security > Screen Recording' ;; esac
+      case "$dimensions" in
+        black) die 'screen capture is black; check that the tab shows content and Screen Recording is allowed' ;;
+        invalid|'') die 'could not read the screen capture' ;;
+      esac
     fi
     read -r width height <<<"$dimensions"
     if crop="$(awk -v g="$geometry" -v iw="$width" -v ih="$height" 'BEGIN {
@@ -1225,7 +1231,7 @@ JS
       print bottom-y, right-x, y, x;
     }')"; then break; fi
     attempt=$((attempt + 1))
-    [ "$attempt" -lt 6 ] || die "$not_active"
+    [ "$attempt" -lt 6 ] || die "$mismatch"
     sleep 0.5
   done
   local ch cw cy cx
@@ -1273,7 +1279,7 @@ cmd_wait() {
     if out="$(run_js "!!(
 ${ARGS[0]}
 )" "$remaining" 2>"$WORK/wait-error")"; then
-      :
+      last_error=""
     else
       last_error="$(cat "$WORK/wait-error")"
       if grep -q 'JavaScript from Apple Events is off' "$WORK/wait-error"; then
@@ -1289,28 +1295,36 @@ ${ARGS[0]}
 cmd_wait_challenge() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'wait-challenge takes no positional arguments'
   [ "$TIMEOUT_SET" = 1 ] || TIMEOUT=600
-  local deadline=$((SECONDS + TIMEOUT)) remaining out state=unknown host notified=0
+  local deadline=$((SECONDS + TIMEOUT)) remaining out state=unknown host last_error=""
   while :; do
     remaining=$((deadline - SECONDS))
     if [ "$remaining" -le 0 ]; then
-      die "challenge not cleared after ${TIMEOUT}s (state: $state)"
+      if [ "$state" = cloudflare-passive ]; then
+        die "passive challenge still detected after ${TIMEOUT}s"
+      fi
+      [ -z "$last_error" ] || printf '%s\n' "$last_error" >&2
+      die "could not determine challenge state within ${TIMEOUT}s"
     fi
     if out="$(run_js "(function(){ $CHALLENGE_JS return challengeState() + '\\n' + (location.host || location.protocol); })()" "$remaining" 2>"$WORK/challenge-error")"; then
       state="${out%%$'\n'*}"
       host="${out#*$'\n'}"
       if [ "$state" = none ]; then
-        echo 'challenge: cleared'
+        echo 'challenge: none'
         return 0
       fi
-      if [ "$state" = needs-human ] && [ "$notified" = 0 ]; then
-        printf 'browser-cli: human verification needed on %s; waiting for you to complete it\n' "$host" >&2
+      if [ "$state" = needs-human ]; then
         # Pass the host and browser as arguments, not interpolated AppleScript source.
         osascript -e 'on run argv' -e 'display notification ((item 1 of argv) & " needs verification — please complete it in " & (item 2 of argv)) with title "browser-cli"' -e 'end run' "$host" "$APP" >/dev/null 2>&1 || true
-        notified=1
+        die "human verification needed on $host; complete it in $APP, then run wait-challenge again"
       fi
-    elif grep -q 'JavaScript from Apple Events is off' "$WORK/challenge-error"; then
-      cat "$WORK/challenge-error" >&2
-      return 1
+      last_error=""
+    else
+      state=unknown
+      last_error="$(cat "$WORK/challenge-error")"
+      if grep -q 'JavaScript from Apple Events is off' "$WORK/challenge-error"; then
+        printf '%s\n' "$last_error" >&2
+        return 1
+      fi
     fi
     [ "$SECONDS" -ge "$deadline" ] || sleep 1
   done

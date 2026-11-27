@@ -5,19 +5,19 @@ description: Drives the user's real, logged-in macOS Safari or Chrome through th
 
 # browser-cli
 
-Run `"<skill base directory>/browser-cli" help` for syntax and output. Substitute the absolute base directory shown when this skill loads. Use that script path for every call rather than looking up `browser-cli` on `PATH`.
+Use `browser-cli` beside this skill when installed, or at the repository root (`../../browser-cli` from this directory) in a source checkout. Use its absolute path for every call, and run `help` for syntax and output.
 
 ## 1. Select a browser and tab
 
 - If the task needs the user's login, ask which browser holds it unless the user already said. Do not guess.
-- Start with `"<skill base directory>/browser-cli" --browser <browser> status`. On `off`, report the permission diagnostic and ask the user to enable the setting. Do not change it or restart the browser. On `unknown`, use the missing-target rule below, then check `status` again once the page is open.
+- Start with `--browser <browser> status`. On `off`, report the permission diagnostic and ask the user to enable the setting. Do not change it or restart the browser. On `unknown`, use the missing-target rule below, then check `status` again once the page is open.
 - If a tab command fails with `-1728`, check `tabs`. If there are no tabs, follow the `unknown` recovery above. If tabs exist or the check fails, report the original error and stop. Do not retry the failed tab command automatically.
-- Identify the tab with `tabs`. If the task needs the user's Chrome login, confirm the candidate's title and URL with the user: `tabs --json` does not show profiles. On Chrome, pin the tab with `--tab id:<id>` using the ID from `tabs --json` or `open --background`. On Safari, use `--tab <specific-url-substring>` because indexes can change. Reconfirm if the selector no longer matches; do not silently switch tabs.
+- Identify the tab with `tabs`. If the task needs the user's Chrome login, confirm the candidate's title and URL with the user: `tabs --json` does not show profiles. On Chrome, pin the tab with `--tab id:<id>` using the ID from `tabs --json` or `open --background`. Safari has no stable tab ID: before acting, check that the URL substring matches just the intended tab. Stop if the match is missing or ambiguous; do not silently switch tabs.
 - **Missing target:** If the task needs the user's login, ask them to open the target in the correct browser and profile; do not use `open`. Otherwise, use `open --background` when available (see `help`). If background opening is unavailable, ask the user to open the page unless bringing the browser to the front is intended. Do not run `install-background` without approval or retry a failed background open in the foreground. If a screenshot needs an existing tab to be visible, ask the user to bring it into view.
 
 ## 2. Check for verification
 
-Run `info` on the selected tab before reading or interacting. If a human-verification page is visible or `info` reports `challenge: needs-human`, stop and tell the user. After they complete it, use `wait-challenge` to confirm it cleared. For `cloudflare-passive`, use `wait-challenge` directly. If it fails or times out, report it and stop. Never click, type into, read, or solve verification widgets.
+Run `info` on the selected tab before reading or interacting. For `cloudflare-passive`, use `wait-challenge`. If human verification is visible or reported by either command, stop and tell the user. After they complete it, use `wait-challenge` to check again. `challenge: none` means no known challenge was detected; it does not override a visible verification page. Report any other failure and stop. Never click, type into, read, or solve verification widgets.
 
 ## 3. Read or interact
 
