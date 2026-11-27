@@ -10,6 +10,50 @@ CLI = Path(__file__).resolve().parents[1] / "browser-cli"
 START_TIME = "Fri Nov 27 00:00:00 2026"
 CHROME_INSTANCE = "1234\t" + START_TIME
 
+# Small DOM model for guarded reads; osascript's mock executes the generated JS.
+GATE_DOM = r"""
+function element(tag, attrs, text, ...children) {
+  const node = {
+    tagName: tag.toUpperCase(), children, childElementCount: children.length,
+    getAttribute: key => attrs[key] ?? null,
+    get pathname() { return new URL(attrs.href, location.href).pathname; },
+    get textContent() { return [text, ...children.map(child => child.textContent)].join(' ').trim(); },
+    get innerText() { return this.textContent; },
+    getBoundingClientRect: () => ({width: 10, height: 10}),
+    matches(selector) {
+      return selector.split(',').some(part => {
+        const m = /^([\w-]+)?(?:\[([\w-]+)(?:="?([\w-]+)"?)?\])?$/.exec(part.trim());
+        if (!m) throw SyntaxError('unsupported fixture selector: ' + part);
+        return (!m[1] || m[1] === tag) && (!m[2] || (m[2] in attrs && (!m[3] || attrs[m[2]] === m[3])));
+      });
+    },
+    closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector); },
+    contains(target) { return this === target || children.some(child => child.contains(target)); },
+    querySelectorAll(selector) {
+      return children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+    style: {visibility: 'visible', opacity: attrs.opacity ?? 1, cursor: attrs.cursor ?? 'auto'},
+  };
+  for (const child of children) child.parentElement = node;
+  return node;
+}
+global.getComputedStyle = node => node.style;
+const e = element;
+const prompt = () => e('span', {}, '登录后查看搜索结果');
+const header = () => e('header', {}, '', e('nav', {}, '', e('a', {href:'/login'}, 'Log in')));
+const gate = action => e('main', {}, '', e('div', {}, '', e('div', {}, '', prompt()), action));
+function page(body, readyState='complete', title='Example', ready=[]) {
+  global.document = {body, readyState, title,
+    querySelector(selector) {
+      if (selector === '[') throw SyntaxError('invalid extraction selector');
+      return null;
+    },
+    querySelectorAll(selector) { return selector === '[data-results]' ? ready : []; },
+  };
+}
+"""
+
 
 class WaitDiagnosticsTest(unittest.TestCase):
     def run_cli(self, command, *probes, reject_eval=False, args=None, file_source=None, page_fixture=None,
@@ -116,6 +160,79 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
         result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--", url], page_fixture=fixture)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"text":"Example Domain"', result.stdout)
+
+    def test_guarded_read_inline_login_blocks_readiness_and_extraction(self):
+        url = "https://example.com/search?q=anything"
+        for action, readiness, ready_state in (
+            ("e('div', {cursor:'pointer'}, '立即登录')", "[]", "complete"),
+            ("e('button', {}, '登录')", "[e('div', {}, 'Stale results')]", "complete"),
+            ("e('a', {href:'/sign-in'}, 'Continue')", "[]", "loading"),
+        ):
+            with self.subTest(action=action):
+                fixture = f"""global.location = new URL({url!r});
+{GATE_DOM}
+const body = e('body', {{}}, '', header(), gate({action}));
+Object.defineProperty(body, 'innerText', {{get() {{throw Error('blocker content was read')}}}});
+page(body, {ready_state!r}, 'Do not expose this title', {readiness});
+"""
+                result, _ = self.run_cli("read-page", reject_eval=True,
+                                         args=["--tab", "id:42", "--wait-for-selector", "[data-results]",
+                                               "--include-links", "--selector", "[", "--", url],
+                                         page_fixture=fixture)
+                self.assertEqual((result.returncode, result.stdout), (0, '{"status":"login_required"}\n'), result.stderr)
+
+    def test_guarded_read_handles_english_gate_and_semantic_dialog(self):
+        url = "https://example.com/collection"
+        for body in (
+            "e('section', {}, '', e('h2', {}, 'Sign in to view this collection'), e('button', {}, 'Sign in'))",
+            "e('dialog', {'role':'dialog'}, '', e('h2', {}, 'Log in to continue'))",
+            "e('div', {'role':'dialog'}, '', e('input', {type:'password'}, ''))",
+        ):
+            with self.subTest(body=body):
+                fixture = f"""global.location = new URL({url!r});
+{GATE_DOM}
+page(e('body', {{}}, '', {body}));
+"""
+                result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--wait-for-selector", "[data-results]",
+                                                           "--", url], page_fixture=fixture)
+                self.assertEqual((result.returncode, result.stdout), (0, '{"status":"login_required"}\n'), result.stderr)
+
+    def test_guarded_read_verification_wins_over_inline_login(self):
+        url = "https://example.com/"
+        fixture = f"""global.location = new URL({url!r});
+{GATE_DOM}
+page(e('body', {{}}, '', gate(e('button', {{}}, '登录'))), 'complete', 'Attention required');
+Object.defineProperty(document, 'body', {{get() {{throw Error('login classification ran before verification')}}}});
+"""
+        result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--wait-for-selector", "[data-results]",
+                                                   "--include-links", "--", url], page_fixture=fixture)
+        self.assertEqual((result.returncode, result.stdout), (0, '{"status":"verification_required"}\n'), result.stderr)
+
+    def test_guarded_read_rejects_weak_login_evidence(self):
+        for url, body, wait in (
+            # Exact text plus a nearby login link is still not a gate in an article.
+            ("https://example.com/guide", "e('article', {}, '', prompt(), e('a', {href:'/login'}, 'Log in'))", None),
+            ("https://example.com/guide", "e('main', {}, '', e('p', {}, 'The notice says 登录后查看搜索结果.'), e('button', {}, 'Log in'))", None),
+            ("https://example.com/", "e('main', {}, '', prompt())", None),
+            ("https://example.com/", "e('main', {}, '', e('nav', {}, '', prompt(), e('button', {}, 'Log in')))", None),
+            ("https://example.com/", "gate(e('div', {}, '登录'))", None),
+            ("https://example.com/", "gate(e('button', {opacity:0}, '登录'))", None),
+            ("https://x.com/search?q=today", "e('main', {}, '', e('h1', {}, 'Search'), e('div', {}, 'Don’t miss what’s happening', e('button', {}, 'Log in'), e('button', {}, 'Sign up')))", 'main a[href*="/status/"]'),
+        ):
+            with self.subTest(url=url, body=body):
+                fixture = f"""global.location = new URL({url!r});
+{GATE_DOM}
+page(e('body', {{}}, '', header(), {body}));
+"""
+                args = ["--tab", "id:42", *(["--wait-for-selector", wait] if wait else []), "--", url]
+                result, _ = self.run_cli("read-page", args=args, page_fixture=fixture)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                page = json.loads(result.stdout)
+                if wait:
+                    self.assertEqual(page, {"status": "content_not_ready"})
+                else:
+                    self.assertEqual(page["status"], "ok")
+                    self.assertIn("Log in", page["text"])
 
     def test_readiness_rejects_shell_and_accepts_any_visible_match(self):
         url = "https://example.com/"

@@ -93,6 +93,11 @@ after target selection, independently of `selector`, and reports `content_not_re
 For example, an X timeline read can use `wait_for_selector: 'main a[href*="/status/"]'` and
 `selector: 'main'`; the condition does not establish that the full timeline has loaded.
 
+`url_policy` defaults to `exact`. Use `allow_added_query` only if extra query parameters are
+acceptable for the task: the origin, path, fragment, and every requested query pair (including
+duplicate counts) must remain unchanged. Chrome follows only the original tab ID; a mismatch
+reports its reason without returning page content or following a different destination.
+
 Chrome background setup requires explicit user approval. Use `setup_chrome_background` to
 `prepare` after approval, `install` with the returned grant and selected profile, and `check`
 after the user loads it. Relay the returned instructions in full. It never reinstalls a pending or

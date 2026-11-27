@@ -42,18 +42,32 @@ class ReaderTest(unittest.TestCase):
                 self.reader.read({"url": value, "browser": "safari"})
         self.run_cli.assert_not_called()
 
-    def test_safari_uses_unique_substring_with_exact_document_guard(self):
-        selected = URL + "posts"
+    def test_safari_uses_unique_observed_url_with_exact_document_guard(self):
+        selected = URL + "?added=1"
         self.run_cli.side_effect = [json.dumps([dict(TAB, url=selected), dict(TAB, url="https://elsewhere.test/?u=" + URL)]),
                                     json.dumps(dict(PAGE, final_url=selected))]
-        page = self.reader.read({"url": URL, "browser": "safari", "include_links": True, "selector": "main"})
+        page = self.reader.read({"url": URL, "browser": "safari", "url_policy": "allow_added_query",
+                                 "include_links": True, "selector": "main"})
         self.assertEqual(page["text"], PAGE["text"])
-        self.run_cli.assert_called_with("safari", "read-page", "--tab", URL, "--include-links", "--selector", "main", "--", selected)
+        self.run_cli.assert_called_with("safari", "read-page", "--tab", selected, "--include-links", "--selector", "main", "--", selected)
+
+    def test_safari_rejects_prefix_path_in_existing_mode(self):
+        self.run_cli.return_value = json.dumps([dict(TAB, url=URL + "posts")])
+        response = self.reader.read({"url": URL, "browser": "safari", "mode": "existing_tab"})
+        self.assertEqual(response["status"], "open_tab_required")
+        self.run_cli.assert_called_once_with("safari", "tabs", "--json")
 
     def test_safari_stops_on_ambiguous_substring(self):
         self.run_cli.return_value = json.dumps([TAB, dict(TAB, url=URL + "posts")])
         self.assertEqual(self.reader.read({"url": URL, "browser": "safari"})["status"], "tab_ambiguous")
         self.run_cli.assert_called_once_with("safari", "tabs", "--json")
+
+    def test_safari_does_not_read_matching_url_at_a_different_returned_index(self):
+        self.run_cli.side_effect = ["[]", "1:2\treused", json.dumps([dict(TAB, tab=3), dict(TAB, url=URL + "?extra=1")])]
+        response = self.reader.read({"url": URL, "browser": "safari"})
+        self.assertEqual(response["mismatch_reason"], "tab_identity_unverified")
+        self.assertNotIn("observed_url", response)
+        self.assertEqual(self.run_cli.call_count, 3)
 
     def test_ambiguous_stops_before_content(self):
         self.run_cli.return_value = json.dumps([TAB, dict(TAB, id="43")])
@@ -98,8 +112,12 @@ class ReaderTest(unittest.TestCase):
 
     def test_background_reads_only_the_returned_tab(self):
         self.run_cli.side_effect = ["[]", "id:41\tcreated", json.dumps([TAB])]
-        response = self.reader.read({"url": URL, "browser": "chrome", "mode": "public_background"})
+        with patch.object(mcp.time, "monotonic", side_effect=[0, 4]):
+            response = self.reader.read({"url": URL, "browser": "chrome", "mode": "public_background"})
         self.assertEqual(response["status"], "target_changed")
+        self.assertEqual(response["mismatch_reason"], "tab_not_found")
+        self.assertNotIn("cleanup_token", response)
+        self.assertNotIn("observed_url", response)
         self.assertEqual(self.run_cli.call_count, 3)
 
     def test_prefix_only_reused_tab_is_not_reported_as_target_change(self):
@@ -122,10 +140,121 @@ class ReaderTest(unittest.TestCase):
 
     def test_reused_chrome_tab_with_wrong_id_is_not_read(self):
         self.run_cli.side_effect = ["[]", "id:41\treused", json.dumps([TAB])]
-        response = self.reader.read({"url": URL, "browser": "chrome"})
+        with patch.object(mcp.time, "monotonic", side_effect=[0, 4]):
+            response = self.reader.read({"url": URL, "browser": "chrome"})
         self.assertEqual(response["status"], "reused_tab_mismatch")
         self.assertEqual(self.run_cli.call_count, 3)
         self.assertNotIn("cleanup_token", response)
+        self.assertNotIn("observed_url", response)
+
+    def test_exact_normalizes_host_default_port_and_empty_path(self):
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps(PAGE)]
+        response = self.reader.read({"url": "https://EXAMPLE.com:443", "browser": "chrome", "mode": "existing_tab"})
+        self.assertEqual(response["status"], "ok")
+        self.run_cli.assert_called_with("chrome", "read-page", "--tab", "id:42", "--", URL)
+
+    def test_added_query_policy_accepts_only_returned_chrome_tab_for_both_dispositions(self):
+        requested = URL + "search?q=hello%20world&tag=x&tag=x&blank=#results"
+        observed = URL + "search?tag=x&blank&scope=public&tag=x&q=hello+world#results"
+        for disposition in ("created", "reused"):
+            with self.subTest(disposition=disposition):
+                other = dict(TAB, id="43", url=requested)
+                self.run_cli.side_effect = ["[]", f"id:42\t{disposition}", json.dumps([other, dict(TAB, url=observed)]),
+                                            json.dumps(dict(PAGE, final_url=observed))]
+                response = self.reader.read({"url": requested, "browser": "chrome", "url_policy": "allow_added_query"})
+                self.assertEqual(response["status"], "ok")
+                self.assertEqual(response["tab_disposition"], disposition)
+                self.assertEqual("cleanup_token" in response, disposition == "created")
+                self.run_cli.assert_called_with("chrome", "read-page", "--tab", "id:42", "--", observed)
+
+    def test_exact_mismatch_reports_safe_retry_and_preserves_proven_ownership(self):
+        requested = URL + "search?q=keyword#section"
+        observed = URL + "search?q=keyword&added=private#section"
+        self.run_cli.side_effect = ["[]", "id:42\tcreated", json.dumps([dict(TAB, url=observed)])]
+        with patch.object(mcp.time, "monotonic", side_effect=[0, 4, 4]):
+            response = self.reader.read({"url": requested, "browser": "chrome"}, scope="owner")
+        self.assertEqual(response["status"], "target_changed")
+        self.assertEqual(response["mismatch_reason"], "query_added")
+        self.assertEqual(response["observed_url"], URL + "search?REDACTED#REDACTED")
+        self.assertEqual(response["retry_url_policy"], "allow_added_query")
+        self.assertTrue(response["cleanup_token"])
+        self.assertEqual(self.run_cli.call_count, 3)
+        self.run_cli.side_effect = [json.dumps([dict(TAB, url=observed)]), json.dumps(dict(PAGE, final_url=observed))]
+        retry = self.reader.read({"url": requested, "browser": "chrome", "url_policy": response["retry_url_policy"]}, scope="owner")
+        self.assertEqual(retry["status"], "ok")
+        self.assertNotIn("cleanup_token", retry)
+        self.run_cli.assert_called_with("chrome", "read-page", "--tab", "id:42", "--", observed)
+
+    def test_added_query_policy_stops_on_mutation_pollution_path_origin_and_fragment(self):
+        requested = URL + "search?q=keyword&q=keyword#section"
+        cases = {
+            "requested_query_changed": (
+                URL + "search?q=different&q=keyword#section",
+                URL + "search?q=keyword#section",
+                URL + "search?q=keyword&q=keyword&q=keyword#section",
+                URL + "search?q=keyword&q=keyword&%71=different#section",
+            ),
+            "path_changed": (URL + "other?q=keyword&q=keyword#section",),
+            "origin_changed": ("https://elsewhere.test/search?q=keyword&q=keyword#section",),
+            "fragment_changed": (URL + "search?q=keyword&q=keyword#other",),
+            "query_changed": (URL + "search?q=keyword&q=keyword&extra=%FF#section",),
+        }
+        for reason, urls in cases.items():
+            for observed in urls:
+                with self.subTest(observed=observed):
+                    self.run_cli.reset_mock()
+                    self.run_cli.side_effect = ["[]", "id:42\treused", json.dumps([dict(TAB, url=observed),
+                                                                                  dict(TAB, id="43", url=requested)])]
+                    with patch.object(mcp.time, "monotonic", side_effect=[0, 4]):
+                        response = self.reader.read({"url": requested, "browser": "chrome", "url_policy": "allow_added_query"})
+                    self.assertEqual(response["status"], "reused_tab_mismatch")
+                    self.assertEqual(response["mismatch_reason"], reason)
+                    self.assertIn("observed_url", response)
+                    self.assertNotIn("retry_url_policy", response)
+                    self.assertNotIn("cleanup_token", response)
+                    self.assertEqual(self.run_cli.call_count, 3)
+
+    def test_guard_mismatch_reports_only_current_metadata_of_same_chrome_id(self):
+        observed = URL + "?extra=private"
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "target_changed", "text": "discard"}),
+                                    json.dumps([dict(TAB, url=observed), dict(TAB, id="43")])]
+        response = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(response["status"], "target_changed")
+        self.assertEqual(response["observed_url"], URL + "?REDACTED")
+        self.assertEqual(response["mismatch_reason"], "query_added")
+        self.assertNotIn("text", response)
+        self.run_cli.assert_called_with("chrome", "tabs", "--json")
+
+    def test_inconsistent_success_does_not_return_content_or_url_secrets(self):
+        observed = "https://elsewhere.test/?secret=token#private"
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps(dict(PAGE, final_url=observed))]
+        response = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(response["mismatch_reason"], "origin_changed")
+        self.assertEqual(response["observed_url"], "https://elsewhere.test/?REDACTED#REDACTED")
+        self.assertNotIn("text", response)
+
+    def test_chrome_guard_renews_exact_url_only_on_same_id_and_allowed_query_change(self):
+        observed = URL + "?extra=1"
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "target_changed"}),
+                                    json.dumps([dict(TAB, url=observed), dict(TAB, id="43")]),
+                                    json.dumps(dict(PAGE, final_url=observed))]
+        response = self.reader.read({"url": URL, "browser": "chrome", "url_policy": "allow_added_query"})
+        self.assertEqual(response["status"], "ok")
+        self.run_cli.assert_called_with("chrome", "read-page", "--tab", "id:42", "--", observed)
+
+    def test_created_id_already_present_does_not_read_or_claim_user_tab(self):
+        self.run_cli.side_effect = [json.dumps([dict(TAB, url=URL + "different")]), "id:42\tcreated"]
+        response = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(response["mismatch_reason"], "created_tab_id_already_present")
+        self.assertNotIn("cleanup_token", response)
+        self.assertEqual(self.run_cli.call_count, 2)
+
+    def test_existing_mode_suggests_only_bounded_query_retry(self):
+        self.run_cli.return_value = json.dumps([dict(TAB, url=URL + "?extra=private")])
+        response = self.reader.read({"url": URL, "browser": "chrome", "mode": "existing_tab"})
+        self.assertEqual(response["status"], "target_changed")
+        self.assertEqual(response["retry_url_policy"], "allow_added_query")
+        self.run_cli.assert_called_once_with("chrome", "tabs", "--json")
 
     def test_human_gate_and_login_stop_without_content(self):
         for status in ("verification_required", "login_required", "no_content", "tab_ambiguous"):
@@ -165,8 +294,9 @@ class ReaderTest(unittest.TestCase):
 
     def test_passive_wait_continues_past_four_seconds_and_stops_for_human(self):
         now = [0]
-        self.run_cli.side_effect = [json.dumps([TAB]), *([json.dumps({"status": "passive_challenge"})] * 5),
-                                    json.dumps({"status": "verification_required"})]
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "passive_challenge"}),
+                                    *([json.dumps([TAB]), json.dumps({"status": "passive_challenge"})] * 4),
+                                    json.dumps([TAB]), json.dumps({"status": "verification_required"})]
         with patch.object(mcp.time, "monotonic", side_effect=lambda: now[0]), \
                 patch.object(mcp.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
             response = self.reader.read({"url": URL, "browser": "safari"})
@@ -176,14 +306,15 @@ class ReaderTest(unittest.TestCase):
 
     def test_passive_wait_respects_deadline_and_caps_last_probe(self):
         now = [0]
-        self.run_cli.side_effect = [json.dumps([TAB]), *([json.dumps({"status": "passive_challenge"})] * 3)]
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "passive_challenge"}),
+                                    *([json.dumps([TAB]), json.dumps({"status": "passive_challenge"})] * 2)]
         with patch.object(mcp, "PASSIVE_TIMEOUT", 2.5), \
                 patch.object(mcp.time, "monotonic", side_effect=lambda: now[0]), \
                 patch.object(mcp.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
             response = self.reader.read({"url": URL, "browser": "safari"})
         self.assertEqual(now[0], 2.5)
         self.assertEqual(response["status"], "passive_challenge")
-        self.assertEqual(self.run_cli.call_count, 4)
+        self.assertEqual(self.run_cli.call_count, 6)
         self.run_cli.assert_called_with("safari", "read-page", "--tab", URL, "--", URL, timeout=1)
 
     def test_cleanup_is_scoped_exact_and_single_use(self):
@@ -223,7 +354,9 @@ class ReaderTest(unittest.TestCase):
         for status in ("no_content", "login_required", "verification_required", "target_changed"):
             now = [0]
             empty = json.dumps({"status": "no_content"})
-            probes = [empty] * 16 if status == "no_content" else [empty, json.dumps({"status": status})]
+            probes = [empty, *([json.dumps([TAB]), empty] * 15)] if status == "no_content" else [empty, json.dumps([TAB]), json.dumps({"status": status})]
+            if status == "target_changed":
+                probes.append(json.dumps([TAB]))
             self.run_cli.side_effect = ["[]", "1:2\tcreated", json.dumps([TAB]), *probes]
             with self.subTest(status=status), patch.object(mcp.time, "monotonic", side_effect=lambda: now[0]), \
                     patch.object(mcp.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
@@ -270,11 +403,22 @@ class ReaderTest(unittest.TestCase):
         for status in ("login_required", "verification_required", "target_changed", "invalid_wait_selector"):
             self.run_cli.reset_mock()
             self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "content_not_ready"}), json.dumps({"status": status})]
+            if status == "target_changed":
+                self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "content_not_ready"}),
+                                            json.dumps({"status": status}), json.dumps([TAB])]
             with self.subTest(status=status), patch.object(mcp.time, "sleep"):
                 page = self.reader.read({"url": URL, "browser": "chrome", "wait_for_selector": "article"})
                 self.assertEqual(page["status"], status)
                 self.assertNotIn("text", page)
-                self.assertEqual(self.run_cli.call_count, 3)
+                self.assertEqual(self.run_cli.call_count, 4 if status == "target_changed" else 3)
+
+    def test_safari_readiness_stops_if_the_url_moves_to_another_index(self):
+        self.run_cli.side_effect = [json.dumps([TAB]), json.dumps({"status": "content_not_ready"}),
+                                    json.dumps([dict(TAB, tab=3)])]
+        with patch.object(mcp.time, "sleep"):
+            page = self.reader.read({"url": URL, "browser": "safari", "wait_for_selector": "article"})
+        self.assertEqual(page["mismatch_reason"], "tab_identity_unverified")
+        self.assertEqual(self.run_cli.call_count, 3)
 
     def test_reused_and_safari_indices_never_grant_cleanup(self):
         for browser, opening in (("chrome", "id:42\treused"), ("safari", "1:2\tcreated")):
@@ -283,8 +427,16 @@ class ReaderTest(unittest.TestCase):
             self.assertEqual(response["status"], "ok")
             self.assertNotIn("cleanup_token", response)
 
-    def test_chrome_restart_during_open_never_grants_cleanup(self):
+    def test_chrome_restart_during_open_never_reads_or_grants_cleanup(self):
         self.instance.side_effect = ["first", "second"]
+        self.run_cli.side_effect = ["[]", "id:42\tcreated", json.dumps([TAB]), json.dumps(PAGE)]
+        response = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(response["mismatch_reason"], "browser_instance_changed")
+        self.assertNotIn("cleanup_token", response)
+        self.assertEqual(self.run_cli.call_count, 3)
+
+    def test_chrome_without_verified_instance_does_not_grant_cleanup(self):
+        self.instance.return_value = None
         self.run_cli.side_effect = ["[]", "id:42\tcreated", json.dumps([TAB]), json.dumps(PAGE)]
         response = self.reader.read({"url": URL, "browser": "chrome"})
         self.assertEqual(response["status"], "ok")
@@ -309,6 +461,7 @@ class StdioTest(unittest.TestCase):
                          ["read_page", mcp.SETUP_TOOL["name"], "cleanup_tab"])
         properties = listing["result"]["tools"][0]["inputSchema"]["properties"]
         self.assertEqual(properties["mode"]["default"], "public_background")
+        self.assertEqual(properties["url_policy"]["default"], "exact")
         self.assertEqual(properties["wait_for_selector"]["type"], "string")
         self.assertEqual(call["result"]["structuredContent"]["status"], "browser_required")
         self.assertEqual(refused["error"]["code"], -32602)

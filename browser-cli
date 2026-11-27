@@ -672,6 +672,55 @@ CHALLENGE_JS='function challengeState() {
   return "none";
 }'
 
+# A non-dialog gate needs both an explicit access requirement and a nearby
+# sign-in control. Do not infer a gate from page prose or promotional chrome.
+LOGIN_GATE_JS='function loginGate(body) {
+  var route = /(?:^|\/)(?:login|log-in|signin|sign-in)(?:\/|$)/i;
+  var signIn = /^(?:(?:please )?(?:log[ -]?in|sign[ -]?in)|(?:请|立即|去|马上|现在)?(?:扫码|手机(?:号)?|账号|密码)?登录(?:\s*[\/／]\s*注册)?)[.!。！]?$/i;
+  var accessRequired = /^(?:(?:please )?(?:log[ -]?in|sign[ -]?in) (?:to (?:continue|(?:see|view|read|access)\b.{1,64})|first)|(?:you must|you need to) (?:log[ -]?in|sign[ -]?in) to (?:continue|(?:see|view|read|access)\b.{1,64})|(?:请(?:先)?|需要先|必须先)?登录后(?:才(?:能|可))?(?:继续|查看|浏览|阅读|访问)(?:.{0,24})|(?:请|需|必须)先登录)[.!。！]?$/i;
+  if (route.test(location.pathname)) return true;
+  if (!body) return false;
+
+  function normalize(text) { return (text || "").replace(/\s+/g, " ").trim(); }
+  var dialogs = body.querySelectorAll("dialog, [role=dialog], [role=alertdialog]");
+  if (Array.prototype.some.call(dialogs, function(dialog) {
+    if (!visible(dialog)) return false;
+    var heading = dialog.querySelector("h1,h2,h3,[role=heading]");
+    var label = normalize(dialog.getAttribute("aria-label") || (heading && visible(heading) && heading.innerText));
+    return signIn.test(label) || accessRequired.test(label) ||
+      Array.prototype.some.call(dialog.querySelectorAll("input[type=password]"), visible);
+  })) return true;
+
+  var excluded = "header,nav,footer,aside,article,blockquote,pre,code,q,[role=banner],[role=navigation],[role=contentinfo],[role=complementary],[role=article]";
+  var control = "button,a[href],input[type=submit],input[type=button],[role=button],[role=link],[tabindex],[onclick]";
+  function signInControl(node) {
+    if (node.closest(excluded)) return false;
+    var nativeControl = node.matches(control);
+    if (!nativeControl && node.childElementCount) return false;
+    if (!visible(node)) return false;
+    var label = normalize(node.getAttribute("aria-label") || (node.tagName === "INPUT" ? node.value : node.innerText));
+    var href = node.matches("a[href]") ? node.pathname : "";
+    return (signIn.test(label) || (href && route.test(href))) &&
+      (nativeControl || getComputedStyle(node).cursor === "pointer");
+  }
+  var prompts = body.querySelectorAll("h1,h2,h3,h4,h5,h6,[role=heading],p,div,span,strong,b,label");
+  return Array.prototype.some.call(prompts, function(prompt) {
+    // Match a short text block, not the aggregate text of a page wrapper.
+    if (prompt.closest(excluded) || prompt.querySelector("div,p,section,main,article,form,header,nav,ul,ol,h1,h2,h3,h4,h5,h6")) return false;
+    if (!accessRequired.test(normalize(prompt.textContent)) || !visible(prompt) ||
+        !accessRequired.test(normalize(prompt.innerText))) return false;
+    for (var region = prompt.parentElement, depth = 0; region && region !== body && depth < 3;
+         region = region.parentElement, depth++) {
+      // Limit corroboration to a compact panel; never pair with a distant CTA.
+      if (normalize(region.textContent).length > 360) break;
+      if (Array.prototype.some.call(region.querySelectorAll(control + ",div,span"), function(node) {
+        return !prompt.contains(node) && !node.contains(prompt) && signInControl(node);
+      })) return true;
+    }
+    return false;
+  });
+}'
+
 cmd_info() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'info takes no positional arguments'
   run_js --direct "(function(){ $CHALLENGE_JS
@@ -690,38 +739,26 @@ cmd_read_page() {
   local expected="$JS_STRING" selector wait_selector code
   js_string "$SELECTOR"; selector="$JS_STRING"
   js_string "$WAIT_SELECTOR"; wait_selector="$JS_STRING"
-  code="(function(){ $CHALLENGE_JS
+  code="(function(){ $CHALLENGE_JS $LOGIN_GATE_JS
     if (location.href !== $expected) return {status:'target_changed'};
     var challenge = challengeState();
     if (challenge === 'needs-human') return {status:'verification_required'};
     if (challenge === 'cloudflare-passive') return {status:'passive_challenge'};
     function visible(e) {
       var s = getComputedStyle(e), r = e.getBoundingClientRect();
-      return s.visibility === 'visible' && r.width > 0 && r.height > 0 && !e.closest('[aria-hidden=\"true\"]');
+      if (s.visibility !== 'visible' || r.width <= 0 || r.height <= 0 || e.closest('[hidden],[aria-hidden=\"true\"]')) return false;
+      for (var node = e; node; node = node.parentElement) {
+        if (Number(getComputedStyle(node).opacity) === 0) return false;
+      }
+      return true;
     }
     var body = document.body;
+    if (loginGate(body)) return {status:'login_required'};
     if (!body || document.readyState === 'loading') return {status:'page_loading'};
-    var gate = /(?:^|\/)(?:login|log-in|signin|sign-in)(?:\/|$)/i.test(location.pathname);
-    var passwords = Array.from(body.querySelectorAll('input[type=password]'));
-    var dialogs = Array.from(body.querySelectorAll('dialog, [role=dialog]'));
-    var signInDialog = dialogs.some(function(e) {
-      if (!visible(e)) return false;
-      var title = e.getAttribute('aria-label') || (e.querySelector('h1,h2,h3,[role=heading]') || {}).innerText || '';
-      return /^(?:(?:please )?(?:log ?in|sign ?in)(?: to continue)?|请登录|登录后继续|登录|扫码登录)[.!。！]?$/i.test(title.trim());
-    });
-    if (gate || signInDialog || passwords.some(function(e){return visible(e) && e.closest('dialog, [role=dialog]');})) {
-      return {status:'login_required'};
-    }
     if ($WAIT_SELECTOR_SET) {
       try {
         var matches = document.querySelectorAll($wait_selector);
-        if (!Array.prototype.some.call(matches, function(e) {
-          if (!visible(e) || e.closest('[hidden]')) return false;
-          for (var node = e; node; node = node.parentElement) {
-            if (Number(getComputedStyle(node).opacity) === 0) return false;
-          }
-          return true;
-        })) return {status:'content_not_ready'};
+        if (!Array.prototype.some.call(matches, visible)) return {status:'content_not_ready'};
       } catch (e) {
         if (e.name === 'SyntaxError') return {status:'invalid_wait_selector'};
         throw e;
