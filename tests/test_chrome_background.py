@@ -134,7 +134,7 @@ class BackgroundTest(unittest.TestCase):
         destination = Path.home() / "install"
         self.enterContext(patch.object(bridge, "CHROME", chrome))
         self.enterContext(patch.object(bridge, "INSTALL", destination))
-        self.enterContext(patch.dict(os.environ, BROWSER_CLI_MCP="1"))
+        self.enterContext(patch.dict(os.environ, AGENT_BROWSER_MCP="1"))
         profile = chrome / "Profile 5"
         profile.mkdir(parents=True)
         (chrome / "Local State").write_text(json.dumps({"profile": {"info_cache": {
@@ -251,7 +251,7 @@ class BackgroundTest(unittest.TestCase):
 
     def test_cli_open_does_not_attempt_wake(self):
         self.mock_recovery_setup()
-        with patch.dict(os.environ, BROWSER_CLI_MCP="0"), \
+        with patch.dict(os.environ, AGENT_BROWSER_MCP="0"), \
                 patch.object(bridge, "connected_client", return_value=nullcontext(None)), \
                 patch.object(bridge.subprocess, "run") as run:
             with self.assertRaisesRegex(bridge.ConnectionRequired, "installed but not connected"):
@@ -261,7 +261,7 @@ class BackgroundTest(unittest.TestCase):
     def test_mcp_never_wakes_or_resends_after_delivery_failure(self):
         client = Mock()
         for after_wake in (False, True):
-            with self.subTest(after_wake=after_wake), patch.dict(os.environ, BROWSER_CLI_MCP="1"), \
+            with self.subTest(after_wake=after_wake), patch.dict(os.environ, AGENT_BROWSER_MCP="1"), \
                     patch.object(bridge, "connected_client", side_effect=(
                         [nullcontext(None), nullcontext(None)] if after_wake else []
                     ) + [nullcontext(client)]) as connect, \
@@ -349,7 +349,7 @@ class BackgroundTest(unittest.TestCase):
             profile.mkdir()
             preferences = profile / "Preferences"
             preferences.write_text(json.dumps({"extensions": {"settings": {origin.split("/")[2]: {}}}}))
-            with self.assertRaisesRegex(ValueError, "Remove browser-cli Background Tabs"):
+            with self.assertRaisesRegex(ValueError, "Remove Agent Browser"):
                 bridge.uninstall()
             self.assertTrue(bridge.host_manifest().is_file())
             preferences.write_text("{}")

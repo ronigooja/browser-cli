@@ -19,11 +19,11 @@ import time
 from urllib.parse import urlsplit
 
 
-HOST = "com.browser_cli.background"
+HOST = "com.agent_browser.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
-INSTALL = Path.home() / "Library/Application Support/browser-cli/chrome-background"
-SETUP = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome install-background"
-REMOVE = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome uninstall-background"
+INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-background"
+SETUP = f"{shlex.quote(os.environ.get('AGENT_BROWSER_PATH', './agent-browser'))} --browser chrome install-background"
+REMOVE = f"{shlex.quote(os.environ.get('AGENT_BROWSER_PATH', './agent-browser'))} --browser chrome uninstall-background"
 LIMIT = 65536
 WAKE_WAIT = 2
 WAKE_POLL = 0.05
@@ -36,12 +36,12 @@ CHROME_WINDOWS = (
 def runtime_dir(*, create=True):
     # macOS limits Unix socket paths to 103 bytes, regardless of the home directory.
     home = hashlib.sha256(os.fsencode(Path.home())).hexdigest()[:12]
-    directory = Path(f"/tmp/browser-cli-{os.getuid()}-{home}")
+    directory = Path(f"/tmp/agent-browser-{os.getuid()}-{home}")
     if create:
         directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ValueError("Unsafe browser-cli socket directory")
+        raise ValueError("Unsafe agent-browser socket directory")
     return directory
 
 
@@ -161,7 +161,7 @@ def connected_client(deadline):
                 client.close()
                 continue
             if connected is not None:
-                raise ValueError("The browser-cli extension is connected in more than one Chrome profile. Leave it enabled only in the profile you want to use.")
+                raise ValueError("The agent-browser extension is connected in more than one Chrome profile. Leave it enabled only in the profile you want to use.")
             connected = client
         yield connected
 
@@ -189,7 +189,7 @@ def background_open(url, timeout):
         raise ValueError("Chrome background timeout must be at most 86400 seconds")
     deadline = time.monotonic() + timeout
     request = frame({"url": url, "expires": int((time.time() + timeout) * 1000)})
-    mcp = os.environ.get("BROWSER_CLI_MCP") == "1"
+    mcp = os.environ.get("AGENT_BROWSER_MCP") == "1"
     try:
         with connected_client(deadline) as client:
             if client is not None:
@@ -234,7 +234,7 @@ def loaded_profiles(origin, *, strict=False, ignore_empty=False):
 def setup_state():
     origin = extension_origin(Path(__file__).resolve().parent / "extension")
     # Chrome can leave an empty entry after removal. Keep strict uninstall checks unchanged.
-    if any(loaded_profiles(origin, ignore_empty=os.environ.get("BROWSER_CLI_MCP") == "1")):
+    if any(loaded_profiles(origin, ignore_empty=os.environ.get("AGENT_BROWSER_MCP") == "1")):
         return "loaded"
     if host_manifest().is_file() and (INSTALL / "extension/manifest.json").is_file():
         return "pending"
@@ -260,17 +260,17 @@ class ConnectionRequired(ValueError):
 
 def require_connection(state):
     if state == "loaded":
-        raise ConnectionRequired(state, f"The browser-cli extension is installed but not connected. Open a regular Chrome window in the profile where it is installed and make sure it is enabled at chrome://extensions/. Then run `{SETUP} --check`.")
+        raise ConnectionRequired(state, f"The agent-browser extension is installed but not connected. Open a regular Chrome window in the profile where it is installed and make sure it is enabled at chrome://extensions/. Then run `{SETUP} --check`.")
     if state == "pending":
         raise ConnectionRequired(state, f"Chrome background setup is not complete. In the intended Chrome profile:\n{loading_instructions()}\nThen run `{SETUP} --check`.")
-    raise ConnectionRequired(state, f"Chrome background mode requires the browser-cli extension. Ask the user whether to set it up. Only after they confirm, run `{SETUP}`.")
+    raise ConnectionRequired(state, f"Chrome background mode requires the agent-browser extension. Ask the user whether to set it up. Only after they confirm, run `{SETUP}`.")
 
 
 def offer_setup():
     state = setup_state()
     if state != "missing" or not sys.stdin.isatty() or not sys.stderr.isatty():
         require_connection(state)
-    print("Chrome background mode requires the browser-cli extension. Set it up now? [y/N] ",
+    print("Chrome background mode requires the agent-browser extension. Set it up now? [y/N] ",
           end="", file=sys.stderr, flush=True)
     try:
         confirmed = input().strip().lower() in ("y", "yes")
@@ -451,7 +451,7 @@ def install(selected=None):
     atomic_write(launcher, f'#!/bin/sh\nexec {python} -I {bridge} host "${{1-}}"\n'.encode(), 0o755)
     destination = host_manifest()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {"name": HOST, "description": "browser-cli Chrome background tabs",
+    manifest = {"name": HOST, "description": "agent-browser Chrome background tabs",
                 "path": str(launcher), "type": "stdio", "allowed_origins": [extension_origin(extension)]}
     atomic_write(destination, (json.dumps(manifest, indent=2) + "\n").encode(), 0o644)
 
@@ -470,7 +470,7 @@ def uninstall():
         connected = client is not None
     if profiles or connected:
         where = " (" + ", ".join(map(repr, profiles)) + ")" if profiles else ""
-        raise ValueError(f"Remove browser-cli Background Tabs in chrome://extensions/ in each profile where it is loaded{where}, then run `{REMOVE}` again. No files removed.")
+        raise ValueError(f"Remove Agent Browser in chrome://extensions/ in each profile where it is loaded{where}, then run `{REMOVE}` again. No files removed.")
 
     destination = host_manifest()
     # Do not follow directory symlinks into other locations or remove another host's registration.
@@ -512,15 +512,15 @@ def main():
         elif command == "open":
             return background_open(args[0], int(args[1]))
     except ConnectionRequired as error:
-        print(f"browser-cli: {error}", file=sys.stderr)
-        if os.environ.get("BROWSER_CLI_MCP") == "1":
+        print(f"agent-browser: {error}", file=sys.stderr)
+        if os.environ.get("AGENT_BROWSER_MCP") == "1":
             return {"missing": 20, "pending": 21, "loaded": 22}[error.state]
         return 1
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
-        print(f"browser-cli: {error}", file=sys.stderr)
+        print(f"agent-browser: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\nbrowser-cli: interrupted", file=sys.stderr)
+        print("\nagent-browser: interrupted", file=sys.stderr)
         return 1
     return 0
 

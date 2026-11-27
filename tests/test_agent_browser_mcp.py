@@ -6,10 +6,10 @@ import unittest
 from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import browser_mcp as mcp
+import agent_browser_mcp as mcp
 
 
-CLI = Path(mcp.__file__).with_name("browser-cli")
+CLI = Path(mcp.__file__).with_name("agent-browser")
 URL = "https://example.com/"
 TAB = {"url": URL, "title": "Example", "id": "42", "window": 1, "tab": 2}
 PAGE = {"status": "ok", "title": "Example", "final_url": URL, "text": "Example Domain", "truncated": False}
@@ -305,7 +305,7 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(self.preflight.call_count, 2)
 
     def test_1728_with_tabs_or_failed_check_preserves_original_and_stops(self):
-        failure = mcp.CliFailure(26, "browser-cli: AppleScript error -1728: missing tab")
+        failure = mcp.CliFailure(26, "agent-browser: AppleScript error -1728: missing tab")
         for check in (json.dumps([TAB]), mcp.CliFailure(1)):
             self.run_cli.reset_mock()
             self.run_cli.side_effect = [json.dumps([TAB]), failure, check]

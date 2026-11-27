@@ -1,15 +1,15 @@
 #!/bin/bash
 # Drive the real, logged-in Safari or Google Chrome on macOS: manage tabs and run JavaScript.
-# Usage: see `browser-cli help` or README.md. JavaScript needs "Allow JavaScript from Apple Events".
+# Usage: see `agent-browser help` or README.md. JavaScript needs "Allow JavaScript from Apple Events".
 set -euo pipefail
 
 VERSION=0.1.0
 DEFAULT_TIMEOUT=30
 
 if [ "${1-}" = mcp ] && [ "$#" -eq 1 ]; then
-  python="$(command -v python3)" || { echo 'browser-cli: mcp requires Python 3' >&2; exit 1; }
+  python="$(command -v python3)" || { echo 'agent-browser: mcp requires Python 3' >&2; exit 1; }
   cli="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
-  exec "$python" "${cli%/*}/browser_mcp.py" "$cli"
+  exec "$python" "${cli%/*}/agent_browser_mcp.py" "$cli"
 fi
 
 if [[ "$OSTYPE" = darwin* ]]; then
@@ -24,13 +24,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-die() { echo "browser-cli: $*" >&2; exit 1; }
-usage_error() { printf 'browser-cli: %s; see browser-cli help\n' "$*" >&2; exit 2; }
+die() { echo "agent-browser: $*" >&2; exit 1; }
+usage_error() { printf 'agent-browser: %s; see agent-browser help\n' "$*" >&2; exit 2; }
 
 usage() {
   cat <<'EOF'
-browser-cli --browser safari|chrome <command> [options]
-browser-cli help | version | mcp
+agent-browser --browser safari|chrome <command> [options]
+agent-browser help | version | mcp
 
   tabs [--json]                 list tabs: <window>:<tab> <TAB> title <TAB> url
   open (--foreground | --background) <url>
@@ -134,7 +134,7 @@ parse() {
 set_browser() {
   case "$1" in
     safari|chrome) BROWSER="$1" ;;
-    *) printf 'browser-cli: invalid --browser: %s (expected safari or chrome)\n' "$1" >&2; exit 2 ;;
+    *) printf 'agent-browser: invalid --browser: %s (expected safari or chrome)\n' "$1" >&2; exit 2 ;;
   esac
 }
 
@@ -162,14 +162,14 @@ osa() {
   wait "$watcher" 2>/dev/null || true
   if [ "$rc" -ne 0 ]; then
     if [ -e "$WORK/timed-out" ]; then
-      echo "browser-cli: timed out after ${limit}s" >&2
-      [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 24
-    elif [ "${BROWSER_CLI_MCP:-}" = 1 ] && grep -Eq '\(-1728\)$' "$err"; then
+      echo "agent-browser: timed out after ${limit}s" >&2
+      [ "${AGENT_BROWSER_MCP:-}" != 1 ] || return 24
+    elif [ "${AGENT_BROWSER_MCP:-}" = 1 ] && grep -Eq '\(-1728\)$' "$err"; then
       cat "$err" >&2
       return 26
     elif permission_blocked; then
       echo "$JS_PERMISSION_MESSAGE" >&2
-      [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 25
+      [ "${AGENT_BROWSER_MCP:-}" != 1 ] || return 25
     else
       local message code
       message="$(sed -E 's/^[^ ]*: //; s/^execution error: //' "$err")"
@@ -181,12 +181,12 @@ osa() {
       if [ "$TRUSTED" = 1 ] && [[ "$message" == *"the target "*" tab is no longer in front"* || "$message" == *"the target tab was closed or changed"* ]]; then
         # Our own guard fired: report it plainly, without the AppleScript wrapper.
         message="${message#*Error: }"; message="${message#Error: }"
-        printf 'browser-cli: %s\n' "$message" >&2
+        printf 'agent-browser: %s\n' "$message" >&2
       elif [ "$TRUSTED" = 1 ] && [ "$TRUSTED_SENDING" = 1 ] && { [ "$code" = -1719 ] || [ "$code" = -1728 ]; }; then
         # The window or tab disappeared while input was being sent (macOS words this per locale).
-        printf 'browser-cli: the target tab was closed or changed during the action; nothing more was sent\n' >&2
+        printf 'agent-browser: the target tab was closed or changed during the action; nothing more was sent\n' >&2
       else
-        printf 'browser-cli: AppleScript error %s: %s\n' "$code" "$message" >&2
+        printf 'agent-browser: AppleScript error %s: %s\n' "$code" "$message" >&2
       fi
     fi
   fi
@@ -219,7 +219,7 @@ browser_setup() {
       AS_WINDOW_ID='((item 3 of argv) as integer)'
       AS_SCREENSHOT_DISPLAYED='miniaturized of w or (index of current tab of w) is not (item 2 of r)'
       JS_PERMISSION_ERROR='Allow JavaScript from Apple Events'
-      JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off. Turn it on in Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password).'
+      JS_PERMISSION_MESSAGE='agent-browser: JavaScript from Apple Events is off. Turn it on in Safari > Settings > Developer > "Allow JavaScript from Apple Events" (needs Touch ID or a password).'
       ;;
     chrome)
       APP='Google Chrome'
@@ -235,7 +235,7 @@ browser_setup() {
       AS_SCREENSHOT_DISPLAYED='minimized of w or (active tab index of w) is not (item 2 of r)'
       # Chrome localizes the error text, but embeds the same help URL.
       JS_PERMISSION_ERROR='Allow JavaScript from Apple Events|support\.google\.com/chrome/\?p=applescript'
-      JS_PERMISSION_MESSAGE='browser-cli: JavaScript from Apple Events is off in Chrome. Enable View > Developer > Allow JavaScript from Apple Events.'
+      JS_PERMISSION_MESSAGE='agent-browser: JavaScript from Apple Events is off in Chrome. Enable View > Developer > Allow JavaScript from Apple Events.'
       ;;
   esac
   RESOLVE="$(resolve_handler)"
@@ -330,7 +330,7 @@ as_js() {
 
 cmd_tabs() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'tabs takes no positional arguments'
-  if [ "${BROWSER_CLI_MCP:-}" = 1 ] && ! pgrep -qx "$APP"; then
+  if [ "${AGENT_BROWSER_MCP:-}" = 1 ] && ! pgrep -qx "$APP"; then
     printf '[]\n'
     return
   fi
@@ -397,10 +397,10 @@ chrome_background() {
   python="$(command -v python3)" || die 'Chrome background mode requires Python 3'
   helper="$(cd -- "$(dirname -- "$0")" && pwd -P)/chrome-background/bridge.py"
   if [ "$1" != install ] && [ ! -f "$helper" ]; then
-    helper="$HOME/Library/Application Support/browser-cli/chrome-background/bridge.py"
+    helper="$HOME/Library/Application Support/agent-browser/chrome-background/bridge.py"
   fi
-  [ -f "$helper" ] || die 'Chrome background mode requires the browser-cli extension. Keep chrome-background/ beside browser-cli, get approval before setup, then run browser-cli --browser chrome install-background.'
-  BROWSER_CLI_PATH="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")" "$python" "$helper" "$@"
+  [ -f "$helper" ] || die 'Chrome background mode requires the agent-browser extension. Keep chrome-background/ beside agent-browser, get approval before setup, then run agent-browser --browser chrome install-background.'
+  AGENT_BROWSER_PATH="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")" "$python" "$helper" "$@"
 }
 
 cmd_install_background() {
@@ -618,8 +618,8 @@ AS
   case "$out" in
     str:*) printf '%s' "${out#str:}" ;;
     ok:*) printf '%s\n' "${out#ok:}" ;;
-    err:*) echo "browser-cli: ${3-JavaScript error: }${out#err:}" >&2; return 1 ;;
-    *) echo "browser-cli: unexpected result: $out" >&2; return 1 ;;
+    err:*) echo "agent-browser: ${3-JavaScript error: }${out#err:}" >&2; return 1 ;;
+    *) echo "agent-browser: unexpected result: $out" >&2; return 1 ;;
   esac
 }
 
@@ -647,7 +647,7 @@ output_js() {
   total=${#out}
   if [ "$total" -gt "$limit" ]; then
     printf '%s' "${out:0:limit}"
-    echo "browser-cli: truncated to $limit of $total chars" >&2
+    echo "agent-browser: truncated to $limit of $total chars" >&2
   else
     printf '%s' "$out"
   fi
@@ -809,7 +809,7 @@ cmd_read() {
   js_string "$SELECTOR"; selector="$JS_STRING"
   code="(function(){
     var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector(%s)' "$selector" || printf 'document.documentElement');
-    if (!root) return 'browser-cli-no-match:';
+    if (!root) return 'agent-browser-no-match:';
     var result;
     if ('$cmd' === 'text') {
       result = (root.matches('script, style') ? '' : (root.innerText || '')).replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n');
@@ -830,7 +830,7 @@ cmd_read() {
       comments.forEach(function(e){ e.remove(); });
       result = clone.outerHTML;
     }
-    return 'browser-cli-result:' + result;
+    return 'agent-browser-result:' + result;
   })()"
   output_read "$code"
 }
@@ -839,13 +839,13 @@ output_read() {
   run_js --direct "$1" "$TIMEOUT" >"$WORK/read-output" || return 1
   local out total limit="${MAX_CHARS:-20000}"
   out="$(cat "$WORK/read-output"; printf '.')"; out="${out%.}"
-  if [ "$out" = 'browser-cli-no-match:' ]; then
-    echo "browser-cli: no element matches: $SELECTOR; check the selector against the current page" >&2; return 1
+  if [ "$out" = 'agent-browser-no-match:' ]; then
+    echo "agent-browser: no element matches: $SELECTOR; check the selector against the current page" >&2; return 1
   fi
-  out="${out#browser-cli-result:}"; total=${#out}
+  out="${out#agent-browser-result:}"; total=${#out}
   if [ "$total" -gt "$limit" ]; then
     printf '%s' "${out:0:limit}"
-    echo "browser-cli: truncated to $limit of $total chars" >&2
+    echo "agent-browser: truncated to $limit of $total chars" >&2
   else
     printf '%s' "$out"
   fi
@@ -862,7 +862,7 @@ cmd_snapshot() {
   selector="${selector//$'\t'/\\t}"
   code="(function(){ var root = $([ "$SELECTOR_SET" = 1 ] && printf 'document.querySelector("%s")' "$selector" || printf 'document.documentElement');"
   cat >"$WORK/snapshot.js" <<'JS'
-    if (!root) return 'browser-cli-no-match:';
+    if (!root) return 'agent-browser-no-match:';
     var query = 'a,button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[role="checkbox"],[role="tab"],[role="menuitem"],[role="switch"],[role="option"],[role="combobox"],[role="textbox"],[contenteditable],[onclick],[tabindex]';
     var elements = Array.from(root.querySelectorAll(query));
     if (root.matches(query)) elements.unshift(root);
@@ -916,7 +916,7 @@ cmd_snapshot() {
       var selector = selectorFor(e);
       if (selector) lines.push((lines.length + 1) + '\t' + type + '\t' + label + '\t' + selector);
     });
-    return 'browser-cli-result:' + lines.join('\n');
+    return 'agent-browser-result:' + lines.join('\n');
   })()
 JS
   code+="$(cat "$WORK/snapshot.js")"
@@ -1275,7 +1275,7 @@ AS
     js_string "$selector"; local sel_js="$JS_STRING"
     code="(function(){ const element = document.querySelector($sel_js); const action = '$cmd';"
     cat >"$WORK/trusted-page.js" <<'JS'
-      if (!element) return 'browser-cli-no-match:';
+      if (!element) return 'agent-browser-no-match:';
       if (action === 'fill') {
         const input = element instanceof HTMLInputElement && /^(text|search|tel|url|email|password|number)$/.test(element.type);
         if (!(input || element instanceof HTMLTextAreaElement || element.isContentEditable) || element.readOnly || element.matches(':disabled'))
@@ -1302,7 +1302,7 @@ JS
     else
       result="$(TAB="$tab_index" run_js "$code" "$TIMEOUT" '' "$window_id")" || return 1
     fi
-    [ "$result" != 'browser-cli-no-match:' ] || die "no element matches: $selector; use snapshot to inspect visible controls"
+    [ "$result" != 'agent-browser-no-match:' ] || die "no element matches: $selector; use snapshot to inspect visible controls"
     point="${result%%$'\n'*}"
     output="${result#*$'\n'}"
   fi
@@ -1340,7 +1340,7 @@ cmd_action() {
     var hasSelector = $SELECTOR_SET, element;
     if (command !== 'press' && command !== 'scroll' || hasSelector) {
       element = document.querySelector(selector);
-      if (!element) return 'browser-cli-no-match:';
+      if (!element) return 'agent-browser-no-match:';
     }
     if (command === 'click') {
       if (!element.getClientRects().length) throw new Error('element is not visible');
@@ -1395,8 +1395,8 @@ cmd_action() {
   })()"
   run_js --direct "$code" "$TIMEOUT" '' >"$WORK/action-output" || return 1
   out="$(cat "$WORK/action-output"; printf '.')"; out="${out%.}"
-  if [ "$out" = 'browser-cli-no-match:' ]; then
-    printf 'browser-cli: no element matches: %s; use snapshot to inspect visible controls\n' "$selector" >&2; return 1
+  if [ "$out" = 'agent-browser-no-match:' ]; then
+    printf 'agent-browser: no element matches: %s; use snapshot to inspect visible controls\n' "$selector" >&2; return 1
   fi
   printf '%s' "$out"
 }
@@ -1531,7 +1531,7 @@ JS
     cp "$WORK/crop.png" "$out" || die "cannot write screenshot: $out"
   else
     dir="$(cd "${TMPDIR:-/tmp}" && pwd -P)" || die 'cannot access system temp directory'
-    base="browser-cli-$(date +%s)"; out="$dir/$base.png"
+    base="agent-browser-$(date +%s)"; out="$dir/$base.png"
     local n=0
     until (set -o noclobber; : >"$out") 2>/dev/null; do
       [ "$n" -lt 100 ] && [ -e "$out" ] || die 'cannot create output file'
@@ -1589,7 +1589,7 @@ cmd_wait_challenge() {
       fi
       if [ "$state" = needs-human ]; then
         # Pass the host and browser as arguments, not interpolated AppleScript source.
-        osascript -e 'on run argv' -e 'display notification ((item 1 of argv) & " needs verification — please complete it in " & (item 2 of argv)) with title "browser-cli"' -e 'end run' "$host" "$APP" >/dev/null 2>&1 || true
+        osascript -e 'on run argv' -e 'display notification ((item 1 of argv) & " needs verification — please complete it in " & (item 2 of argv)) with title "agent-browser"' -e 'end run' "$host" "$APP" >/dev/null 2>&1 || true
         die "human verification needed on $host; complete it in $APP, then run wait-challenge again"
       fi
       last_error=""
@@ -1608,7 +1608,7 @@ cmd_wait_challenge() {
 cmd_status() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'status takes no positional arguments'
   local f state mcp_guard='' rc
-  if [ "${BROWSER_CLI_MCP:-}" = 1 ]; then
+  if [ "${AGENT_BROWSER_MCP:-}" = 1 ]; then
     if ! pgrep -qx "$APP"; then
       printf 'unknown\n'
       return 0
@@ -1635,13 +1635,13 @@ AS
     state="$(cat "$WORK/status")"
     cat "$WORK/status"
     if [ "$state" = unknown ]; then
-      [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 0
-      printf 'browser-cli: no tab is open in %s; open a page in %s, then check status again\n' "$APP" "$APP" >&2
+      [ "${AGENT_BROWSER_MCP:-}" != 1 ] || return 0
+      printf 'agent-browser: no tab is open in %s; open a page in %s, then check status again\n' "$APP" "$APP" >&2
     fi
     [ "$state" = on ]
   else
     rc=$?
-    if [ "$rc" = 25 ] || { [ "${BROWSER_CLI_MCP:-}" != 1 ] && permission_blocked; }; then
+    if [ "$rc" = 25 ] || { [ "${AGENT_BROWSER_MCP:-}" != 1 ] && permission_blocked; }; then
       echo off
     fi
     return "$rc"
@@ -1661,38 +1661,38 @@ case "$cmd" in
   install-background) cmd_install_background "$@" ;;
   uninstall-background) cmd_uninstall_background "$@" ;;
   tabs|open|close|close-created|chrome-instance|eval|file|wait|wait-challenge|status|info|read-page|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
-    if [[ "$cmd" = close-created || "$cmd" = chrome-instance ]] && [ "${BROWSER_CLI_MCP:-}" != 1 ]; then
+    if [[ "$cmd" = close-created || "$cmd" = chrome-instance ]] && [ "${AGENT_BROWSER_MCP:-}" != 1 ]; then
       usage_error "unknown command: $cmd"
     fi
     parse "$@"
-    [ -n "$BROWSER" ] || { echo 'browser-cli: --browser safari|chrome is required' >&2; exit 2; }
+    [ -n "$BROWSER" ] || { echo 'agent-browser: --browser safari|chrome is required' >&2; exit 2; }
     if [[ "$TAB" = id:* ]] && { [ "$cmd" != read-page ] || [ "$BROWSER" != safari ]; }; then
-      [ "$BROWSER" = chrome ] || { echo 'browser-cli: --tab id:<id> is only supported for chrome' >&2; exit 2; }
-      [[ "${TAB#id:}" =~ ^[0-9]+$ ]] || { echo 'browser-cli: --tab id:<id> needs a numeric tab id' >&2; exit 2; }
+      [ "$BROWSER" = chrome ] || { echo 'agent-browser: --tab id:<id> is only supported for chrome' >&2; exit 2; }
+      [[ "${TAB#id:}" =~ ^[0-9]+$ ]] || { echo 'agent-browser: --tab id:<id> needs a numeric tab id' >&2; exit 2; }
     fi
-    [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: timeout must be a positive integer' >&2; exit 2; }
-    [ "$FOREGROUND$BACKGROUND" != 11 ] || { echo 'browser-cli: --foreground and --background cannot be used together' >&2; exit 2; }
-    [ "$TRUSTED$BACKGROUND" != 11 ] || { echo 'browser-cli: --trusted cannot be used with --background' >&2; exit 2; }
-    [ "$TRUSTED" = 0 ] || [[ "$cmd" =~ ^(click|fill|press)$ ]] || { echo 'browser-cli: --trusted only applies to click, fill, and press' >&2; exit 2; }
-    [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'browser-cli: --background only applies to open' >&2; exit 2; }
-    [ "$FOREGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'browser-cli: --foreground only applies to open' >&2; exit 2; }
-    [ "$cmd" != open ] || [ "$FOREGROUND$BACKGROUND" != 00 ] || { echo 'browser-cli: open needs --foreground or --background' >&2; exit 2; }
-    [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'browser-cli: --json only applies to tabs' >&2; exit 2; }
+    [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo 'agent-browser: timeout must be a positive integer' >&2; exit 2; }
+    [ "$FOREGROUND$BACKGROUND" != 11 ] || { echo 'agent-browser: --foreground and --background cannot be used together' >&2; exit 2; }
+    [ "$TRUSTED$BACKGROUND" != 11 ] || { echo 'agent-browser: --trusted cannot be used with --background' >&2; exit 2; }
+    [ "$TRUSTED" = 0 ] || [[ "$cmd" =~ ^(click|fill|press)$ ]] || { echo 'agent-browser: --trusted only applies to click, fill, and press' >&2; exit 2; }
+    [ "$BACKGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'agent-browser: --background only applies to open' >&2; exit 2; }
+    [ "$FOREGROUND" = 0 ] || [ "$cmd" = open ] || { echo 'agent-browser: --foreground only applies to open' >&2; exit 2; }
+    [ "$cmd" != open ] || [ "$FOREGROUND$BACKGROUND" != 00 ] || { echo 'agent-browser: open needs --foreground or --background' >&2; exit 2; }
+    [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'agent-browser: --json only applies to tabs' >&2; exit 2; }
     [ "$INCLUDE_LINKS" = 0 ] || [ "$cmd" = read-page ] || usage_error '--include-links only applies to read-page'
     [ "$WAIT_SELECTOR_SET" = 0 ] || [ "$cmd" = read-page ] || usage_error '--wait-for-selector only applies to read-page'
-    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(read-page|text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'browser-cli: --selector only applies to read-page, text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
-    [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'browser-cli: --out only applies to screenshot' >&2; exit 2; }
+    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(read-page|text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'agent-browser: --selector only applies to read-page, text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
+    [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'agent-browser: --out only applies to screenshot' >&2; exit 2; }
     if [ "$cmd" = scroll ]; then
-      [ "$((TO_SET + BY_SET))" = 1 ] || { echo 'browser-cli: scroll requires exactly one of --to or --by' >&2; exit 2; }
-      [ "$TO_SET" = 0 ] || [[ "$TO" =~ ^(top|bottom)$ ]] || { echo 'browser-cli: --to must be top or bottom' >&2; exit 2; }
-      [ "$BY_SET" = 0 ] || [[ "$BY" =~ ^-?[0-9]+$ ]] || { echo 'browser-cli: --by must be an integer' >&2; exit 2; }
+      [ "$((TO_SET + BY_SET))" = 1 ] || { echo 'agent-browser: scroll requires exactly one of --to or --by' >&2; exit 2; }
+      [ "$TO_SET" = 0 ] || [[ "$TO" =~ ^(top|bottom)$ ]] || { echo 'agent-browser: --to must be top or bottom' >&2; exit 2; }
+      [ "$BY_SET" = 0 ] || [[ "$BY" =~ ^-?[0-9]+$ ]] || { echo 'agent-browser: --by must be an integer' >&2; exit 2; }
     else
-      [ "$((TO_SET + BY_SET))" = 0 ] || { echo 'browser-cli: --to and --by only apply to scroll' >&2; exit 2; }
+      [ "$((TO_SET + BY_SET))" = 0 ] || { echo 'agent-browser: --to and --by only apply to scroll' >&2; exit 2; }
     fi
-    [ "$RAW" = 0 ] || [ "$cmd" = html ] || { echo 'browser-cli: --raw only applies to html' >&2; exit 2; }
+    [ "$RAW" = 0 ] || [ "$cmd" = html ] || { echo 'agent-browser: --raw only applies to html' >&2; exit 2; }
     if [ "$MAX_CHARS_SET" = 1 ]; then
-      [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'browser-cli: max-chars must be a positive integer' >&2; exit 2; }
-      [[ "$cmd" =~ ^(text|links|html|snapshot|eval|file)$ ]] || { echo 'browser-cli: --max-chars only applies to text, links, html, snapshot, eval, and file' >&2; exit 2; }
+      [[ "$MAX_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo 'agent-browser: max-chars must be a positive integer' >&2; exit 2; }
+      [[ "$cmd" =~ ^(text|links|html|snapshot|eval|file)$ ]] || { echo 'agent-browser: --max-chars only applies to text, links, html, snapshot, eval, and file' >&2; exit 2; }
     fi
     browser_setup
     case "$cmd" in

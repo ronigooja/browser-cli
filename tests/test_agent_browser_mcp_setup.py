@@ -6,10 +6,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from browser_mcp_setup import GRANT_SECONDS, Setup, TOOL, load_bridge
+from agent_browser_mcp_setup import GRANT_SECONDS, Setup, TOOL, load_bridge
 
 
-CLI = "/example/browser-cli"
+CLI = "/example/agent-browser"
 PREFIX = [CLI, "--browser", "chrome", "install-background"]
 SCOPE = object()
 
@@ -22,8 +22,8 @@ class SetupTests(unittest.TestCase):
         self.bridge.loading_instructions.return_value = (
             "Developer mode, Load unpacked, Command+Shift+G, Return, greyed out, Click Select, Reload"
         )
-        self.load_bridge = self.enter_patch("browser_mcp_setup.load_bridge", return_value=self.bridge)
-        self.run = self.enter_patch("browser_mcp_setup.subprocess.run")
+        self.load_bridge = self.enter_patch("agent_browser_mcp_setup.load_bridge", return_value=self.bridge)
+        self.run = self.enter_patch("agent_browser_mcp_setup.subprocess.run")
         self.run.return_value.returncode = 20
 
     def enter_patch(self, target, **options):
@@ -76,14 +76,14 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn("untrusted output", str(result))
         self.assertEqual(self.commands(), [PREFIX + ["--check"]] * 2 + [PREFIX + ["--profile", "Profile 4"]])
         launch = self.run.call_args.kwargs
-        self.assertEqual(launch["env"], dict(os.environ, BROWSER_CLI_MCP="1"))
+        self.assertEqual(launch["env"], dict(os.environ, AGENT_BROWSER_MCP="1"))
         self.assertEqual([launch[stream] for stream in ("stdin", "stdout", "stderr")], [subprocess.DEVNULL] * 3)
         self.assertNotIn("shell", launch)
         self.assertEqual(self.install(grant, profile="Profile 4")["status"], "grant_required")
         self.assertEqual(len(self.commands()), 3)
 
     def test_grants_expire_and_cannot_cross_scopes(self):
-        clock = self.enter_patch("browser_mcp_setup.time.monotonic", return_value=100)
+        clock = self.enter_patch("agent_browser_mcp_setup.time.monotonic", return_value=100)
         first = self.prepare(approved=True)["grant"]
         self.assertEqual(self.install(first, scope=object())["status"], "grant_required")
         self.assertEqual(self.install(first, scope=None)["status"], "grant_required")
@@ -92,7 +92,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(self.commands(), [PREFIX + ["--check"]])
 
     def test_grant_must_still_be_valid_after_preflight(self):
-        clock = self.enter_patch("browser_mcp_setup.time.monotonic", return_value=100)
+        clock = self.enter_patch("agent_browser_mcp_setup.time.monotonic", return_value=100)
         grant = self.prepare(approved=True)["grant"]
 
         def expire_during_check(*args, **kwargs):
@@ -166,7 +166,7 @@ class SetupTests(unittest.TestCase):
 
 class BridgeDiscoveryTests(unittest.TestCase):
     def setUp(self):
-        self.bridge = load_bridge(Path(__file__).resolve().parents[1] / "browser-cli")
+        self.bridge = load_bridge(Path(__file__).resolve().parents[1] / "agent-browser")
 
     def test_connection_check_does_not_create_a_runtime_directory(self):
         with patch.object(self.bridge, "runtime_dir", side_effect=FileNotFoundError) as directory:
@@ -182,7 +182,7 @@ class BridgeDiscoveryTests(unittest.TestCase):
         chrome.glob.side_effect = [[preference], []]
         with patch.object(bridge, "CHROME", chrome), patch.object(bridge, "host_manifest") as host, \
                 patch.object(bridge, "extension_origin", return_value="chrome-extension://abc/"), \
-                patch.dict(os.environ, BROWSER_CLI_MCP="1"):
+                patch.dict(os.environ, AGENT_BROWSER_MCP="1"):
             host.return_value.is_file.return_value = False
             self.assertEqual(bridge.setup_state(), "missing")
             chrome.glob.side_effect = [[preference], []]

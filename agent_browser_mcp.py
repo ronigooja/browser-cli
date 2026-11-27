@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-from browser_mcp_setup import Setup, TOOL as SETUP_TOOL
+from agent_browser_mcp_setup import Setup, TOOL as SETUP_TOOL
 
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 BROWSERS = ("safari", "chrome")
@@ -215,7 +215,7 @@ class Reader:
     def run(self, browser, command, *args, timeout=5):
         call = subprocess.run([self.cli, "--browser", browser, command, "--timeout", str(timeout), *args],
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              env=dict(os.environ, BROWSER_CLI_MCP="1"), timeout=timeout + 2)
+                              env=dict(os.environ, AGENT_BROWSER_MCP="1"), timeout=timeout + 2)
         if call.returncode:
             diagnostic = call.stderr.decode("utf-8", errors="replace").strip()[:1000]
             raise CliFailure(call.returncode, diagnostic)
@@ -337,10 +337,10 @@ class Reader:
     def cli_error(self, browser, error):
         status, message = CLI_ERRORS.get(error.code, ("browser_error", "The browser operation failed. Check the browser and macOS Automation permissions before retrying."))
         # Forward known, bounded browser diagnostics; do not echo page JS exceptions or browser output.
-        detail = error.diagnostic if error.code in (25, 26) or error.diagnostic.startswith("browser-cli: AppleScript error ") else ""
-        if error.code == 1 and error.diagnostic.startswith("browser-cli: Chrome background connection timed out or closed"):
+        detail = error.diagnostic if error.code in (25, 26) or error.diagnostic.startswith("agent-browser: AppleScript error ") else ""
+        if error.code == 1 and error.diagnostic.startswith("agent-browser: Chrome background connection timed out or closed"):
             detail = error.diagnostic
-        if error.code == 22 and error.diagnostic.startswith("browser-cli: Chrome background recovery:"):
+        if error.code == 22 and error.diagnostic.startswith("agent-browser: Chrome background recovery:"):
             detail = error.diagnostic
         return result(status, browser, message, **({"diagnostic": detail} if detail else {}))
 
@@ -574,7 +574,7 @@ def dispatch(request, reader, state):
             return error(request_id, -32602, "Expected a single initialize request with a protocolVersion")
         state["protocol"] = version if version in PROTOCOLS else PROTOCOLS[0]
         value = {"protocolVersion": state["protocol"], "capabilities": {"tools": {}},
-                 "serverInfo": {"name": "browser-cli", "version": "0.1.0"}, "instructions": INSTRUCTIONS}
+                 "serverInfo": {"name": "agent-browser", "version": "0.1.0"}, "instructions": INSTRUCTIONS}
     elif method == "ping":
         value = {}
     elif not state.get("ready"):

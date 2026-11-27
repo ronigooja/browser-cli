@@ -50,7 +50,7 @@ def profile_directory(value):
 
 def load_bridge(cli):
     path = Path(cli).parent / "chrome-background" / "bridge.py"
-    spec = importlib.util.spec_from_file_location("_browser_mcp_chrome_bridge", path)
+    spec = importlib.util.spec_from_file_location("_agent_browser_mcp_chrome_bridge", path)
     if spec is None or spec.loader is None:
         raise ImportError("Chrome setup bridge is unavailable")
     bridge = importlib.util.module_from_spec(spec)
@@ -67,7 +67,7 @@ class Setup:
     def run(self, *flags, timeout):
         return subprocess.run([self.cli, "--browser", "chrome", "install-background", *flags],
                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              env=dict(os.environ, BROWSER_CLI_MCP="1"), timeout=timeout).returncode
+                              env=dict(os.environ, AGENT_BROWSER_MCP="1"), timeout=timeout).returncode
 
     def pending(self, bridge, profile=None):
         details = {} if profile is None else {"profile": profile}
@@ -91,7 +91,7 @@ class Setup:
         if code == 22:
             return result("extension_disconnected",
                           "Do not reinstall. In the intended regular Chrome profile, open a regular window "
-                          "and ensure browser-cli Background Tabs is enabled at chrome://extensions/. "
+                          "and ensure Agent Browser is enabled at chrome://extensions/. "
                           "Leave it enabled in only one profile, then check again.", next_action="check")
         return result("setup_error", "Could not check the extension connection. Make sure it is enabled in "
                       "only one regular Chrome profile before checking again. Do not reinstall based on this result.",

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 
-CLI = Path(__file__).resolve().parents[1] / "browser-cli"
+CLI = Path(__file__).resolve().parents[1] / "agent-browser"
 START_TIME = "Fri Nov 27 00:00:00 2026"
 CHROME_INSTANCE = "1234\t" + START_TIME
 
@@ -122,7 +122,7 @@ printf '%s\\n' "$result"
             result = subprocess.run([CLI, "--browser", browser, *cli_args], text=True,
                                     capture_output=True, timeout=8,
                                     env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", MOCK_DIR=directory,
-                                             BROWSER_CLI_MCP=str(int(mcp)), MOCK_BROWSER_RUNNING=str(int(running)),
+                                             AGENT_BROWSER_MCP=str(int(mcp)), MOCK_BROWSER_RUNNING=str(int(running)),
                                               MOCK_BROWSER_PIDS=pids, MOCK_BROWSER_START="  " + START_TIME + "    ",
                                              MOCK_REJECT_EVAL=str(int(reject_eval))))
             if osa_calls is not None and (root / "osa-scripts").exists():
@@ -344,7 +344,7 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
         self.assertEqual((result.returncode, result.stdout, result.stderr), (26, "", diagnostic))
         result, _ = self.run_cli("read-page", args=args, osa_error=diagnostic)
         self.assertEqual((result.returncode, result.stdout), (1, ""))
-        self.assertEqual(result.stderr, "browser-cli: AppleScript error -1728: Can't get tab id 42.\n")
+        self.assertEqual(result.stderr, "agent-browser: AppleScript error -1728: Can't get tab id 42.\n")
 
     def test_close_created_requires_mcp_chrome_and_numeric_tab_id(self):
         calls = []
@@ -394,7 +394,7 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
     def test_builtin_reads_and_snapshot_do_not_use_string_eval(self):
         for command in ("text", "links", "html", "snapshot"):
             with self.subTest(command=command):
-                result, _ = self.run_cli(command, "str:browser-cli-result:content", reject_eval=True)
+                result, _ = self.run_cli(command, "str:agent-browser-result:content", reject_eval=True)
                 self.assertEqual((result.returncode, result.stdout), (0, "content\n"))
 
     def test_default_actions_do_not_use_string_eval(self):
@@ -403,7 +403,7 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
                               ("press", ["Escape", "--selector", "#missing"]),
                               ("scroll", ["--to", "top", "--selector", "#missing"])):
             with self.subTest(command=command):
-                result, _ = self.run_cli(command, "str:browser-cli-no-match:",
+                result, _ = self.run_cli(command, "str:agent-browser-no-match:",
                                          reject_eval=True, args=args)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("no element matches", result.stderr)
@@ -432,7 +432,7 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
     def test_initial_none_does_not_claim_clearance(self):
         result, notice = self.run_cli("wait-challenge", "str:none\nexample.com")
         self.assertEqual((result.returncode, result.stdout, notice), (0, "challenge: none\n", ""))
-        self.assertFalse(any(line.startswith("browser-cli: ") for line in result.stderr.splitlines()))
+        self.assertFalse(any(line.startswith("agent-browser: ") for line in result.stderr.splitlines()))
 
     def test_passive_to_human_stops_even_if_notification_fails(self):
         result, notice = self.run_cli("wait-challenge", "str:cloudflare-passive\nexample.com",

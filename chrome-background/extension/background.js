@@ -1,4 +1,4 @@
-const host = "com.browser_cli.background";
+const host = "com.agent_browser.background";
 const reconnect = "reconnect-native-host";
 let port;
 

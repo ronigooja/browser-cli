@@ -1,4 +1,4 @@
-# browser-cli
+# agent-browser
 
 A Bash tool that drives the user's real, logged-in macOS Safari or Google Chrome. Most commands use
 system tools only. The user logs in themselves; the tool stores no credentials or page markers.
@@ -12,7 +12,7 @@ Requires macOS and the system Bash/AppleScript tools.
    (needs Touch ID or a password), or Chrome > View > Developer (needs a Chrome window open). Leave it on;
    this tool never changes the setting and never quits or restarts the browser.
 2. The first run may prompt macOS to let the calling program control the selected browser; allow it.
-3. Copy `browser-cli` to a directory on your PATH and make it executable.
+3. Copy `agent-browser` to a directory on your PATH and make it executable.
 
 Optional permissions, granted to the terminal in System Settings > Privacy & Security:
 Screen Recording for `screenshot`, Accessibility for `--trusted`. See [Permissions](#permissions).
@@ -22,12 +22,12 @@ Screen Recording for `screenshot`, Accessibility for `--trusted`. See [Permissio
 Requires Chrome 120+ and Python 3. From the repository checkout, run:
 
 ```sh
-./browser-cli --browser chrome install-background
+./agent-browser --browser chrome install-background
 ```
 
 The installer selects the sole Chrome profile (or the default for a fresh Chrome). If there are
 several, it prompts in a terminal or lists their names and `--profile DIRECTORY` values for a
-noninteractive caller. It copies the extension and bridge into `~/Library/Application Support/browser-cli/chrome-background/`,
+noninteractive caller. It copies the extension and bridge into `~/Library/Application Support/agent-browser/chrome-background/`,
 registers the native messaging host in Chrome, and requests `chrome://extensions/` in the selected
 profile. Verify the profile before loading: if Chrome opens a different profile, switch manually.
 Turn on **Developer mode**, click **Load unpacked**, and select the extension directory printed by
@@ -39,12 +39,12 @@ requested page. The installer returns after printing the manual loading instruct
 wait for Chrome to connect. After loading the extension, run `install-background --check` (with
 `--browser chrome`) to confirm the connection without opening a tab.
 
-To uninstall, remove **browser-cli Background Tabs** from `chrome://extensions/` in every profile
-where it was loaded, then run `browser-cli --browser chrome uninstall-background`. The command
+To uninstall, remove **Agent Browser** from `chrome://extensions/` in every profile
+where it was loaded, then run `agent-browser --browser chrome uninstall-background`. The command
 removes only the staged files and native host registration, not the CLI or Chrome profile data.
 If you never loaded the extension, run the uninstall command directly.
 
-After setup, `browser-cli --browser chrome open --background https://example.com/` reuses a
+After setup, `agent-browser --browser chrome open --background https://example.com/` reuses a
 tab with the exact requested URL or adds an unselected tab without activating Chrome. It searches only within the
 profile with the connected extension and accepts HTTP(S) URLs. If that profile has no normal
 window, the extension creates one without requesting focus. Its first tab is selected in the new
@@ -59,25 +59,26 @@ by a tab and `created` or `reused`; use the returned ID with `--tab`.
 
 ## Command reference
 
-`browser-cli help` lists the supported commands, options, outputs, and exit codes.
+`agent-browser help` lists the supported commands, options, outputs, and exit codes.
 
 ## OpenCode MCP (no skill)
 
-Keep `browser-cli`, `browser_mcp.py`, `browser_mcp_setup.py`, and `chrome-background/` together on the Mac with the
+Keep `agent-browser`, `agent_browser_mcp.py`, `agent_browser_mcp_setup.py`, and `chrome-background/` together on the Mac with the
 browser. The server needs Python 3 and uses local stdio, not an HTTP listener. Register it in the
 target OpenCode project (add `--global` for a user-wide installation):
 
 ```sh
-opencode mcp add browser_cli -- /absolute/path/to/browser-cli mcp
+opencode mcp add agent_browser -- /absolute/path/to/agent-browser mcp
 opencode mcp list
 ```
 
 If upgrading from the legacy skill, move its installed directory out of OpenCode skill discovery
-(typically `~/.config/opencode/skills/browser-cli/`). The skill is no longer shipped; the server
+(typically `~/.config/opencode/skills/browser-cli/`; this is intentionally the historical legacy path).
+The skill is no longer shipped; the server
 provides its own instructions. Start with `read_page`:
 
 ```js
-await tools.browser_cli.read_page({url: "https://example.com/", browser: "safari", include_links: true})
+await tools.agent_browser.read_page({url: "https://example.com/", browser: "safari", include_links: true})
 ```
 
 - `public_background` (default): reuse a matching tab or background-open a missing public URL.
@@ -143,8 +144,8 @@ Strings are printed exactly, including trailing newlines; other values print JSO
 newline, and `undefined` prints an empty line. Shell command substitution strips trailing
 newlines, so redirect to a file for exact comparisons.
 In `tabs` output, titles and URLs have embedded tabs and newlines replaced with spaces.
-Errors go to stderr as `browser-cli: <message>`. AppleScript failures print
-`browser-cli: AppleScript error <code>: <message>` (`unknown` when no error code is available).
+Errors go to stderr as `agent-browser: <message>`. AppleScript failures print
+`agent-browser: AppleScript error <code>: <message>` (`unknown` when no error code is available).
 Quotes, backslashes, and Unicode pass through a UTF-8 temporary file. Shell quoting still
 applies. Wrap statements in an immediately invoked function; first/last-line comments work.
 Evaluation runs in the page world and main frame only.
@@ -244,16 +245,16 @@ Permissions are per application: a different terminal or host program needs its 
 ## Examples
 
 ```sh
-browser-cli --browser safari status
-browser-cli --browser safari open --foreground https://example.com/
-browser-cli --browser safari wait --timeout 20 --tab example.com 'document.querySelector("h1") !== null'
-browser-cli --browser safari eval --tab example.com '({url: location.href, title: document.title})'
-browser-cli --browser chrome info --tab example.com
-browser-cli --browser chrome snapshot --tab example.com --max-chars 4000
-browser-cli --browser chrome fill --tab example.com 'input[name="q"]' 'hello'
-browser-cli --browser chrome press --tab example.com Enter --selector 'input[name="q"]'
-browser-cli --browser chrome screenshot --tab example.com --selector '#chart' --out /tmp/chart.png
-browser-cli --browser safari file --tab 1:2 ./inspect.js
+agent-browser --browser safari status
+agent-browser --browser safari open --foreground https://example.com/
+agent-browser --browser safari wait --timeout 20 --tab example.com 'document.querySelector("h1") !== null'
+agent-browser --browser safari eval --tab example.com '({url: location.href, title: document.title})'
+agent-browser --browser chrome info --tab example.com
+agent-browser --browser chrome snapshot --tab example.com --max-chars 4000
+agent-browser --browser chrome fill --tab example.com 'input[name="q"]' 'hello'
+agent-browser --browser chrome press --tab example.com Enter --selector 'input[name="q"]'
+agent-browser --browser chrome screenshot --tab example.com --selector '#chart' --out /tmp/chart.png
+agent-browser --browser safari file --tab 1:2 ./inspect.js
 ```
 
 ## Security
