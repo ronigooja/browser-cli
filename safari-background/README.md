@@ -23,7 +23,7 @@ For live testing use a runner provisioned for signing both targets with the same
 ## Explicit setup
 
 1. Place the signed app at `~/Applications/AgentBrowserSafari.app` (or configure its absolute binary path) and open that **app** once without arguments to register its embedded extension. This does not open Safari. Enable the extension only in the intended **named** Safari profile; turn off **Allow in Private Browsing**. Do not use a Safari web app or the unnamed default context. The operator, not a UUID or window order, identifies the named profile in Safari.
-2. In that profile, use the **Agent Browser Safari Setup** popup. It must show a browser-supplied UUID. Click **Grant all HTTP(S) access and enable** and approve the single wildcard grant (`http://*/*` and `https://*/*`), not an individual website or one-time current-site permission. If Safari cannot grant both scopes from this setup flow, do not work around it with per-site prompts; the adapter is unavailable until the one-time grant is confirmed by `permissions.contains`. Set the MCP process environment:
+2. In Safari’s settings, grant the extension access to all websites once. The extension declares the HTTP(S) scopes at installation and does not request permissions at runtime. Then open the **Agent Browser Safari Setup** toolbar popup in that profile and click **Enable background requests**. It must show `enabled` and a browser-supplied UUID. If Safari cannot grant both scopes, do not work around it with per-site prompts. Set the MCP process environment:
 
    ```sh
    export AGENT_BROWSER_SAFARI_PROFILE='<UUID shown by the setup popup>'

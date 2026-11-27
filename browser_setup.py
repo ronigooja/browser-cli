@@ -71,8 +71,8 @@ class Setup:
         if browser == "safari" and state in ("extension_required", "extension_pending", "extension_disconnected", "permission_required", "profile_required"):
             return result(state, browser, "Use the production Safari extension, not the development probe.",
                           instructions=("Open the signed AgentBrowserSafari app once. In Safari > Settings > Extensions, enable Agent Browser "
-                                        "in the intended named profile only and leave private access off. In the Agent Browser Safari Setup popup, "
-                                        "grant all HTTP(S) access once. Set AGENT_BROWSER_SAFARI_PROFILE in the MCP environment to the UUID shown there. "
+                                        "in the intended named profile only and leave private access off. In Safari settings, grant all HTTP(S) access once. "
+                                        "Enable background requests in the Agent Browser Safari Setup popup. Set AGENT_BROWSER_SAFARI_PROFILE in the MCP environment to the UUID shown there. "
                                         "Then use setup_extension with action=check. No per-site permission or automatic install is offered."),
                           next_action="check")
         if browser == "chrome" and self.staged_update and state in ("extension_pending", "extension_disconnected"):

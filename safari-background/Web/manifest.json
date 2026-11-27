@@ -2,9 +2,8 @@
   "manifest_version": 2,
   "name": "Agent Browser Safari Background",
   "description": "Local background reads in an explicitly selected macOS Safari profile.",
-  "version": "0.1.0",
-  "permissions": ["nativeMessaging", "storage", "scripting", "webNavigation"],
-  "optional_permissions": ["http://*/*", "https://*/*"],
+  "version": "0.1.1",
+  "permissions": ["nativeMessaging", "storage", "scripting", "webNavigation", "http://*/*", "https://*/*"],
   "background": {"scripts": ["read-page.js", "background.js"], "persistent": true},
   "browser_action": {"default_title": "Agent Browser Safari Setup", "default_popup": "setup.html"}
 }
