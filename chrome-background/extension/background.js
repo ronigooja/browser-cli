@@ -2,7 +2,7 @@ importScripts("read-page.js");
 
 const host = "com.agent_browser.background";
 const reconnect = "reconnect-native-host";
-const version = 1;
+const version = 2;
 const frameLimit = 65536;
 let port;
 
@@ -28,22 +28,40 @@ function stateFor(connection) {
   const generation = crypto.randomUUID();
   const refs = new Map();
   const tabs = new Map();
+  const observers = new Set();
   return {
     active: () => port === connection,
     inGeneration: ref => ref.startsWith(generation + "."),
     tab: ref => tabs.get(ref),
+    knows: id => refs.has(id),
+    observe(fn) {
+      observers.add(fn);
+      return () => observers.delete(fn);
+    },
+    changed(kind, windowId, tabId) {
+      for (const observe of observers) observe(kind, windowId, tabId);
+      const entry = refs.get(tabId);
+      if (entry) {
+        delete entry.ownership;
+        entry.adoption++;
+      }
+    },
     describe(tab, url) {
       let entry = refs.get(tab.id);
       if (!entry) {
-        entry = { id: tab.id, ref: `${generation}.${crypto.randomUUID()}`, navigation: 0 };
+        entry = { id: tab.id, ref: `${generation}.${crypto.randomUUID()}`, navigation: 0, adoption: 0 };
         refs.set(tab.id, entry);
         tabs.set(entry.ref, entry);
       }
       return { ref: entry.ref, url: url.href, title: (tab.title ?? "").slice(0, 500) };
     },
-    forget(id) {
+    forget(id, replaced = false) {
+      for (const observe of observers) observe("identity", undefined, id);
       const entry = refs.get(id);
-      if (entry) tabs.delete(entry.ref);
+      if (entry) {
+        if (replaced) entry.adoption++;
+        tabs.delete(entry.ref);
+      }
       refs.delete(id);
     },
     navigated(id) {
@@ -53,13 +71,17 @@ function stateFor(connection) {
   };
 }
 
+function normalWindow(window) {
+  return window?.type === "normal" && window.incognito === false && Number.isSafeInteger(window.id) && window.id >= 0;
+}
+
 async function currentTab(state, entry) {
   if (!entry || !state.active() || state.tab(entry.ref) !== entry) return null;
   const tab = await chrome.tabs.get(entry.id).catch(() => null);
   if (!regular(tab)) return null;
   const window = await chrome.windows.get(tab.windowId).catch(() => null);
-  return state.active() && state.tab(entry.ref) === entry && window?.type === "normal" &&
-    window.incognito === false && tab.id === entry.id ? tab : null;
+  return state.active() && state.tab(entry.ref) === entry && normalWindow(window) &&
+    window.id === tab.windowId && tab.id === entry.id ? tab : null;
 }
 
 function changed(url) {
@@ -149,27 +171,86 @@ async function findOrOpen(state, operation, data, expires) {
   if (candidates.length > 1) return { status: "tab_ambiguous", tabs: candidates };
   if (candidates.length === 1) return { status: "ok", tab: candidates[0], created: false };
 
-  const normal = { windowTypes: ["normal"] };
-  const windows = (await chrome.windows.getAll(normal)).filter(window => window.incognito === false);
-  const lastFocused = windows.length ? await chrome.windows.getLastFocused(normal).catch(() => null) : null;
-  const window = windows.find(window => window.id === lastFocused?.id) ?? windows[0];
-  if (!state.active()) return { status: "disconnected" };
-  if (Date.now() >= expires) return { status: "timeout" };
+  return openBackground(state, target, expires);
+}
+
+function focusedWindow(windows) {
+  if (windows.some(window => typeof window.focused !== "boolean")) return undefined;
+  const focused = windows.filter(window => window.focused);
+  if (!focused.length) return null;
+  if (focused.length === 1 && Number.isSafeInteger(focused[0].id) && focused[0].id >= 0) return focused[0].id;
+}
+
+function windowSelection(window) {
+  if (!Array.isArray(window.tabs) || window.tabs.some(tab => !regular(tab) || tab.windowId !== window.id ||
+      typeof tab.active !== "boolean" || typeof tab.highlighted !== "boolean")) return null;
+  const active = window.tabs.filter(tab => tab.active);
+  if (active.length !== 1) return null;
+  return { active: active[0].id, highlighted: window.tabs.filter(tab => tab.highlighted).map(tab => tab.id) };
+}
+
+async function openBackground(state, target, expires) {
+  const snapshot = () => chrome.windows.getAll({ populate: true });
+  const uncertain = { status: "open_unconfirmed" };
+  const unavailable = { status: "window_snapshot_unavailable" };
+  const events = [];
+  let dispatched = false;
+  const stop = state.observe((...event) => { if (events.length < 32) events.push(event); });
   try {
+    const before = await snapshot();
+    const focused = focusedWindow(before);
+    const eligible = before.filter(normalWindow);
+    if (!eligible.length && before.length) return { status: "no_regular_window" };
+    const lastFocused = eligible.length > 1 ? await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null) : null;
+    const window = eligible.find(item => item.id === focused) ?? eligible.find(item => item.id === lastFocused?.id) ??
+      (eligible.length === 1 ? eligible[0] : null);
+    const selected = window && windowSelection(window);
+    if (!state.active()) return { status: "disconnected" };
+    if (Date.now() >= expires) return { status: "timeout" };
+    if (events.length || focused === undefined || (eligible.length && !selected)) return unavailable;
+
+    dispatched = true;
     let tab;
+    let windowId;
     if (window) {
-      tab = await chrome.tabs.create({ windowId: window.id, url: target.href, active: false });
+      windowId = window.id;
+      tab = await chrome.tabs.create({ windowId, url: target.href, active: false });
     } else {
       const created = await chrome.windows.create({ url: target.href, type: "normal", incognito: false, focused: false });
-      if (created?.incognito === false && created.tabs?.length === 1) tab = created.tabs[0];
+      if (!normalWindow(created) || created.focused !== false || created.tabs?.length !== 1) return uncertain;
+      windowId = created.id;
+      tab = created.tabs[0];
     }
-    if (!regular(tab) || !state.active()) return { status: "open_unconfirmed" };
-    const description = state.describe(tab, observedURL(tab) ?? target);
+    const expectedActive = !window;
+    if (!regular(tab) || tab.windowId !== windowId || tab.active !== expectedActive ||
+        (window && tab.highlighted !== false) || window?.tabs.some(item => item.id === tab.id) ||
+        state.knows(tab.id)) return uncertain;
+
+    const after = await snapshot();
+    const destination = after.find(item => item.id === windowId);
+    const actualSelection = normalWindow(destination) && windowSelection(destination);
+    const current = actualSelection && destination.tabs.find(item => item.id === tab.id);
+    // The first tab of a new window must be selected even when the window is unfocused.
+    // Only that initial selection is expected; do not grant ownership of an active tab.
+    const unexpectedEvent = events.length === 32 || events.some(([kind, id, tabId]) =>
+      kind === "focus" || (kind === "selection" ? (window || id !== windowId || tabId !== tab.id) : tabId === tab.id));
+    if (unexpectedEvent || !state.active() || Date.now() >= expires || focusedWindow(after) !== focused ||
+        !regular(current) || current.windowId !== windowId || current.active !== expectedActive ||
+        actualSelection.active !== (selected?.active ?? tab.id)) return uncertain;
+    const highlighted = selected?.highlighted ?? [tab.id];
+    if (actualSelection.highlighted.length !== highlighted.length ||
+        actualSelection.highlighted.some(id => !highlighted.includes(id)) ||
+        (!window && (after.length !== 1 || destination.tabs.length !== 1))) return uncertain;
+
+    const description = state.describe(current, observedURL(current) ?? target);
+    if (!window) return { status: "ok", tab: description, created: true };
     const ownership = crypto.randomUUID();
-    state.tab(description.ref).ownership = ownership;
+    state.tab(description.ref).ownership = { token: ownership, windowId };
     return { status: "ok", tab: description, created: true, ownership };
   } catch (_) {
-    return { status: "open_unconfirmed" };
+    return dispatched ? uncertain : unavailable;
+  } finally {
+    stop();
   }
 }
 
@@ -177,16 +258,23 @@ async function closeOwned(state, { ref, ownership }, expires) {
   if (!state.inGeneration(ref)) return { status: "cleanup_instance_changed" };
   const entry = state.tab(ref);
   if (!entry) return { status: "cleanup_tab_not_found" };
-  if (entry.ownership !== ownership) return { status: "cleanup_unconfirmed" };
+  const original = entry.ownership;
+  if (original?.token !== ownership) return { status: "cleanup_unconfirmed" };
   delete entry.ownership; // There is no replay, even if the first attempt is uncertain.
-  const tab = await currentTab(state, entry);
+  const adoption = entry.adoption;
+  const window = await chrome.windows.get(original.windowId).catch(() => null);
+  if (!normalWindow(window) || window.id !== original.windowId) return { status: "cleanup_unconfirmed" };
+  const tab = await chrome.tabs.get(entry.id).catch(() => null);
   if (!state.active() || Date.now() >= expires) return { status: "cleanup_unconfirmed" };
   if (state.tab(ref) !== entry) return { status: "cleanup_tab_not_found" };
-  if (!tab) return { status: "cleanup_unconfirmed" };
+  if (entry.adoption !== adoption || !regular(tab) || tab.id !== entry.id || tab.windowId !== original.windowId ||
+      tab.active !== false || tab.highlighted !== false) return { status: "cleanup_unconfirmed" };
   try {
+    // Chrome has no atomic remove-if-inactive operation. Keep the last tab check
+    // adjacent to dispatch, and report any observed adoption during it as uncertain.
     await chrome.tabs.remove(tab.id);
     state.forget(tab.id);
-    return { status: "closed" };
+    return { status: entry.adoption === adoption && state.active() ? "closed" : "cleanup_unconfirmed" };
   } catch (_) {
     return { status: "cleanup_unconfirmed" };
   }
@@ -239,8 +327,21 @@ function withinBudget(response) {
 
 let forgetTab = () => {};
 let navigateTab = () => {};
+let changedTab = () => {};
 chrome.tabs.onRemoved?.addListener(tabId => forgetTab(tabId));
-chrome.tabs.onReplaced?.addListener((_added, removed) => forgetTab(removed));
+chrome.tabs.onReplaced?.addListener((_added, removed) => forgetTab(removed, true));
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => changedTab("selection", windowId, tabId));
+chrome.tabs.onHighlighted.addListener(({ tabIds, windowId }) => {
+  if (!tabIds.length) changedTab("selection", windowId);
+  for (const tabId of tabIds) changedTab("selection", windowId, tabId);
+});
+for (const name of ["onAttached", "onDetached", "onMoved"]) {
+  chrome.tabs[name].addListener(tabId => changedTab("adoption", undefined, tabId));
+}
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if ("pinned" in change || "groupId" in change) changedTab("adoption", undefined, tabId);
+});
+chrome.windows.onFocusChanged.addListener(windowId => changedTab("focus", windowId));
 for (const name of ["onBeforeNavigate", "onCommitted", "onHistoryStateUpdated", "onReferenceFragmentUpdated"]) {
   chrome.webNavigation?.[name]?.addListener(({tabId, frameId}) => { if (frameId === 0) navigateTab(tabId); });
 }
@@ -252,6 +353,7 @@ function connect() {
   const state = stateFor(connection);
   forgetTab = state.forget;
   navigateTab = state.navigated;
+  changedTab = state.changed;
   connection.onMessage.addListener(async request => {
     let response;
     const id = typeof request?.id === "string" && request.id.length <= 36 ? request.id : "";
@@ -271,6 +373,7 @@ function connect() {
     port = undefined;
     forgetTab = () => {};
     navigateTab = () => {};
+    changedTab = () => {};
     chrome.alarms.create(reconnect, { delayInMinutes: 0.5 });
   });
 }

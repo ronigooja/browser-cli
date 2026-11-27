@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agent Browser",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Find and read regular Chrome tabs or open them in the background for the local agent-browser tool.",
   "minimum_chrome_version": "120",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA270JaIvNRdGkr0B1a2gDwI8U6Trry5Pq/bEKHMvwcz94aOXR/0pj6mwikzXHDuSNcdVjtswE1iSLu9DKYoq7f7aqHJDMUZCci2IjnHWcXI/eXwHPTgMW9uo8Q60x8/dXLPlZ94NAX6GP807KXFfeoIKoH3IbK1DmtyK78t4NhFlCwFTWn1lEvjVbxkxvH1zxIIQjaEaGhVkkigl32XMs/XIvrieHKhaswqq9l6f+wpXzBX9ClFmi5D79YOoooOnwGJ6Vq2bPrbLlVur70YN/05QqYgmg8uISfs2RQF59H+pzAlTYh0DX4qiJsojjYp2qrrIl9EsdysSQSWFLqvb2FwIDAQAB",

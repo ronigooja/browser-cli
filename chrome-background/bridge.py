@@ -22,7 +22,7 @@ HOST = "com.agent_browser.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-background"
 LIMIT = 65536
-PROTOCOL = 1
+PROTOCOL = 2
 OPERATIONS = {"status", "find", "open", "read", "close"}
 
 
@@ -218,14 +218,18 @@ def request(operation, payload, timeout):
                 if state != "missing" and staged_update_required():
                     return {"status": "disconnected", "update_required": True}
                 return {"status": {"missing": "extension_required", "pending": "pending", "loaded": "disconnected"}[state]}
-            # Neither a legacy host nor a legacy extension accepts this envelope:
-            # the legacy open request requires an HTTP(S) URL at the top level.
+            # Older hosts and workers reject this version before dispatching any write.
             client.settimeout(remaining_time(deadline))
             dispatched = True
             client.sendall(data)
             reply = receive(client.fileno(), deadline)
             if type(reply.get("v")) is not int or reply["v"] != PROTOCOL or reply.get("id") != message_id:
-                if "v" not in reply and "error" in reply:
+                # A v1 host rejects the request itself; a v1 worker may instead
+                # reject it behind a newer host. Neither needs a replay or probe.
+                old_host_or_worker = (type(reply.get("v")) is int and reply["v"] == 1
+                                      and reply.get("id") == message_id
+                                      and reply.get("status") in ("invalid_request", "protocol_mismatch"))
+                if old_host_or_worker or ("v" not in reply and "error" in reply):
                     if operation == "close":
                         return {"status": "cleanup_instance_changed"}
                     return {"status": "disconnected", "update_required": True}

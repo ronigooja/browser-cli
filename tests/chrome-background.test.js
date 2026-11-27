@@ -8,20 +8,25 @@ const vm = require("node:vm");
 const script = fs.readFileSync(path.join(__dirname, "../chrome-background/extension/background.js"), "utf8");
 const shared = fs.readFileSync(path.join(__dirname, "../extension/shared/read-page.js"), "utf8");
 const noop = { addListener() {} };
+const protocol = 2;
 
-function production(initialTabs = []) {
+function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
   const url = "https://example.com/";
-  const tabs = new Map(initialTabs.map(tab => [tab.id, { url, incognito: false, windowId: 1, ...tab }]));
+  const tabs = new Map(initialTabs.map((tab, i) => [tab.id, {
+    url, incognito: false, windowId: 1, active: i === 0, highlighted: i === 0, ...tab,
+  }]));
   const events = {};
-  const alarm = { addListener(fn) { events.alarm = fn; } };
-  const calls = { create: [], remove: [], execute: [] };
+  const listener = name => ({ addListener(fn) { events[name] = fn; } });
+  const calls = { create: [], remove: [], execute: [], snapshot: [] };
   let receive, disconnect, reply;
   let frame = { frameId: 0, documentId: "document-one", documentLifecycle: "active", errorOccurred: false, url };
   let probe = { status: "ok", final_url: url, text: "Visible text", title: "Example" };
   let duringInjection = () => {};
   let failClose = false;
   let allSites = true;
-  let windows = [{ id: 1, type: "normal", incognito: false }];
+  let windows = [{ id: 1, type: "normal", incognito: false, focused: true }];
+  const hooks = {};
+  const populate = window => ({ ...window, tabs: [...tabs.values()].filter(tab => tab.windowId === window.id).map(tab => ({ ...tab })) });
   let context;
   const chrome = {
     runtime: {
@@ -32,37 +37,64 @@ function production(initialTabs = []) {
       },
       onInstalled: noop, onStartup: noop,
     },
-    alarms: { onAlarm: alarm, create: () => {} },
+    alarms: { onAlarm: listener("alarm"), create: () => {} },
     permissions: { contains: async ({ origins }) => {
       assert.equal(origins.join(","), "http://*/*,https://*/*");
       return allSites;
     } },
     tabs: {
-      query: async options => { assert.equal(options.windowType, "normal"); return [...tabs.values()]; },
-      get: async id => { if (!tabs.has(id)) throw Error("gone"); return { ...tabs.get(id) }; },
+      query: async options => { assert.equal(options.windowType, "normal"); return [...tabs.values()].map(tab => ({ ...tab })); },
+      get: async id => {
+        if (!tabs.has(id)) throw Error("gone");
+        const tab = { ...tabs.get(id) };
+        hooks.getTab?.();
+        return tab;
+      },
       create: async options => {
         calls.create.push({ ...options });
-        const tab = { id: 42, windowId: 1, incognito: false, url: options.url };
+        const tab = { id: 42, windowId: options.windowId, incognito: false, url: options.url,
+          active: options.active, highlighted: options.active };
         tabs.set(tab.id, tab);
-        return tab;
+        const created = { ...tab };
+        hooks.createTab?.();
+        return created;
       },
       remove: async id => {
         calls.remove.push(id);
         if (failClose) throw Error("uncertain");
+        hooks.removeTab?.();
         tabs.delete(id);
         events.remove(id);
       },
-      onRemoved: { addListener(fn) { events.remove = fn; } },
-      onReplaced: { addListener(fn) { events.replace = fn; } },
+      onRemoved: listener("remove"), onReplaced: listener("replace"), onActivated: listener("activate"),
+      onHighlighted: listener("highlight"), onAttached: listener("attach"), onDetached: listener("detach"),
+      onMoved: listener("move"), onUpdated: listener("update"),
     },
     windows: {
-      get: async id => windows.find(window => window.id === id),
-      getAll: async () => windows,
+      get: async id => {
+        hooks.getWindow?.();
+        return windows.find(window => window.id === id);
+      },
+      getAll: async options => {
+        assert.equal(options.populate, true);
+        calls.snapshot.push(options);
+        const result = windows.map(populate);
+        hooks.snapshot?.(calls.snapshot.length);
+        return result;
+      },
       getLastFocused: async () => windows[0],
       create: async options => {
         calls.create.push({ ...options });
-        return { incognito: false, tabs: [{ id: 43, incognito: false, url: options.url }] };
+        const window = { id: 2, type: options.type, incognito: options.incognito, focused: options.focused };
+        windows.push(window);
+        tabs.set(43, { id: 43, windowId: window.id, incognito: false, url: options.url, active: true, highlighted: true });
+        events.activate({ tabId: 43, windowId: window.id });
+        events.highlight({ tabIds: [43], windowId: window.id });
+        const created = populate(window);
+        hooks.createWindow?.(window);
+        return created;
       },
+      onFocusChanged: listener("focus"),
     },
     webNavigation: {
       getFrame: async options => { assert.equal(options.frameId, 0); return frame; },
@@ -84,7 +116,7 @@ function production(initialTabs = []) {
   } });
   vm.runInContext(script, context);
   return {
-    url, tabs, calls, events,
+    url, tabs, calls, events, hooks,
     frame(next) { frame = { ...frame, ...next }; },
     probe(next) { probe = { ...probe, ...next }; },
     duringInjection(fn) { duringInjection = fn; },
@@ -95,9 +127,9 @@ function production(initialTabs = []) {
     async raw(message) { await receive(message); return reply; },
     async request(operation, payload = {}, expires = Date.now() + 1000) {
       reply = undefined;
-      await receive({ v: 1, id: "request", operation, payload, expires });
+      await receive({ v: protocol, id: "request", operation, payload, expires });
       assert.equal(reply.id, "request");
-      assert.equal(reply.v, 1);
+      assert.equal(reply.v, protocol);
       const { status, ...data } = reply;
       delete data.v;
       delete data.id;
@@ -133,10 +165,13 @@ test("find returns same origin and path candidates with generation-scoped refere
   assert.notEqual((await browser.request("find", { url: browser.url })).tabs[0].ref, found.tabs[0].ref);
 });
 
-test("created tabs stay inactive and only one valid cleanup attempt is allowed", async () => {
+test("created tabs preserve selection and focus and only one cleanup attempt is allowed", async () => {
   const browser = production();
   const opened = await browser.request("open", { url: browser.url });
   assert.equal(opened.created, true);
+  assert.equal(browser.tabs.get(1).active, true);
+  assert.equal(browser.tabs.get(42).active, false);
+  assert.equal(browser.calls.snapshot.length, 2);
   assert.deepEqual(browser.calls.create, [{ windowId: 1, url: browser.url, active: false }]);
   const payload = { ref: opened.tab.ref, ownership: opened.ownership };
   browser.failClose();
@@ -146,6 +181,129 @@ test("created tabs stay inactive and only one valid cleanup attempt is allowed",
   browser.reconnect();
   assert.equal((await browser.request("close", payload)).status, "cleanup_instance_changed");
   assert.deepEqual(browser.calls.remove, [42]);
+});
+
+test("cleanup ownership is irrevocably relinquished on tab selection or adoption", async () => {
+  for (const adopt of [
+    b => b.events.activate({ tabId: 42, windowId: 1 }),
+    b => b.events.highlight({ tabIds: [1, 42], windowId: 1 }),
+    b => b.events.detach(42, { oldWindowId: 1 }),
+    b => b.events.attach(42, { newWindowId: 1 }),
+    b => b.events.move(42, { windowId: 1 }),
+    b => b.events.update(42, { pinned: true }),
+    b => b.events.update(42, { groupId: 3 }),
+  ]) {
+    const browser = production();
+    const opened = await browser.request("open", { url: browser.url });
+    assert.equal(opened.status, "ok");
+    adopt(browser); // The tab looks inactive and in the original window again by cleanup time.
+    const payload = { ref: opened.tab.ref, ownership: opened.ownership };
+    assert.equal((await browser.request("close", payload)).status, "cleanup_unconfirmed");
+    assert.deepEqual(browser.calls.remove, []);
+  }
+});
+
+test("cleanup refuses insufficient or changed final tab state even without an event", async () => {
+  for (const override of [{ active: true }, { active: undefined }, { highlighted: true }, { windowId: 2 }, { incognito: true }]) {
+    const browser = production();
+    const opened = await browser.request("open", { url: browser.url });
+    Object.assign(browser.tabs.get(42), override);
+    const payload = { ref: opened.tab.ref, ownership: opened.ownership };
+    assert.equal((await browser.request("close", payload)).status, "cleanup_unconfirmed");
+    Object.assign(browser.tabs.get(42), { active: false, highlighted: false, windowId: 1, incognito: false });
+    assert.equal((await browser.request("close", payload)).status, "cleanup_unconfirmed");
+    assert.deepEqual(browser.calls.remove, []);
+  }
+});
+
+test("cleanup detects adoption and identity races during asynchronous checks", async () => {
+  for (const [hook, change, status, removals] of [
+    ["getWindow", b => b.events.activate({ tabId: 42, windowId: 1 }), "cleanup_unconfirmed", []],
+    ["getTab", b => b.events.detach(42, { oldWindowId: 1 }), "cleanup_unconfirmed", []],
+    ["getTab", b => b.events.replace(42, 42), "cleanup_tab_not_found", []],
+    ["removeTab", b => b.events.activate({ tabId: 42, windowId: 1 }), "cleanup_unconfirmed", [42]],
+    ["removeTab", b => b.events.replace(99, 42), "cleanup_unconfirmed", [42]],
+  ]) {
+    const browser = production();
+    const opened = await browser.request("open", { url: browser.url });
+    browser.hooks[hook] = () => change(browser);
+    assert.equal((await browser.request("close", { ref: opened.tab.ref, ownership: opened.ownership })).status, status);
+    assert.deepEqual(browser.calls.remove, removals);
+  }
+});
+
+test("background open returns uncertainty without ownership or fallback on changed evidence", async () => {
+  for (const race of [
+    b => { b.tabs.get(42).active = true; b.tabs.get(1).active = false; },
+    b => { b.tabs.get(42).highlighted = true; },
+    b => { b.tabs.get(1).highlighted = false; },
+    b => { b.tabs.get(42).windowId = 2; },
+    b => b.events.activate({ tabId: 42, windowId: 1 }),
+    b => b.events.replace(99, 42),
+    b => b.events.focus(-1),
+    b => { b.hooks.snapshot = count => { if (count === 2) b.events.activate({ tabId: 42, windowId: 1 }); }; },
+    b => b.windows([{ id: 1, type: "normal", incognito: false, focused: false }]),
+    b => { b.hooks.snapshot = count => { if (count === 2) throw Error("lost snapshot"); }; },
+    b => { throw Error("unknown create outcome"); },
+  ]) {
+    const browser = production();
+    browser.hooks.createTab = () => race(browser);
+    assert.deepEqual(await browser.request("open", { url: browser.url }), { status: "open_unconfirmed" });
+    assert.deepEqual(browser.calls.create, [{ windowId: 1, url: browser.url, active: false }]);
+    assert.deepEqual(browser.calls.remove, []);
+  }
+});
+
+test("background open does not write when the pre-open selection or focus cannot be confirmed", async () => {
+  for (const invalidate of [
+    b => { b.tabs.get(1).active = false; },
+    b => b.windows([{ id: 1, type: "normal", incognito: false }]),
+    b => { b.hooks.snapshot = () => b.events.focus(1); },
+  ]) {
+    const browser = production();
+    invalidate(browser);
+    assert.deepEqual(await browser.request("open", { url: browser.url }), { status: "window_snapshot_unavailable" });
+    assert.deepEqual(browser.calls.create, []);
+  }
+});
+
+test("zero-window open verifies the sole new window remains unfocused and grants no active-tab cleanup", async () => {
+  const browser = production([]);
+  browser.windows([]);
+  const opened = await browser.request("open", { url: browser.url });
+  assert.equal(opened.status, "ok");
+  assert.equal(opened.created, true);
+  assert.equal(opened.tab.url, browser.url);
+  assert.equal("ownership" in opened, false);
+  assert.equal(browser.tabs.get(43).active, true);
+  assert.equal(browser.calls.snapshot.length, 2);
+  assert.deepEqual(browser.calls.create, [{ url: browser.url, type: "normal", incognito: false, focused: false }]);
+  assert.equal((await browser.request("close", { ref: opened.tab.ref, ownership: webcrypto.randomUUID() })).status, "cleanup_unconfirmed");
+  assert.deepEqual(browser.calls.remove, []);
+});
+
+test("zero-window focus changes or inconclusive observations never trigger a fallback", async () => {
+  for (const race of [
+    (b, window) => { window.focused = true; },
+    (b, window) => { b.events.focus(window.id); b.events.focus(-1); },
+    b => { b.windows([]); },
+    b => { b.tabs.set(44, { ...b.tabs.get(43), id: 44, active: false }); },
+    () => { throw Error("unknown create outcome"); },
+  ]) {
+    const browser = production([]);
+    browser.windows([]);
+    browser.hooks.createWindow = window => race(browser, window);
+    assert.deepEqual(await browser.request("open", { url: browser.url }), { status: "open_unconfirmed" });
+    assert.deepEqual(browser.calls.create, [{ url: browser.url, type: "normal", incognito: false, focused: false }]);
+    assert.deepEqual(browser.calls.remove, []);
+  }
+});
+
+test("an ineligible visible window is not treated as zero windows", async () => {
+  const browser = production([]);
+  browser.windows([{ id: 1, type: "popup", incognito: false, focused: true }]);
+  assert.deepEqual(await browser.request("open", { url: browser.url }), { status: "no_regular_window" });
+  assert.deepEqual(browser.calls.create, []);
 });
 
 test("close reports success once and never closes a replacement tab", async () => {
@@ -200,13 +358,18 @@ test("read remains framed with worst-case JSON escapes rather than dropping the 
     assert.equal(read.status, "ok");
     assert.equal(read.truncated, true);
     assert.ok(read.text.length > 0);
-    assert.ok(JSON.stringify({ v: 1, id: "request", ...read }).replace(/[<>&\x7f-\uffff]/g, "\\u0000").length <= 65536);
+    assert.ok(JSON.stringify({ v: protocol, id: "request", ...read }).replace(/[<>&\x7f-\uffff]/g, "\\u0000").length <= 65536);
   }
 });
 
- test("unversioned open is rejected without browser activity", async () => {
+test("unversioned and prior-version writes are rejected without browser activity", async () => {
   const browser = production();
   assert.deepEqual(await browser.raw({ url: browser.url, expires: Date.now() + 1000 }),
-    { v: 1, id: "", status: "protocol_mismatch" });
+    { v: protocol, id: "", status: "protocol_mismatch" });
+  for (const operation of ["open", "close"]) {
+    assert.deepEqual(await browser.raw({ v: 1, id: "old", operation, payload: { url: browser.url }, expires: Date.now() + 1000 }),
+      { v: protocol, id: "old", status: "protocol_mismatch" });
+  }
   assert.deepEqual(browser.calls.create, []);
+  assert.deepEqual(browser.calls.remove, []);
 });

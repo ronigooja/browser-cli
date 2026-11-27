@@ -78,7 +78,7 @@ class BackgroundTest(unittest.TestCase):
         host = self.start_host()
         self.wait_for_hosts(1)
         response, observed = self.production_round_trip(host, "find", {"url": "https://example.com"},
-            lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok", "tabs": []})])
+            lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], "status": "ok", "tabs": []})])
         self.assertEqual(response, {"status": "ok", "tabs": []})
         self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0]["operation"], "find")
@@ -95,13 +95,13 @@ class BackgroundTest(unittest.TestCase):
 
         def oversized(req):
             # Native UTF-8 fits but ASCII-escaped JSON is too large.
-            content = json.dumps({"v": 1, "id": req["id"], "status": "ok", "text": "界" * 12000}, ensure_ascii=False).encode()
+            content = json.dumps({"v": bridge.PROTOCOL, "id": req["id"], "status": "ok", "text": "界" * 12000}, ensure_ascii=False).encode()
             return [bridge.struct.pack("=I", len(content)) + content]
 
         response, _ = self.production_round_trip(host, "read", {}, oversized)
         self.assertEqual(response, {"status": "response_too_large"})
         response, _ = self.production_round_trip(host, "status", None,
-            lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok"})])
+            lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], "status": "ok"})])
         self.assertEqual(response, {"status": "ok"})
 
     def test_oversize_native_frame_replies_before_retiring_connection(self):
@@ -118,6 +118,21 @@ class BackgroundTest(unittest.TestCase):
         response, _ = self.production_round_trip(host, "status", None,
             lambda req: [bridge.frame({"error": "Chrome background open requires an HTTP(S) URL"})])
         self.assertEqual(response, {"status": "disconnected", "update_required": True})
+
+    def test_live_prior_version_host_or_worker_reports_update_without_replay(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        for operation, prior_status, expected in (
+            ("status", "invalid_request", {"status": "disconnected", "update_required": True}),
+            ("open", "protocol_mismatch", {"status": "disconnected", "update_required": True}),
+            ("close", "protocol_mismatch", {"status": "cleanup_instance_changed"}),
+        ):
+            with self.subTest(operation=operation):
+                response, observed = self.production_round_trip(host, operation, {},
+                    lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": prior_status})])
+                self.assertEqual(response, expected)
+                self.assertEqual([req["v"] for req in observed], [bridge.PROTOCOL])
+                self.assertEqual(select.select([host.stdout], [], [], 0)[0], [])
 
     def test_request_does_not_retry_uncertain_writes(self):
         for operation, status in (("open", "open_unconfirmed"), ("close", "cleanup_unconfirmed")):
@@ -142,7 +157,7 @@ class BackgroundTest(unittest.TestCase):
             (profile / "Preferences").write_text(json.dumps({"extensions": {"settings": {origin.split("/")[2]: {"location": 4}}}}))
             self.assertEqual(bridge.request("status", {}, 3), {"status": "disconnected"})
             target = bridge.INSTALL / "extension/manifest.json"
-            target.write_text(json.dumps(dict(json.loads(target.read_bytes()), version="1.0.0")))
+            target.write_text(json.dumps(dict(json.loads(target.read_bytes()), version="2.0.0")))
             self.assertEqual(bridge.request("status", {}, 3), {"status": "disconnected", "update_required": True})
             bridge.install(open_settings=False)
             self.assertFalse(bridge.staged_update_required())
@@ -157,7 +172,7 @@ class BackgroundTest(unittest.TestCase):
         host = self.start_host()
         self.wait_for_hosts(1)
         response, observed = self.production_round_trip(host, "status", {},
-            lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok"})])
+            lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], "status": "ok"})])
         self.assertEqual(observed[0]["operation"], "status")
         with patch.object(sys, "stdout", io.StringIO()) as output, patch.object(bridge, "request", return_value=response):
             self.assertTrue(bridge.check_setup())
@@ -199,7 +214,7 @@ class BackgroundTest(unittest.TestCase):
             self.wait_for_hosts(1)
             try:
                 response, _ = self.production_round_trip(host, "status", None,
-                    lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok"})])
+                    lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], "status": "ok"})])
                 self.assertEqual(response, {"status": "ok"})
             finally:
                 self.stop_host(host)
