@@ -78,8 +78,55 @@ class BackgroundTest(unittest.TestCase):
         output, error = client.communicate(timeout=3)
         self.assertEqual(output, "")
         self.assertIn("install-background", error)
-        self.assertIn("Already set up:", error)
+        self.assertIn("Only after they confirm", error)
         self.assertEqual(client.returncode, 1)
+
+    def test_interactive_setup_requires_explicit_consent(self):
+        with patch.object(bridge, "setup_state", return_value="missing"), \
+                patch.object(sys.stdin, "isatty", return_value=True), \
+                patch.object(sys.stderr, "isatty", return_value=True), \
+                patch.object(bridge, "install") as install:
+            for answer in ("", "n", "maybe"):
+                with self.subTest(answer=answer), patch("builtins.input", return_value=answer):
+                    with self.assertRaisesRegex(ValueError, "no changes made"):
+                        bridge.offer_setup()
+            with patch("builtins.input", side_effect=EOFError):
+                with self.assertRaisesRegex(ValueError, "no changes made"):
+                    bridge.offer_setup()
+            install.assert_not_called()
+            with patch("builtins.input", return_value=" Y "):
+                self.assertEqual(bridge.offer_setup(), 1)  # Original open did not happen.
+            install.assert_called_once_with()
+
+    def test_pending_and_disconnected_do_not_reinstall(self):
+        chrome = Path.home() / "chrome"
+        install_dir = Path.home() / "install"
+        with patch.object(bridge, "CHROME", chrome), patch.object(bridge, "INSTALL", install_dir), \
+                patch.object(bridge, "install") as install:
+            manifest = bridge.host_manifest()
+            manifest.parent.mkdir(parents=True)
+            manifest.touch()
+            extension = install_dir / "extension"
+            extension.mkdir(parents=True)
+            (extension / "manifest.json").touch()
+            with self.assertRaisesRegex(ValueError, "setup is not complete"):
+                bridge.offer_setup()
+            profile = chrome / "Default"
+            profile.mkdir()
+            identifier = bridge.extension_origin(SOURCE / "extension").split("/")[2]
+            (profile / "Secure Preferences").write_text(json.dumps({"extensions": {"settings": {identifier: {}}}}))
+            with self.assertRaisesRegex(ValueError, "installed but not connected"):
+                bridge.offer_setup()
+            install.assert_not_called()
+
+    def test_check_detects_connection_without_opening_a_tab(self):
+        self.assertFalse(bridge.check_setup())
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        with patch.object(sys, "stdout", io.StringIO()) as output:
+            self.assertTrue(bridge.check_setup())
+        self.assertIn("setup complete", output.getvalue())
+        self.assertEqual(select.select([host.stdout], [], [], 0.1)[0], [])
 
     def test_multiple_profiles_do_not_send_a_native_request(self):
         hosts = [self.start_host(), self.start_host()]
@@ -104,6 +151,7 @@ class BackgroundTest(unittest.TestCase):
             bridge.install()
         self.assertIn("--profile-directory=Profile 5", launch.call_args.args[0])
         self.assertIn("Finish setup in Chrome profile 'Work'", output.getvalue())
+        self.assertIn("Setup is pending", output.getvalue())
         registration = json.loads((chrome / "NativeMessagingHosts" / f"{bridge.HOST}.json").read_text())
         self.assertTrue(os.access(registration["path"], os.X_OK))
         self.assertEqual(registration["allowed_origins"], [bridge.extension_origin(destination / "extension")])

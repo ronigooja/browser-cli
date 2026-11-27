@@ -29,6 +29,7 @@ browser-cli help | version
                                 match a URL prefix or open a page; prints <target> <TAB> reused|created
                                 target: id:<tab-id> for Chrome background; otherwise <window>:<tab>
   install-background            Chrome only: prepare setup; you then click Load unpacked in Chrome
+                                --check reports whether the extension is connected
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
@@ -61,8 +62,8 @@ browser-cli help | version
 --background  open only: Safari opens or reuses a tab without bringing Safari to the front;
               Chrome reuses or creates a tab without focusing Chrome or changing the active tab.
               Chrome requires an HTTP(S) URL and a regular (non-Incognito) window in the one profile
-              with the browser-cli extension connected. From the checkout, run:
-              ./browser-cli --browser chrome install-background
+              with the browser-cli extension connected. If not set up, this prompts before installation
+              in a terminal. Use install-background --check to check the connection without opening a tab.
 --foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)
 --json      tabs only: array of {window,tab,title,url,id}; id is a string in Chrome, null in Safari
@@ -349,13 +350,17 @@ chrome_background() {
   if [ "$1" != install ] && [ ! -f "$helper" ]; then
     helper="$HOME/Library/Application Support/browser-cli/chrome-background/bridge.py"
   fi
-  [ -f "$helper" ] || die 'Set up Chrome background mode from the browser-cli checkout: ./browser-cli --browser chrome install-background'
-  "$python" "$helper" "$@"
+  [ -f "$helper" ] || die 'Chrome background mode requires the browser-cli extension. Get approval before setting it up, then run ./browser-cli --browser chrome install-background from the checkout or complete skill installation.'
+  BROWSER_CLI_PATH="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")" "$python" "$helper" "$@"
 }
 
 cmd_install_background() {
   [ "$BROWSER" = chrome ] || usage_error 'install-background requires --browser chrome'
-  [ "$#" -eq 0 ] || usage_error 'install-background takes no options or arguments'
+  if [ "$#" -eq 1 ] && [ "$1" = --check ]; then
+    chrome_background check
+    return
+  fi
+  [ "$#" -eq 0 ] || usage_error 'install-background accepts only --check'
   chrome_background install
 }
 

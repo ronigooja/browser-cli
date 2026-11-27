@@ -1,6 +1,7 @@
 """Chrome native host, background-open client, and macOS installer."""
 
 import base64
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -21,7 +22,8 @@ from urllib.parse import urlsplit
 HOST = "com.browser_cli.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/browser-cli/chrome-background"
-SETUP = "./browser-cli --browser chrome install-background"
+SETUP = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome install-background"
+SETUP_WAIT = 120
 LIMIT = 65536
 
 
@@ -127,50 +129,49 @@ def native_host(origin):
                 pass
 
 
+@contextmanager
+def connected_client(deadline):
+    with ExitStack() as stack:
+        connected = None
+        for endpoint in sorted(runtime_dir().glob("host-*/socket")):
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            client = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+            client.settimeout(max(0.001, deadline - time.monotonic()))
+            try:
+                client.connect(str(endpoint))
+            except (FileNotFoundError, ConnectionRefusedError):
+                client.close()
+                continue
+            if connected is not None:
+                raise ValueError("The browser-cli extension is connected in more than one Chrome profile. Leave it enabled only in the profile you want to use.")
+            connected = client
+        yield connected
+
+
 def background_open(url, timeout):
     validate_url(url)
     if not 0 < timeout <= 86400:
         raise ValueError("Chrome background timeout must be at most 86400 seconds")
     deadline = time.monotonic() + timeout
     request = frame({"url": url, "expires": int((time.time() + timeout) * 1000)})
-    clients = []
     try:
-        for endpoint in sorted(runtime_dir().glob("host-*/socket")):
-            if time.monotonic() >= deadline:
-                raise TimeoutError
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            clients.append(client)
-            client.settimeout(max(0.001, deadline - time.monotonic()))
-            try:
-                client.connect(str(endpoint))
-            except (FileNotFoundError, ConnectionRefusedError):
-                clients.pop().close()
-                continue
-            if len(clients) > 1:
-                raise ValueError("The browser-cli extension is connected in more than one Chrome profile. Leave it enabled only in the profile you want to use.")
-        if not clients:
-            raise ValueError(
-                "The browser-cli extension is not connected.\n"
-                f"  First time: from the browser-cli checkout, run `{SETUP}`.\n"
-                "  Already set up: open a regular Chrome window in the profile where you loaded the extension "
-                "and make sure it is enabled at chrome://extensions/."
-            )
-        if time.monotonic() >= deadline:
-            raise TimeoutError
-        client = clients[0]
-        client.settimeout(max(0.001, deadline - time.monotonic()))
-        client.sendall(request)
-        reply = receive(client.fileno(), deadline)
-        if "error" in reply:
-            raise ValueError(str(reply["error"]))
-        if type(reply.get("id")) is not int or reply["id"] < 0 or reply.get("action") not in ("created", "reused"):
-            raise ValueError("Unexpected reply from Chrome background extension")
-        print(f'id:{reply["id"]}\t{reply["action"]}')
+        with connected_client(deadline) as client:
+            if client is not None:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError
+                client.settimeout(max(0.001, deadline - time.monotonic()))
+                client.sendall(request)
+                reply = receive(client.fileno(), deadline)
+                if "error" in reply:
+                    raise ValueError(str(reply["error"]))
+                if type(reply.get("id")) is not int or reply["id"] < 0 or reply.get("action") not in ("created", "reused"):
+                    raise ValueError("Unexpected reply from Chrome background extension")
+                print(f'id:{reply["id"]}\t{reply["action"]}')
+                return 0
     except (TimeoutError, EOFError, BrokenPipeError, ConnectionResetError):
         raise ValueError("Chrome background connection timed out or closed; check Chrome before retrying (a tab may already have opened)") from None
-    finally:
-        for client in clients:
-            client.close()
+    return offer_setup()
 
 
 def extension_origin(directory):
@@ -178,6 +179,66 @@ def extension_origin(directory):
     digest = hashlib.sha256(base64.b64decode(manifest["key"], validate=True)).hexdigest()[:32]
     identifier = digest.translate(str.maketrans("0123456789abcdef", "abcdefghijklmnop"))
     return f"chrome-extension://{identifier}/"
+
+
+def host_manifest():
+    return CHROME / "NativeMessagingHosts" / f"{HOST}.json"
+
+
+def setup_state():
+    # Chrome records unpacked extensions in either profile preferences file.
+    # A missing entry is not proof that an extension is absent (e.g. custom profiles).
+    source = Path(__file__).resolve().parent / "extension"
+    identifier = extension_origin(source).split("/")[2]
+    for filename in ("Preferences", "Secure Preferences"):
+        for path in CHROME.glob(f"*/{filename}"):
+            try:
+                preferences = json.loads(path.read_text(encoding="utf-8"))
+                if identifier in preferences.get("extensions", {}).get("settings", {}):
+                    return "loaded"
+            except (OSError, ValueError, AttributeError, TypeError):
+                continue
+    if host_manifest().is_file() and (INSTALL / "extension/manifest.json").is_file():
+        return "pending"
+    return "missing"
+
+
+def require_connection(state):
+    if state == "loaded":
+        raise ValueError(f"The browser-cli extension is installed but not connected. Open a regular Chrome window in the profile where it is installed and make sure it is enabled at chrome://extensions/. Then run `{SETUP} --check`.")
+    if state == "pending":
+        raise ValueError(f"Chrome background setup is not complete. In the intended Chrome profile, open chrome://extensions/, turn on Developer mode, then click Load unpacked and select {INSTALL / 'extension'}. If already loaded, enable or reload it. Then run `{SETUP} --check`.")
+    raise ValueError(f"Chrome background mode requires the browser-cli extension. Ask the user whether to set it up. Only after they confirm, run `{SETUP}`.")
+
+
+def offer_setup():
+    state = setup_state()
+    if state != "missing" or not sys.stdin.isatty() or not sys.stderr.isatty():
+        require_connection(state)
+    print("Chrome background mode requires the browser-cli extension. Set it up now? [y/N] ",
+          end="", file=sys.stderr, flush=True)
+    try:
+        confirmed = input().strip().lower() in ("y", "yes")
+    except EOFError:
+        confirmed = False
+    if not confirmed:
+        raise ValueError("Setup declined; no changes made")
+    install()
+    print("The original page was not opened.", file=sys.stderr)
+    return 1
+
+
+def check_setup(wait=0):
+    deadline = time.monotonic() + wait
+    while True:
+        with connected_client(time.monotonic() + 1) as client:
+            if client is not None:
+                print("Chrome background setup complete. You can retry open --background.")
+                return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(1, remaining))
 
 
 def choose_profile():
@@ -241,11 +302,11 @@ def install():
     python = shlex.quote(str(Path(sys.executable).absolute()))
     bridge = shlex.quote(str(INSTALL / "bridge.py"))
     atomic_write(launcher, f'#!/bin/sh\nexec {python} -I {bridge} host "${{1-}}"\n'.encode(), 0o755)
-    manifests = CHROME / "NativeMessagingHosts"
-    manifests.mkdir(parents=True, exist_ok=True)
+    destination = host_manifest()
+    destination.parent.mkdir(parents=True, exist_ok=True)
     manifest = {"name": HOST, "description": "browser-cli Chrome background tabs",
                 "path": str(launcher), "type": "stdio", "allowed_origins": [extension_origin(extension)]}
-    atomic_write(manifests / f"{HOST}.json", (json.dumps(manifest, indent=2) + "\n").encode(), 0o644)
+    atomic_write(destination, (json.dumps(manifest, indent=2) + "\n").encode(), 0o644)
 
     print(f"Finish setup in Chrome profile {label}.")
     print("If the extensions page does not open in that profile, go to chrome://extensions/ there.")
@@ -253,6 +314,11 @@ def install():
     print(extension, flush=True)
     subprocess.run(["/usr/bin/open", "-na", "Google Chrome", "--args",
                     f"--profile-directory={profile}", "chrome://extensions/"], check=True)
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print(f"Waiting up to {SETUP_WAIT} seconds for the extension to connect…", flush=True)
+        if check_setup(SETUP_WAIT):
+            return
+    print(f"Setup is pending until Chrome loads and connects the extension. After loading it, run `{SETUP} --check`.")
 
 
 def main():
@@ -260,10 +326,13 @@ def main():
     try:
         if command == "install":
             install()
+        elif command == "check":
+            if not check_setup():
+                require_connection(setup_state())
         elif command == "host":
             native_host(*args)
         elif command == "open":
-            background_open(args[0], int(args[1]))
+            return background_open(args[0], int(args[1]))
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"browser-cli: {error}", file=sys.stderr)
         return 1
