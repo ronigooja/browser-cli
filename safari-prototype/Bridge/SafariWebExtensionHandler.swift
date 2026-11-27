@@ -1,17 +1,25 @@
 import Foundation
+import OSLog
 import SafariServices
 
 final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
+    private let logger = Logger(subsystem: "com.ronigooja.agentbrowser.safariprobe", category: "native-message")
+
     func beginRequest(with context: NSExtensionContext) {
         let details = (context.inputItems.first as? NSExtensionItem)?.userInfo
         let response: [String: Any]
         do {
-            guard let profile = details?[SFExtensionProfileKey] as? UUID,
-                  let message = details?[SFExtensionMessageKey] as? [String: Any],
+            guard let message = details?[SFExtensionMessageKey] as? [String: Any],
                   let instanceString = message["instance"] as? String,
                   let instance = UUID(uuidString: instanceString),
                   let phase = message["phase"] as? String else {
-                throw ProbeError("missing_safari_profile_or_invalid_message")
+                throw ProbeError("invalid_native_message")
+            }
+            guard let profileValue = details?[SFExtensionProfileKey] else {
+                throw ProbeError("safari_profile_missing")
+            }
+            guard let profile = profileValue as? UUID else {
+                throw ProbeError("safari_profile_not_uuid")
             }
             let sender = Binding(profile: profile, instance: instance)
             if phase == "identify" {
@@ -47,6 +55,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 }
             }
         } catch let error as ProbeError {
+            // Only fixed status codes; never log profile identifiers or message contents.
+            logger.notice("Native request rejected: \(error.description, privacy: .public)")
             response = ["status": error.description]
         } catch {
             response = ["status": "mailbox_error"]
