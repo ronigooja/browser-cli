@@ -12,7 +12,9 @@ if [ "${1-}" = mcp ] && [ "$#" -eq 1 ]; then
   exec "$python" "${cli%/*}/browser_mcp.py" "$cli"
 fi
 
-export LC_ALL=en_US.UTF-8
+if [[ "$OSTYPE" = darwin* ]]; then
+  export LC_ALL=en_US.UTF-8
+fi
 WORK="$(mktemp -d)"
 cleanup() {
   local rc=$?
@@ -42,8 +44,9 @@ browser-cli help | version | mcp
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
   info [--tab T]                print page metadata and detected challenge: none|cloudflare-passive|needs-human
-  read-page --tab T <exact-url> [--include-links]
-                                guarded JSON read; T is exact for Safari or id:<id> for Chrome
+  read-page --tab T [--selector CSS] [--include-links] -- <exact-url>
+                                guarded JSON read; T is a unique case-sensitive URL substring
+                                for Safari or id:<id> for Chrome
   text [--tab T]                print page text
   links [--tab T]               print link text and absolute URL, tab-separated, one per line
   html [--tab T]                print sanitized page HTML
@@ -79,7 +82,7 @@ browser-cli help | version | mcp
 --json      tabs only: array of {window,tab,title,url,id}; id is a string in Chrome, null in Safari
 --timeout N positive integer seconds: total for wait, wait-challenge and Chrome background open;
             otherwise applies to individual browser calls (default 30; wait-challenge 600)
---selector CSS scope text, links, html, snapshot, screenshot, press, or scroll to the first matching element
+--selector CSS scope read-page, text, links, html, snapshot, screenshot, press, or scroll to the first matching element
 --out PATH  screenshot only: PNG destination; overwrites an existing file (default: a new temp file)
 --to top|bottom, --by N scroll only: choose destination or integer distance
 --max-chars N limit output characters (default 20000 for text, links, html and snapshot;
@@ -158,6 +161,9 @@ osa() {
     if [ -e "$WORK/timed-out" ]; then
       echo "browser-cli: timed out after ${limit}s" >&2
       [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 24
+    elif [ "${BROWSER_CLI_MCP:-}" = 1 ] && grep -Eq '\(-1728\)$' "$err"; then
+      cat "$err" >&2
+      return 26
     elif permission_blocked; then
       echo "$JS_PERMISSION_MESSAGE" >&2
       [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 25
@@ -242,7 +248,8 @@ on resolve(spec)
     considering case
       repeat with w from 1 to count of windows
         repeat with t from 1 to count of tabs of window w
-          if URL of tab t of window w is spec then
+          set u to URL of tab t of window w
+          if u is not missing value and u contains spec then
             if matched is not {} then return {-2, 0}
             set matched to {w as integer, t as integer}
           end if
@@ -466,6 +473,70 @@ AS
   osa "$TIMEOUT" "$f" "$TAB"
 }
 
+# Only trust a single Chrome process. Include its start time because PIDs are reusable.
+chrome_instance() {
+  local pid started
+  pid="$(pgrep -x 'Google Chrome')" || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  started="$(LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart=)" || return 1
+  [ -n "$started" ] || return 1
+  printf '%s\t%s\n' "$pid" "$started"
+}
+
+cmd_chrome_instance() {
+  [ "$BROWSER" = chrome ] || usage_error 'chrome-instance requires --browser chrome'
+  [ ${#ARGS[@]} -eq 0 ] && [ -z "$TAB" ] || usage_error 'chrome-instance takes no arguments or tab'
+  chrome_instance || printf 'unknown\n'
+}
+
+# Internal cleanup only. The MCP reader must supply a tab ID it recorded as created.
+cmd_close_created() {
+  [ "$BROWSER" = chrome ] || usage_error 'close-created requires --browser chrome'
+  [ ${#ARGS[@]} -eq 1 ] && [[ "$TAB" = id:* ]] && [ -n "${ARGS[0]}" ] ||
+    usage_error 'close-created requires --tab id:<id> -- <expected-instance>'
+  local instance
+  if ! instance="$(chrome_instance)" || [ "$instance" != "${ARGS[0]}" ]; then
+    printf 'not_found\n'
+    return 0
+  fi
+  local f; f="$(script close-created <<'AS'
+on run argv
+  set wantedID to item 1 of argv
+  set expectedInstance to item 2 of argv
+  if application "Google Chrome" is not running then return "not_found"
+  tell application "Google Chrome"
+    -- Chrome's AppleScript tab IDs are text.
+    set windowIDs to id of every window
+    repeat with w in windowIDs
+      set wi to contents of w
+      set tabIDs to id of every tab of window id wi
+      if tabIDs contains wantedID then
+        -- Verify the browser instance again before sending the close event.
+        if my chromeInstance() is not expectedInstance then return "not_found"
+        close tab id wantedID of window id wi
+        return "closed"
+      end if
+    end repeat
+  end tell
+  return "not_found"
+end run
+
+on chromeInstance()
+  try
+    set p to do shell script "/usr/bin/pgrep -x 'Google Chrome'"
+    if (count of paragraphs of p) is not 1 then return ""
+    set started to do shell script "LC_ALL=C TZ=UTC0 /bin/ps -p " & quoted form of p & " -o lstart="
+    if started is "" then return ""
+    return p & (ASCII character 9) & started
+  on error
+    return ""
+  end try
+end chromeInstance
+AS
+)"
+  osa "$TIMEOUT" "$f" "${TAB#id:}" "$instance"
+}
+
 # Runs the expression in the tab; prints the value, exits 1 on a JS exception.
 # Assign a JavaScript string literal to JS_STRING without losing trailing newlines.
 js_string() {
@@ -603,10 +674,11 @@ cmd_read_page() {
   if [ "$BROWSER" = chrome ]; then
     [[ "$TAB" = id:* ]] || usage_error 'read-page requires --tab id:<id> in Chrome'
   else
-    [ "$TAB" = "${ARGS[0]}" ] || usage_error 'read-page requires the same exact --tab URL in Safari'
+    [ -n "$TAB" ] || usage_error 'read-page requires a --tab URL substring in Safari'
   fi
   js_string "${ARGS[0]}"
-  local expected="$JS_STRING" code
+  local expected="$JS_STRING" selector code
+  js_string "$SELECTOR"; selector="$JS_STRING"
   code="(function(){ $CHALLENGE_JS
     if (location.href !== $expected) return {status:'target_changed'};
     var challenge = challengeState();
@@ -629,7 +701,18 @@ cmd_read_page() {
     if (gate || signInDialog || passwords.some(function(e){return visible(e) && e.closest('dialog, [role=dialog]');})) {
       return {status:'login_required'};
     }
-    var text = body.innerText || '';
+    var root = body;
+    if ($SELECTOR_SET) {
+      try { root = document.querySelector($selector); }
+      catch (e) {
+        if (e.name === 'SyntaxError') return {status:'invalid_selector'};
+        throw e;
+      }
+      if (!root) return {status:'no_match'};
+      // innerText can fall back to hidden DOM text when its root is not rendered.
+      if (root.matches('script,style,noscript') || !visible(root)) return {status:'no_content'};
+    }
+    var text = root.innerText || '';
     if (!text.trim()) return {status:'no_content'};
     function safeUrl(value) {
       try { var u = new URL(value); return /^https?:$/.test(u.protocol) && !u.username && !u.password && u.href.length <= 2048; }
@@ -640,7 +723,8 @@ cmd_read_page() {
     if ($INCLUDE_LINKS) {
       result.links = [];
       var budget = 8000;
-      var anchors = body.querySelectorAll('a[href]');
+      var anchors = Array.from(root.querySelectorAll('a[href]'));
+      if ($SELECTOR_SET && root.matches('a[href]')) anchors.unshift(root);
       for (var i = 0; i < anchors.length; i++) {
         var a = anchors[i];
         if (!visible(a) || !safeUrl(a.href)) continue;
@@ -1460,9 +1544,17 @@ cmd_wait_challenge() {
 
 cmd_status() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'status takes no positional arguments'
-  local f state
+  local f state mcp_guard='' rc
+  if [ "${BROWSER_CLI_MCP:-}" = 1 ]; then
+    if ! pgrep -qx "$APP"; then
+      printf 'unknown\n'
+      return 0
+    fi
+    mcp_guard="  if application \"$APP\" is not running then return \"unknown\""
+  fi
   f="$(script status <<AS
 on run
+$mcp_guard
   tell application "$APP"
     if (count of windows) = 0 then return "unknown"
     repeat with w from 1 to count of windows
@@ -1480,14 +1572,16 @@ AS
     state="$(cat "$WORK/status")"
     cat "$WORK/status"
     if [ "$state" = unknown ]; then
+      [ "${BROWSER_CLI_MCP:-}" != 1 ] || return 0
       printf 'browser-cli: no tab is open in %s; open a page in %s, then check status again\n' "$APP" "$APP" >&2
     fi
     [ "$state" = on ]
   else
-    if permission_blocked; then
+    rc=$?
+    if [ "$rc" = 25 ] || { [ "${BROWSER_CLI_MCP:-}" != 1 ] && permission_blocked; }; then
       echo off
     fi
-    return 1
+    return "$rc"
   fi
 }
 
@@ -1503,10 +1597,13 @@ case "$cmd" in
   mcp) usage_error 'mcp takes no options or arguments' ;;
   install-background) cmd_install_background "$@" ;;
   uninstall-background) cmd_uninstall_background "$@" ;;
-  tabs|open|close|eval|file|wait|wait-challenge|status|info|read-page|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
+  tabs|open|close|close-created|chrome-instance|eval|file|wait|wait-challenge|status|info|read-page|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
+    if [[ "$cmd" = close-created || "$cmd" = chrome-instance ]] && [ "${BROWSER_CLI_MCP:-}" != 1 ]; then
+      usage_error "unknown command: $cmd"
+    fi
     parse "$@"
     [ -n "$BROWSER" ] || { echo 'browser-cli: --browser safari|chrome is required' >&2; exit 2; }
-    if [[ "$TAB" = id:* ]]; then
+    if [[ "$TAB" = id:* ]] && { [ "$cmd" != read-page ] || [ "$BROWSER" != safari ]; }; then
       [ "$BROWSER" = chrome ] || { echo 'browser-cli: --tab id:<id> is only supported for chrome' >&2; exit 2; }
       [[ "${TAB#id:}" =~ ^[0-9]+$ ]] || { echo 'browser-cli: --tab id:<id> needs a numeric tab id' >&2; exit 2; }
     fi
@@ -1519,7 +1616,7 @@ case "$cmd" in
     [ "$cmd" != open ] || [ "$FOREGROUND$BACKGROUND" != 00 ] || { echo 'browser-cli: open needs --foreground or --background' >&2; exit 2; }
     [ "$JSON" = 0 ] || [ "$cmd" = tabs ] || { echo 'browser-cli: --json only applies to tabs' >&2; exit 2; }
     [ "$INCLUDE_LINKS" = 0 ] || [ "$cmd" = read-page ] || usage_error '--include-links only applies to read-page'
-    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'browser-cli: --selector only applies to text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
+    [ "$SELECTOR_SET" = 0 ] || [[ "$cmd" =~ ^(read-page|text|links|html|snapshot|screenshot|press|scroll)$ ]] || { echo 'browser-cli: --selector only applies to read-page, text, links, html, snapshot, screenshot, press, and scroll' >&2; exit 2; }
     [ "$OUT_SET" = 0 ] || [ "$cmd" = screenshot ] || { echo 'browser-cli: --out only applies to screenshot' >&2; exit 2; }
     if [ "$cmd" = scroll ]; then
       [ "$((TO_SET + BY_SET))" = 1 ] || { echo 'browser-cli: scroll requires exactly one of --to or --by' >&2; exit 2; }

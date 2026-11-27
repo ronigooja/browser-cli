@@ -57,7 +57,7 @@ by a tab and `created` or `reused`; use the returned ID with `--tab`.
 
 ## OpenCode MCP (no skill)
 
-Keep `browser-cli`, `browser_mcp.py`, and `chrome-background/` together on the Mac with the
+Keep `browser-cli`, `browser_mcp.py`, `browser_mcp_setup.py`, and `chrome-background/` together on the Mac with the
 browser. The server needs Python 3 and uses local stdio, not an HTTP listener. Register it in the
 target OpenCode project (add `--global` for a user-wide installation):
 
@@ -68,19 +68,31 @@ opencode mcp list
 
 If upgrading from the legacy skill, move its installed directory out of OpenCode skill discovery
 (typically `~/.config/opencode/skills/browser-cli/`). The skill is no longer shipped; the server
-provides its own instructions. Code Mode exposes one tool:
+provides its own instructions. Start with `read_page`:
 
 ```js
 await tools.browser_cli.read_page({url: "https://example.com/", browser: "safari", include_links: true})
 ```
 
-- `public_background` (default): reuse an exact matching tab or background-open a missing public
-  URL. If no browser is specified, ask only which browser to use. Chrome requires the existing
-  extension setup; there is no automatic installation, foreground fallback, or tab cleanup.
-- `existing_tab`: read an exact matching tab without opening or focusing a browser.
+- `public_background` (default): reuse a matching tab or background-open a missing public URL.
+  If no browser is specified, ask only which browser to use. Chrome requires the extension and
+  never falls back to a foreground open.
+- `existing_tab`: read a matching tab without opening or focusing a browser.
 - `session_tab`: use for login-dependent access. In Chrome, first request a candidate without
   `confirmed_tab_id`, then pass that ID only after the user confirms the tab and profile.
   Ask the user to open a missing tab in the correct browser/profile; do not open it for them.
+
+Safari requires a unique URL substring match, then verifies the selected document URL at read
+time. Chrome pins the tab by ID. `selector` scopes returned text and links, but not the login
+or verification check. The server checks browser permission before reading and waits up to
+600 seconds for a passive challenge; human verification always stops the read.
+
+Chrome background setup requires explicit user approval. Use `setup_chrome_background` to
+`prepare` after approval, `install` with the returned grant and selected profile, and `check`
+after the user loads it. Relay the returned instructions in full. It never reinstalls a pending or
+disconnected extension. When done with a browser task, call `cleanup_tab` only with a token
+returned by `read_page`. Tokens identify only Chrome tabs created by that call and are scoped
+to the originating session. Reused tabs and Safari tabs without a stable ID have no token.
 
 Non-`ok` statuses identify blockers without returning page text. Login and verification detection
 are heuristic; empty results, timeouts, and navigation changes are not proof that sign-in is needed.

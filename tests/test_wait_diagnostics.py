@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -6,16 +7,37 @@ import unittest
 
 
 CLI = Path(__file__).resolve().parents[1] / "browser-cli"
+START_TIME = "Fri Nov 27 00:00:00 2026"
+CHROME_INSTANCE = "1234\t" + START_TIME
 
 
 class WaitDiagnosticsTest(unittest.TestCase):
-    def run_cli(self, command, *probes, reject_eval=False, args=None, file_source=None, page_fixture=None):
+    def run_cli(self, command, *probes, reject_eval=False, args=None, file_source=None, page_fixture=None,
+                browser="chrome", mcp=False, running=True, pids="1234", osa_error=None, osa_calls=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            pgrep = root / "pgrep"
+            pgrep.write_text('''#!/bin/bash
+[ "$MOCK_BROWSER_RUNNING" = 1 ] || exit 1
+[ "$1" = -qx ] || printf '%s\\n' "$MOCK_BROWSER_PIDS"
+''')
+            pgrep.chmod(0o755)
+            ps = root / "ps"
+            ps.write_text('''#!/bin/bash
+[ "$*" = '-p 1234 -o lstart=' ] || exit 1
+printf '%s\\n' "$MOCK_BROWSER_START"
+''')
+            ps.chmod(0o755)
             mock = root / "osascript"
             mock.write_text("""#!/bin/bash
 if [ "$1" = -e ]; then
   printf '%s\\n' "${@: -2:1}" >> "$MOCK_DIR/notifications"
+  exit 1
+fi
+cat "$1" >> "$MOCK_DIR/osa-scripts"
+printf '%s\\n' "$2" >> "$MOCK_DIR/osa-targets"
+if [ -f "$MOCK_DIR/osa-error" ]; then
+  cat "$MOCK_DIR/osa-error" >&2
   exit 1
 fi
 if [ "$MOCK_REJECT_EVAL" = 1 ] && grep -q 'eval(' "$3"; then
@@ -40,6 +62,8 @@ fi
 printf '%s\\n' "$result"
 """)
             mock.chmod(0o755)
+            if osa_error is not None:
+                (root / "osa-error").write_text(osa_error)
             for index, probe in enumerate(probes):
                 (root / f"probe-{index}").write_text(probe)
             cli_args = [command, "--timeout", "3", *(args or [])]
@@ -51,10 +75,14 @@ printf '%s\\n' "$result"
                 cli_args.append(str(source))
             if page_fixture is not None:
                 (root / "page.js").write_text(page_fixture)
-            result = subprocess.run([CLI, "--browser", "chrome", *cli_args], text=True,
+            result = subprocess.run([CLI, "--browser", browser, *cli_args], text=True,
                                     capture_output=True, timeout=8,
                                     env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", MOCK_DIR=directory,
+                                             BROWSER_CLI_MCP=str(int(mcp)), MOCK_BROWSER_RUNNING=str(int(running)),
+                                             MOCK_BROWSER_PIDS=pids, MOCK_BROWSER_START=START_TIME,
                                              MOCK_REJECT_EVAL=str(int(reject_eval))))
+            if osa_calls is not None and (root / "osa-scripts").exists():
+                osa_calls.append(((root / "osa-scripts").read_text(), (root / "osa-targets").read_text()))
             notice = root / "notifications"
             return result, notice.read_text() if notice.exists() else ""
 
@@ -75,7 +103,8 @@ printf '%s\\n' "$result"
             with self.subTest(expected=expected):
                 fixture = (f"global.location = new URL({current!r}); global.document = "
                            f"{{title:{title!r}, querySelectorAll:()=>[], get body(){{throw Error('unexpected read')}}}};")
-                result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--", url], page_fixture=fixture)
+                result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--selector", "[", "--", url],
+                                         page_fixture=fixture)
                 self.assertEqual((result.returncode, result.stdout), (0, f'{{"status":"{expected}"}}\n'))
 
     def test_guarded_read_returns_visible_text(self):
@@ -87,6 +116,136 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
         result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--", url], page_fixture=fixture)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"text":"Example Domain"', result.stdout)
+
+    def test_safari_guarded_read_resolves_unique_case_sensitive_url_substring(self):
+        url = "https://example.com/Path"
+        calls = []
+        result, _ = self.run_cli("read-page", 'ok:{"status":"tab_ambiguous"}', browser="safari",
+                                 args=["--tab", "/Path", "--", url], osa_calls=calls)
+        self.assertEqual((result.returncode, result.stdout), (0, '{"status":"tab_ambiguous"}\n'))
+        script, spec = calls[0]
+        self.assertEqual(spec, "/Path\n")
+        self.assertIn("considering case", script)
+        self.assertIn("u contains spec", script)
+        self.assertIn("if matched is not {} then return {-2, 0}", script)
+        self.assertIn("if matched is {} then return {-1, 0}", script)
+        self.assertLess(script.index("set r to resolve(item 1 of argv)"),
+                        script.index('tell application "Safari" to return do JavaScript code in tab (item 2 of r)'))
+        fixture = f"global.location = new URL({(url + '/other')!r});"
+        result, _ = self.run_cli("read-page", browser="safari", args=["--tab", "/Path", "--", url],
+                                 page_fixture=fixture)
+        self.assertEqual((result.returncode, result.stdout), (0, '{"status":"target_changed"}\n'))
+
+    def test_guarded_read_scopes_text_and_links_to_first_match(self):
+        url = "https://example.com/"
+        fixture = f"""global.location = new URL({url!r});
+global.getComputedStyle = () => ({{visibility:'visible'}});
+const visible = {{closest:()=>null, getBoundingClientRect:()=>({{width:1,height:1}})}};
+const root = {{...visible, innerText:'Scoped link', href:'https://example.com/inside',
+  matches:s=>s === 'a[href]', querySelectorAll:()=>[]}};
+global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=>[],
+  querySelector:s=>s === '[data-target="scope"]' ? root : null,
+  body:{{get innerText(){{throw Error('unexpected full text read')}},
+         querySelectorAll:s=>{{if(s === 'a[href]') throw Error('unexpected full link read'); return [];}}}}}};
+"""
+        result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--include-links", "--selector",
+                                                   '[data-target="scope"]', "--", url], page_fixture=fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        page = json.loads(result.stdout)
+        self.assertEqual((page["status"], page["text"], page["links"]),
+                         ("ok", "Scoped link", [{"text": "Scoped link", "url": url + "inside"}]))
+
+    def test_guarded_read_selector_errors_follow_full_page_login_check(self):
+        url = "https://example.com/"
+        for path, selector, status in (("", "#missing", "no_match"), ("", "[", "invalid_selector"),
+                                       ("sign-in", "[", "login_required")):
+            with self.subTest(status=status):
+                current = url + path
+                fixture = f"""global.location = new URL({current!r});
+global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=>[],
+  querySelector:s=>{{if (s === '[') throw SyntaxError('invalid syntax'); return null;}},
+  body:{{innerText:'Whole page', querySelectorAll:()=>[]}}}};
+"""
+                result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--selector", selector,
+                                                           "--", current], page_fixture=fixture)
+                self.assertEqual((result.returncode, result.stdout), (0, f'{{"status":"{status}"}}\n'))
+
+    def test_mcp_status_skips_stopped_browser_and_reports_unknown(self):
+        for browser in ("safari", "chrome"):
+            with self.subTest(browser=browser):
+                calls = []
+                result, _ = self.run_cli("status", mcp=True, running=False, browser=browser, osa_calls=calls)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "unknown\n", ""))
+                self.assertEqual(calls, [])
+        calls = []
+        result, _ = self.run_cli("status", "unknown", mcp=True, osa_calls=calls)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "unknown\n", ""))
+        self.assertIn('if application "Google Chrome" is not running then return "unknown"', calls[0][0])
+        result, _ = self.run_cli("status", "unknown", running=False)
+        self.assertEqual((result.returncode, result.stdout), (1, "unknown\n"))
+        self.assertIn("no tab is open", result.stderr)
+
+    def test_status_reports_permission_off(self):
+        diagnostic = 'status.applescript: execution error: Allow JavaScript from Apple Events (-2700)\n'
+        for mcp, code in ((False, 1), (True, 25)):
+            with self.subTest(mcp=mcp):
+                result, _ = self.run_cli("status", mcp=mcp, osa_error=diagnostic)
+                self.assertEqual((result.returncode, result.stdout), (code, "off\n"))
+                self.assertIn("JavaScript from Apple Events is off", result.stderr)
+
+    def test_mcp_apple_event_missing_object_preserves_original_diagnostic(self):
+        diagnostic = "eval.applescript:12:23: execution error: Can't get tab id 42. (-1728)\n"
+        args = ["--tab", "id:42", "--", "https://example.com/"]
+        result, _ = self.run_cli("read-page", mcp=True, args=args, osa_error=diagnostic)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (26, "", diagnostic))
+        result, _ = self.run_cli("read-page", args=args, osa_error=diagnostic)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertEqual(result.stderr, "browser-cli: AppleScript error -1728: Can't get tab id 42.\n")
+
+    def test_close_created_requires_mcp_chrome_and_numeric_tab_id(self):
+        calls = []
+        for browser, mcp, tab in (("chrome", False, "id:42"), ("safari", True, "1:2"),
+                                  ("chrome", True, "1:2"), ("chrome", True, "id:xx")):
+            with self.subTest(browser=browser, mcp=mcp, tab=tab):
+                result, _ = self.run_cli("close-created", mcp=mcp, browser=browser,
+                                         args=["--tab", tab, "--", CHROME_INSTANCE], osa_calls=calls)
+                self.assertEqual(result.returncode, 2)
+        result, _ = self.run_cli("close-created", mcp=True, args=["--tab", "id:42"], osa_calls=calls)
+        self.assertEqual(result.returncode, 2)
+        for running, instance in ((False, CHROME_INSTANCE), (True, CHROME_INSTANCE.replace("00:00", "00:01"))):
+            with self.subTest(running=running, instance=instance):
+                result, _ = self.run_cli("close-created", mcp=True, running=running,
+                                         args=["--tab", "id:42", "--", instance], osa_calls=calls)
+                self.assertEqual((result.returncode, result.stdout), (0, "not_found\n"))
+        self.assertEqual(calls, [])
+
+    def test_close_created_targets_tab_and_window_by_id(self):
+        calls = []
+        for status in ("closed", "not_found"):
+            with self.subTest(status=status):
+                result, _ = self.run_cli("close-created", status, mcp=True,
+                                         args=["--tab", "id:42", "--", CHROME_INSTANCE], osa_calls=calls)
+                self.assertEqual((result.returncode, result.stdout), (0, status + "\n"))
+        script, tab_id = calls[0]
+        self.assertEqual(tab_id, "42\n")
+        self.assertIn('if application "Google Chrome" is not running', script)
+        self.assertIn("if tabIDs contains wantedID then", script)
+        self.assertLess(script.index("if my chromeInstance() is not expectedInstance"),
+                        script.index("close tab id wantedID of window id wi"))
+        self.assertEqual([line.strip() for line in script.splitlines() if line.strip().startswith("close ")],
+                         ["close tab id wantedID of window id wi"])
+
+    def test_chrome_instance_is_internal_and_requires_unambiguous_process(self):
+        for mcp, browser in ((False, "chrome"), (True, "safari")):
+            result, _ = self.run_cli("chrome-instance", mcp=mcp, browser=browser)
+            self.assertEqual(result.returncode, 2)
+        calls = []
+        result, _ = self.run_cli("chrome-instance", mcp=True, osa_calls=calls)
+        self.assertEqual((result.returncode, result.stdout), (0, CHROME_INSTANCE + "\n"))
+        for running, pids in ((False, "1234"), (True, "1234\n5678")):
+            result, _ = self.run_cli("chrome-instance", mcp=True, running=running, pids=pids, osa_calls=calls)
+            self.assertEqual((result.returncode, result.stdout), (0, "unknown\n"))
+        self.assertEqual(calls, [])
 
     def test_builtin_reads_and_snapshot_do_not_use_string_eval(self):
         for command in ("text", "links", "html", "snapshot"):

@@ -27,11 +27,12 @@ REMOVE = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --
 LIMIT = 65536
 
 
-def runtime_dir():
+def runtime_dir(*, create=True):
     # macOS limits Unix socket paths to 103 bytes, regardless of the home directory.
     home = hashlib.sha256(os.fsencode(Path.home())).hexdigest()[:12]
     directory = Path(f"/tmp/browser-cli-{os.getuid()}-{home}")
-    directory.mkdir(mode=0o700, exist_ok=True)
+    if create:
+        directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError("Unsafe browser-cli socket directory")
@@ -131,9 +132,14 @@ def native_host(origin):
 
 @contextmanager
 def connected_client(deadline):
+    try:
+        directory = runtime_dir(create=False)
+    except FileNotFoundError:
+        yield None
+        return
     with ExitStack() as stack:
         connected = None
-        for endpoint in sorted(runtime_dir().glob("host-*/socket")):
+        for endpoint in sorted(directory.glob("host-*/socket")):
             if time.monotonic() >= deadline:
                 raise TimeoutError
             client = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
@@ -185,7 +191,7 @@ def host_manifest():
     return CHROME / "NativeMessagingHosts" / f"{HOST}.json"
 
 
-def loaded_profiles(origin, *, strict=False):
+def loaded_profiles(origin, *, strict=False, ignore_empty=False):
     # Chrome records unpacked extensions in either profile preferences file.
     # A missing entry is not proof that an extension is absent (e.g. custom profiles).
     identifier = origin.split("/")[2]
@@ -193,7 +199,8 @@ def loaded_profiles(origin, *, strict=False):
         for path in CHROME.glob(f"*/{filename}"):
             try:
                 preferences = json.loads(path.read_text(encoding="utf-8"))
-                if identifier in preferences.get("extensions", {}).get("settings", {}):
+                settings = preferences.get("extensions", {}).get("settings", {})
+                if identifier in settings and (not ignore_empty or settings[identifier]):
                     yield path.parent.name
             except (OSError, ValueError, AttributeError, TypeError):
                 if strict:
@@ -202,7 +209,9 @@ def loaded_profiles(origin, *, strict=False):
 
 
 def setup_state():
-    if any(loaded_profiles(extension_origin(Path(__file__).resolve().parent / "extension"))):
+    origin = extension_origin(Path(__file__).resolve().parent / "extension")
+    # Chrome can leave an empty entry after removal. Keep strict uninstall checks unchanged.
+    if any(loaded_profiles(origin, ignore_empty=os.environ.get("BROWSER_CLI_MCP") == "1")):
         return "loaded"
     if host_manifest().is_file() and (INSTALL / "extension/manifest.json").is_file():
         return "pending"
@@ -259,22 +268,27 @@ def check_setup():
     return False
 
 
-def choose_profile(selected=None):
+def discover_profiles():
     try:
         state = json.loads((CHROME / "Local State").read_text(encoding="utf-8"))
     except FileNotFoundError:
         state = {}
     profile = state.get("profile", {})
     cache = profile.get("info_cache", {})
-    profiles = [key for key, info in cache.items()
-                if key not in (".", "..", "System Profile", "Guest Profile")
-                and Path(key).name == key and (CHROME / key).is_dir()
-                and not info.get("is_omitted")]
-    if not profiles:
+    names = {key: info.get("name") or key for key, info in cache.items()
+             if key not in (".", "..", "System Profile", "Guest Profile")
+             and Path(key).name == key and (CHROME / key).is_dir()
+             and not info.get("is_omitted")}
+    return {key: names[key] for key in sorted(names, key=lambda key: (key != profile.get("last_used"), key))}
+
+
+def choose_profile(selected=None):
+    names = discover_profiles()
+    if not names:
         if selected not in (None, "Default"):
             raise ValueError("No matching Chrome profile; the only available profile is Default")
         return "Default", "Default"
-    names = {key: cache[key].get("name") or key for key in profiles}
+    profiles = list(names)
     labels = {key: f"{name!r} ({key!r})" if list(names.values()).count(name) > 1 else repr(name)
               for key, name in names.items()}
     if selected in labels:
@@ -282,7 +296,6 @@ def choose_profile(selected=None):
     if selected is None and len(profiles) == 1:
         key = profiles[0]
         return key, labels[key]
-    profiles.sort(key=lambda key: (key != profile.get("last_used"), key))
     for index, key in enumerate(profiles, 1):
         # Escape control characters from the profile name before writing to a terminal.
         print(f"  {index}. {labels[key]} — --profile {shlex.quote(key)}", file=sys.stderr)
