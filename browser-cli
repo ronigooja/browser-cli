@@ -389,7 +389,7 @@ chrome_background() {
   if [ "$1" != install ] && [ ! -f "$helper" ]; then
     helper="$HOME/Library/Application Support/browser-cli/chrome-background/bridge.py"
   fi
-  [ -f "$helper" ] || die 'Chrome background mode requires the browser-cli extension. Get approval before setting it up, then run ./browser-cli --browser chrome install-background from the checkout or complete skill installation.'
+  [ -f "$helper" ] || die 'Chrome background mode requires the browser-cli extension. Keep chrome-background/ beside browser-cli, get approval before setup, then run browser-cli --browser chrome install-background.'
   BROWSER_CLI_PATH="$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")" "$python" "$helper" "$@"
 }
 

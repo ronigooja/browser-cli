@@ -66,8 +66,9 @@ opencode mcp add browser_cli -- /absolute/path/to/browser-cli mcp
 opencode mcp list
 ```
 
-Remove any separately installed `browser-cli` skill from OpenCode discovery if migrating. The
-server provides its own instructions and requires no skill. Code Mode exposes one tool:
+If upgrading from the legacy skill, move its installed directory out of OpenCode skill discovery
+(typically `~/.config/opencode/skills/browser-cli/`). The skill is no longer shipped; the server
+provides its own instructions. Code Mode exposes one tool:
 
 ```js
 await tools.browser_cli.read_page({url: "https://example.com/", browser: "safari", include_links: true})
