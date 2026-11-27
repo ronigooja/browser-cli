@@ -154,6 +154,8 @@ class BackgroundTest(unittest.TestCase):
         check.assert_not_called()
         self.assertIn("--profile-directory=Profile 5", launch.call_args.args[0])
         self.assertIn("Finish setup in Chrome profile 'Work'", output.getvalue())
+        self.assertIn("Command+Shift+G", output.getvalue())
+        self.assertIn("Click Select to load the entire folder", output.getvalue())
         self.assertIn("Setup is pending", output.getvalue())
         registration = json.loads((chrome / "NativeMessagingHosts" / f"{bridge.HOST}.json").read_text())
         self.assertTrue(os.access(registration["path"], os.X_OK))

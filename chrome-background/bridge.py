@@ -209,11 +209,22 @@ def setup_state():
     return "missing"
 
 
+def loading_instructions():
+    return (
+        "At chrome://extensions/, turn on Developer mode and click Load unpacked.\n"
+        "In the folder picker, press Command+Shift+G, paste this path, and press Return:\n"
+        f"  {INSTALL / 'extension'}\n"
+        "If manifest.json and background.js are greyed out, you are in the right folder. "
+        "Do not select either file. Click Select to load the entire folder.\n"
+        "If the extension is already loaded, click Reload instead."
+    )
+
+
 def require_connection(state):
     if state == "loaded":
         raise ValueError(f"The browser-cli extension is installed but not connected. Open a regular Chrome window in the profile where it is installed and make sure it is enabled at chrome://extensions/. Then run `{SETUP} --check`.")
     if state == "pending":
-        raise ValueError(f"Chrome background setup is not complete. In the intended Chrome profile, open chrome://extensions/, turn on Developer mode, then click Load unpacked and select {INSTALL / 'extension'}. If already loaded, enable or reload it. Then run `{SETUP} --check`.")
+        raise ValueError(f"Chrome background setup is not complete. In the intended Chrome profile:\n{loading_instructions()}\nThen run `{SETUP} --check`.")
     raise ValueError(f"Chrome background mode requires the browser-cli extension. Ask the user whether to set it up. Only after they confirm, run `{SETUP}`.")
 
 
@@ -317,8 +328,7 @@ def install(selected=None):
 
     print(f"Finish setup in Chrome profile {label}.")
     print("If the extensions page does not open in that profile, go to chrome://extensions/ there.")
-    print("Turn on Developer mode, click Load unpacked, and select this folder. If already loaded, click Reload instead.")
-    print(extension, flush=True)
+    print(loading_instructions(), flush=True)
     subprocess.run(["/usr/bin/open", "-na", "Google Chrome", "--args",
                     f"--profile-directory={profile}", "chrome://extensions/"], check=True)
     print(f"Setup is pending until Chrome loads and connects the extension. After loading it, run `{SETUP} --check`.")
