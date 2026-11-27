@@ -28,7 +28,7 @@ browser-cli help | version
   open (--foreground | --background) <url>
                                 match a URL prefix or open a page; prints <target> <TAB> reused|created
                                 target: id:<tab-id> for Chrome background; otherwise <window>:<tab>
-  install-background            Chrome only: install the local bridge and guide extension setup
+  install-background            Chrome only: prepare setup; you then click Load unpacked in Chrome
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
@@ -59,7 +59,9 @@ browser-cli help | version
             default: front window's active tab
 --background  open only: Safari opens or reuses a tab without bringing Safari to the front;
               Chrome reuses or creates a tab without focusing Chrome or changing the active tab.
-              Chrome requires one connected extension, a normal window and an HTTP(S) URL.
+              Chrome requires an HTTP(S) URL and a regular (non-Incognito) window in the one profile
+              with the browser-cli extension connected. From the checkout, run:
+              ./browser-cli --browser chrome install-background
 --foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)
 --json      tabs only: array of {window,tab,title,url,id}; id is a string in Chrome, null in Safari
@@ -344,7 +346,7 @@ chrome_background() {
   if [ "$1" != install ] && [ ! -f "$helper" ]; then
     helper="$HOME/Library/Application Support/browser-cli/chrome-background/bridge.py"
   fi
-  [ -f "$helper" ] || die 'Chrome background helper not found; use the repository checkout to run browser-cli --browser chrome install-background'
+  [ -f "$helper" ] || die 'Set up Chrome background mode from the browser-cli checkout: ./browser-cli --browser chrome install-background'
   "$python" "$helper" "$@"
 }
 

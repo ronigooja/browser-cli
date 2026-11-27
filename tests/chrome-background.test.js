@@ -50,7 +50,7 @@ test("reject unsupported requests, stale requests and no-window creation", async
   const empty = extension([], []);
   assert.match((await empty.open("file:///tmp/test")).error, /HTTP\(S\)/);
   assert.match((await empty.open("https://name:password@example.com")).error, /credentials/);
-  assert.match((await empty.open("https://example.com")).error, /normal Chrome window/);
+  assert.match((await empty.open("https://example.com")).error, /regular.*Chrome window/);
   const browser = extension([], [{ id: 1 }]);
   assert.match((await browser.open("https://example.com", 0)).error, /expired/);
   assert.deepEqual(browser.creations, []);

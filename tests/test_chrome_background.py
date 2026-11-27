@@ -78,6 +78,7 @@ class BackgroundTest(unittest.TestCase):
         output, error = client.communicate(timeout=3)
         self.assertEqual(output, "")
         self.assertIn("install-background", error)
+        self.assertIn("Already set up:", error)
         self.assertEqual(client.returncode, 1)
 
     def test_multiple_profiles_do_not_send_a_native_request(self):
@@ -86,7 +87,7 @@ class BackgroundTest(unittest.TestCase):
         client = self.start_client()
         output, error = client.communicate(timeout=3)
         self.assertEqual(output, "")
-        self.assertIn("Multiple Chrome extension instances", error)
+        self.assertIn("more than one Chrome profile", error)
         self.assertEqual(client.returncode, 1)
         self.assertEqual(select.select([host.stdout for host in hosts], [], [], 0.1)[0], [])
 
@@ -99,9 +100,10 @@ class BackgroundTest(unittest.TestCase):
         }}}))
         destination = home / "install"
         with patch.object(bridge, "CHROME", chrome), patch.object(bridge, "INSTALL", destination), \
-                patch.object(bridge.subprocess, "run") as launch:
+                patch.object(sys, "stdout", io.StringIO()) as output, patch.object(bridge.subprocess, "run") as launch:
             bridge.install()
         self.assertIn("--profile-directory=Profile 5", launch.call_args.args[0])
+        self.assertIn("Finish setup in Chrome profile 'Work'", output.getvalue())
         registration = json.loads((chrome / "NativeMessagingHosts" / f"{bridge.HOST}.json").read_text())
         self.assertTrue(os.access(registration["path"], os.X_OK))
         self.assertEqual(registration["allowed_origins"], [bridge.extension_origin(destination / "extension")])
@@ -118,7 +120,7 @@ class BackgroundTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "interactive terminal"):
                     bridge.choose_profile()
             with patch.object(sys.stdin, "isatty", return_value=True), patch("builtins.input", return_value="2"):
-                self.assertEqual(bridge.choose_profile(), "Profile 2")
+                self.assertEqual(bridge.choose_profile(), ("Profile 2", "'Work'"))
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 HOST = "com.browser_cli.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/browser-cli/chrome-background"
-SETUP = "browser-cli --browser chrome install-background"
+SETUP = "./browser-cli --browser chrome install-background"
 LIMIT = 65536
 
 
@@ -147,9 +147,14 @@ def background_open(url, timeout):
                 clients.pop().close()
                 continue
             if len(clients) > 1:
-                raise ValueError("Multiple Chrome extension instances are connected; disable the extension in the other profiles")
+                raise ValueError("The browser-cli extension is connected in more than one Chrome profile. Leave it enabled only in the profile you want to use.")
         if not clients:
-            raise ValueError(f"Chrome background extension is not connected; run `{SETUP}` or check it in chrome://extensions/")
+            raise ValueError(
+                "The browser-cli extension is not connected.\n"
+                f"  First time: from the browser-cli checkout, run `{SETUP}`.\n"
+                "  Already set up: open a regular Chrome window in the profile where you loaded the extension "
+                "and make sure it is enabled at chrome://extensions/."
+            )
         if time.monotonic() >= deadline:
             raise TimeoutError
         client = clients[0]
@@ -187,21 +192,25 @@ def choose_profile():
                 and Path(key).name == key and (CHROME / key).is_dir()
                 and not info.get("is_omitted")]
     if not profiles:
-        return "Default"
+        return "Default", "Default"
+    names = {key: cache[key].get("name") or key for key in profiles}
+    labels = {key: f"{name!r} ({key!r})" if list(names.values()).count(name) > 1 else repr(name)
+              for key, name in names.items()}
     if len(profiles) == 1:
-        return profiles[0]
+        key = profiles[0]
+        return key, labels[key]
     profiles.sort(key=lambda key: (key != profile.get("last_used"), key))
     for index, key in enumerate(profiles, 1):
-        name = cache[key].get("name") or key
         # Escape control characters from the profile name before writing to a terminal.
-        print(f"  {index}. {name!r} ({key!r})", file=sys.stderr)
+        print(f"  {index}. {labels[key]}", file=sys.stderr)
     if not sys.stdin.isatty():
         raise ValueError("Multiple Chrome profiles found; rerun this command in an interactive terminal to choose one")
     try:
         print("Choose a Chrome profile number: ", end="", file=sys.stderr, flush=True)
         choice = int(input())
         if 1 <= choice <= len(profiles):
-            return profiles[choice - 1]
+            key = profiles[choice - 1]
+            return key, labels[key]
     except (EOFError, ValueError):
         pass
     raise ValueError("No valid Chrome profile selected; no changes made")
@@ -222,7 +231,7 @@ def atomic_write(path, content, mode):
 
 def install():
     source = Path(__file__).resolve().parent
-    profile = choose_profile()
+    profile, label = choose_profile()
     extension = INSTALL / "extension"
     extension.mkdir(parents=True, exist_ok=True)
     for filename in ("manifest.json", "background.js"):
@@ -238,8 +247,9 @@ def install():
                 "path": str(launcher), "type": "stdio", "allowed_origins": [extension_origin(extension)]}
     atomic_write(manifests / f"{HOST}.json", (json.dumps(manifest, indent=2) + "\n").encode(), 0o644)
 
-    print(f"Bridge installed. In Chrome profile {profile!r}, open chrome://extensions/.")
-    print("Enable Developer mode, then click Load unpacked and choose the directory below. If already installed, click Reload instead.")
+    print(f"Finish setup in Chrome profile {label}.")
+    print("If the extensions page does not open in that profile, go to chrome://extensions/ there.")
+    print("Turn on Developer mode, click Load unpacked, and select this folder. If already loaded, click Reload instead.")
     print(extension, flush=True)
     subprocess.run(["/usr/bin/open", "-na", "Google Chrome", "--args",
                     f"--profile-directory={profile}", "chrome://extensions/"], check=True)

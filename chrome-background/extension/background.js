@@ -19,7 +19,7 @@ async function openBackground({ url, expires }) {
   const normal = { windowTypes: ["normal"] };
   const windows = (await chrome.windows.getAll(normal)).filter(window => !window.incognito);
   if (!windows.length) {
-    throw new Error("Open a normal Chrome window in the profile with the extension first");
+    throw new Error("Open a regular (non-Incognito) Chrome window in the profile with the extension first");
   }
   const lastFocused = await chrome.windows.getLastFocused(normal).catch(() => null);
   const window = windows.find(window => window.id === lastFocused?.id) ?? windows[0];
