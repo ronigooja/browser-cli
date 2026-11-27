@@ -149,7 +149,9 @@ printf '%s\\n' "$result"
                            f"{{title:{title!r}, querySelectorAll:()=>[], get body(){{throw Error('unexpected read')}}}};")
                 result, _ = self.run_cli("read-page", args=["--tab", "id:42", "--selector", "[", "--", url],
                                          page_fixture=fixture)
-                self.assertEqual((result.returncode, result.stdout), (0, f'{{"status":"{expected}"}}\n'))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"status": expected, **(
+                    {"document_url": current} if expected == "target_changed" else {})})
 
     def test_guarded_read_returns_visible_text(self):
         url = "https://example.com/"
@@ -275,7 +277,8 @@ global.document = {{title:'Example', readyState:'complete', querySelector:()=>nu
         fixture = f"global.location = new URL({(url + '/other')!r});"
         result, _ = self.run_cli("read-page", browser="safari", args=["--tab", "/Path", "--", url],
                                  page_fixture=fixture)
-        self.assertEqual((result.returncode, result.stdout), (0, '{"status":"target_changed"}\n'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"status": "target_changed", "document_url": url + "/other"})
 
     def test_guarded_read_scopes_text_and_links_to_first_match(self):
         url = "https://example.com/"

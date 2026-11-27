@@ -70,8 +70,11 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(self.run_cli.call_count, 3)
 
     def test_ambiguous_stops_before_content(self):
-        self.run_cli.return_value = json.dumps([TAB, dict(TAB, id="43")])
-        self.assertEqual(self.reader.read({"url": URL, "browser": "chrome"})["status"], "tab_ambiguous")
+        self.run_cli.return_value = json.dumps([TAB, dict(TAB, id="43", tab=3)])
+        page = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(page["status"], "tab_ambiguous")
+        self.assertEqual(page["candidate_count"], 2)
+        self.assertEqual([tab["tab"] for tab in page["candidates"]], [2, 3])
         self.run_cli.assert_called_once_with("chrome", "tabs", "--json")
 
     def test_chrome_session_requires_confirmed_id(self):
@@ -179,11 +182,36 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(response["retry_url_policy"], "allow_added_query")
         self.assertTrue(response["cleanup_token"])
         self.assertEqual(self.run_cli.call_count, 3)
-        self.run_cli.side_effect = [json.dumps([dict(TAB, url=observed)]), json.dumps(dict(PAGE, final_url=observed))]
-        retry = self.reader.read({"url": requested, "browser": "chrome", "url_policy": response["retry_url_policy"]}, scope="owner")
+        self.run_cli.side_effect = [json.dumps([dict(TAB, url=observed), dict(TAB, id="43", url=observed)]),
+                                    json.dumps(dict(PAGE, final_url=observed))]
+        args = {"url": requested, "browser": "chrome", "url_policy": response["retry_url_policy"],
+                "resume_token": response["resume_token"]}
+        self.assertEqual(self.reader.read(args, scope="other")["mismatch_reason"], "resume_unavailable")
+        self.assertEqual(self.reader.read(dict(args, url=URL), scope="owner")["mismatch_reason"], "resume_unavailable")
+        with patch.object(mcp.time, "monotonic", return_value=4):
+            retry = self.reader.read(args, scope="owner")
         self.assertEqual(retry["status"], "ok")
         self.assertNotIn("cleanup_token", retry)
         self.run_cli.assert_called_with("chrome", "read-page", "--tab", "id:42", "--", observed)
+
+    def test_new_tab_waits_for_document_commit_without_relaxing_guard(self):
+        for browser, opening, spec in (("safari", "1:2\tcreated", URL), ("chrome", "id:42\tcreated", "id:42")):
+            self.run_cli.reset_mock()
+            tabs = json.dumps([TAB])
+            self.run_cli.side_effect = ["[]", opening, tabs,
+                                        json.dumps({"status": "target_changed", "document_url": "about:blank"}),
+                                        tabs, *([tabs] if browser == "safari" else []), json.dumps(PAGE)]
+            with self.subTest(browser=browser), patch.object(mcp.time, "sleep"):
+                self.assertEqual(self.reader.read({"url": URL, "browser": browser})["status"], "ok")
+            self.run_cli.assert_called_with(browser, "read-page", "--tab", spec, "--", URL, timeout=5)
+
+    def test_wrong_document_url_stops_even_if_browser_metadata_matches(self):
+        self.run_cli.side_effect = ["[]", "id:42\tcreated", json.dumps([TAB]), json.dumps({
+            "status": "target_changed", "document_url": "https://different.test/path?q=private"})]
+        page = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual(page["mismatch_reason"], "origin_changed")
+        self.assertEqual(page["observed_url"], "https://different.test/path?REDACTED")
+        self.assertEqual(self.run_cli.call_count, 4)
 
     def test_added_query_policy_stops_on_mutation_pollution_path_origin_and_fragment(self):
         requested = URL + "search?q=keyword&q=keyword#section"

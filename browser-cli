@@ -740,7 +740,7 @@ cmd_read_page() {
   js_string "$SELECTOR"; selector="$JS_STRING"
   js_string "$WAIT_SELECTOR"; wait_selector="$JS_STRING"
   code="(function(){ $CHALLENGE_JS $LOGIN_GATE_JS
-    if (location.href !== $expected) return {status:'target_changed'};
+    if (location.href !== $expected) return {status:'target_changed', document_url:location.href};
     var challenge = challengeState();
     if (challenge === 'needs-human') return {status:'verification_required'};
     if (challenge === 'cloudflare-passive') return {status:'passive_challenge'};

@@ -97,6 +97,9 @@ For example, an X timeline read can use `wait_for_selector: 'main a[href*="/stat
 acceptable for the task: the origin, path, fragment, and every requested query pair (including
 duplicate counts) must remain unchanged. Chrome follows only the original tab ID; a mismatch
 reports its reason without returning page content or following a different destination.
+If a mismatch offers a `resume_token`, retry the original URL with the suggested policy and
+that token in the same session. This pins the retry to the original Chrome tab even if other
+tabs now match. The cleanup token remains valid until used or expired.
 
 Chrome background setup requires explicit user approval. Use `setup_chrome_background` to
 `prepare` after approval, `install` with the returned grant and selected profile, and `check`

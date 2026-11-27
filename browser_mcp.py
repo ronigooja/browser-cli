@@ -37,6 +37,8 @@ INSTRUCTIONS = (
     "Visible verification overrides a result from the heuristic detector; do not use verification content. "
     "Use the default exact URL policy unless extra query parameters are acceptable for the task. "
     "If a URL mismatch suggests allow_added_query, retry the original URL with that policy only when it fits the user's intent; keep any cleanup token from the earlier call. "
+    "Pass the returned resume_token when available so this retry stays on the original tab. "
+    "If tabs are ambiguous, use returned candidates to ask which tab is intended; do not ask the user to close unrelated tabs. "
     "Do not follow a mismatched observed URL without separate authorization. "
     "Never install the extension automatically, fall back to foreground, or try to solve verification. "
     "If the extension is missing, ask whether the user wants setup; no installation without explicit consent. "
@@ -63,6 +65,7 @@ TOOL = {
             "mode": {"type": "string", "enum": list(MODES), "default": DEFAULT_MODE},
             "url_policy": {"type": "string", "enum": list(URL_POLICIES), "default": "exact",
                            "description": "allow_added_query compares decoded query pairs and permits only new keys on the same origin, path and fragment. All requested query key/value counts must be preserved."},
+            "resume_token": {"type": "string", "description": "Same-session token for retrying the original Chrome URL with a suggested URL policy; never a tab selector."},
             "include_links": {"type": "boolean", "default": False},
             "selector": {"type": "string", "maxLength": 1000, "description": "Optional CSS selector for visible text and links within the first match."},
             "wait_for_selector": {"type": "string", "maxLength": 1000, "description": "Optional CSS selector: wait up to 8 seconds for a visible match before returning content. Separate from the read scope."},
@@ -190,6 +193,13 @@ def mismatch_result(browser, reason, observed=None, status="target_changed"):
     return result(status, browser, MESSAGES[status], **fields)
 
 
+def ambiguous_result(browser, tabs):
+    return result("tab_ambiguous", browser, MESSAGES["tab_ambiguous"], candidates=[
+        {"title": str(tab.get("title", ""))[:200], "url": sanitized_url(tab.get("url")),
+         "window": tab.get("window"), "tab": tab.get("tab")}
+        for tab in tabs[:10]], candidate_count=len(tabs))
+
+
 class CliFailure(Exception):
     def __init__(self, code, diagnostic=""):
         self.code = code
@@ -200,6 +210,7 @@ class Reader:
     def __init__(self, cli):
         self.cli = cli
         self.owned = {}
+        self.resumable = {}
 
     def run(self, browser, command, *args, timeout=5):
         call = subprocess.run([self.cli, "--browser", browser, command, "--timeout", str(timeout), *args],
@@ -248,6 +259,7 @@ class Reader:
         if not entry or entry[0] != scope or entry[3] <= time.monotonic():
             return result("cleanup_unavailable", message="The token is unknown, expired, or belongs to a different session. Leave the tab open.")
         del self.owned[token]
+        self.resumable.pop(token, None)
         try:
             status = self.run("chrome", "close-created", "--tab", entry[1], "--", entry[2]).strip()
         except (CliFailure, OSError, subprocess.TimeoutExpired):
@@ -268,6 +280,7 @@ class Reader:
         browser = args.get("browser")
         mode = args.get("mode", DEFAULT_MODE)
         policy = args.get("url_policy", "exact")
+        resume = args.get("resume_token")
         links = args.get("include_links", False)
         confirmed = args.get("confirmed_tab_id")
         selector, wait_selector = args.get("selector"), args.get("wait_for_selector")
@@ -279,6 +292,9 @@ class Reader:
             raise ValueError("Invalid mode or include_links.")
         if policy not in URL_POLICIES:
             raise ValueError("Invalid url_policy.")
+        if "resume_token" in args and (browser != "chrome" or mode != DEFAULT_MODE or policy != "allow_added_query"
+                or not isinstance(resume, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", resume)):
+            raise ValueError("Use resume_token only for the suggested Chrome public URL retry.")
         if "confirmed_tab_id" in args and (browser != "chrome" or mode != "session_tab"
                 or not isinstance(confirmed, str) or not re.fullmatch(r"[0-9]{1,20}", confirmed)):
             raise ValueError("confirmed_tab_id is only for a confirmed Chrome session_tab.")
@@ -290,6 +306,13 @@ class Reader:
             raise ValueError("Choose safari or chrome.")
         opened = {}
         try:
+            resume_target = None
+            if resume is not None:
+                entry = self.owned.get(resume)
+                if (not entry or entry[0] != scope or entry[3] <= time.monotonic()
+                        or self.resumable.get(resume) != expected or self.chrome_instance() != entry[2]):
+                    return mismatch_result(browser, "resume_unavailable")
+                resume_target = entry[1]
             try:
                 state = self.check_status(browser)
             except CliFailure as error:
@@ -297,7 +320,7 @@ class Reader:
                     raise
                 state = "unknown"
             page = self.read_selected(browser, mode, url, expected, policy, links, confirmed, selector, state, scope, opened,
-                                      wait_selector=wait_selector)
+                                      wait_selector=wait_selector, resume_target=resume_target)
         except subprocess.TimeoutExpired:
             status, message = CLI_ERRORS[24]
             page = result(status, browser, message)
@@ -305,6 +328,10 @@ class Reader:
             page = self.cli_error(browser, error)
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             page = result("browser_error", browser, "Could not read a valid response from the browser.")
+        if opened.get("cleanup_token") and page.get("retry_url_policy"):
+            self.resumable = {token: key for token, key in self.resumable.items() if token in self.owned}
+            self.resumable[opened["cleanup_token"]] = expected
+            opened["resume_token"] = opened["cleanup_token"]
         return dict(page, **opened)
 
     def cli_error(self, browser, error):
@@ -322,7 +349,7 @@ class Reader:
             return False
 
     def read_selected(self, browser, mode, url, expected, policy, links, confirmed, selector, state, scope, opened,
-                      recovering=None, wait_selector=None):
+                      recovering=None, wait_selector=None, resume_target=None):
         if recovering:
             tabs = []  # The -1728 recovery already established that no tabs remain.
         else:
@@ -332,8 +359,8 @@ class Reader:
                 if error.code != 26 or not self.tabs_empty_after_error(browser):
                     raise
                 tabs, state = [], "unknown"
-        if confirmed is not None:
-            by_id = [tab for tab in tabs if tab_ref(browser, tab) == f"id:{confirmed}"]
+        if confirmed is not None or resume_target is not None:
+            by_id = [tab for tab in tabs if tab_ref(browser, tab) == (resume_target or f"id:{confirmed}")]
             if not by_id:
                 return mismatch_result(browser, "tab_not_found")
             if len(by_id) == 1:
@@ -344,7 +371,7 @@ class Reader:
         else:
             candidates = [tab for tab in tabs if not url_mismatch(tab.get("url"), expected, policy)]
         if len(candidates) > 1:
-            return result("tab_ambiguous", browser, MESSAGES["tab_ambiguous"])
+            return ambiguous_result(browser, candidates)
         if not candidates:
             if mode != "public_background":
                 alternate = [tab for tab in tabs if url_mismatch(tab.get("url"), expected, policy)
@@ -364,8 +391,9 @@ class Reader:
         tab_url = tab["url"]
         if browser == "safari":
             # The CLI can guard a unique full-URL substring, not a stable Safari tab ID.
-            if len(safari_selector_matches(tabs, tab_url)) != 1:
-                return result("tab_ambiguous", browser, MESSAGES["tab_ambiguous"])
+            matching = safari_selector_matches(tabs, tab_url)
+            if len(matching) != 1:
+                return ambiguous_result(browser, matching)
             tab_spec = tab_url
         else:
             if sum(tab_ref(browser, other) == target for other in tabs) != 1:
@@ -398,7 +426,7 @@ class Reader:
                 if last_status is not None and browser == "safari":
                     matched = safari_selector_matches(self.tabs(browser), tab_url)
                     if len(matched) > 1:
-                        return result("tab_ambiguous", browser, MESSAGES["tab_ambiguous"])
+                        return ambiguous_result(browser, matched)
                     if not matched or tab_ref(browser, matched[0]) != target or matched[0]["url"] != tab_url:
                         return mismatch_result(browser, "tab_identity_unverified")
                 raw = self.run(browser, "read-page", *options, **({"timeout": probe_timeout} if probe_timeout else {}))
@@ -408,7 +436,7 @@ class Reader:
                     raise
                 if not self.tabs_empty_after_error(browser):
                     raise
-                if mode != DEFAULT_MODE or confirmed is not None or opened or recovering or wait_selector is not None or last_status is not None:
+                if mode != DEFAULT_MODE or confirmed is not None or resume_target or opened or recovering or wait_selector is not None or last_status is not None:
                     return result("open_tab_required", browser, MESSAGES["open_tab_required"], diagnostic=error.diagnostic)
                 # Recover like an unknown browser state; do not retry the failed target.
                 return self.read_selected(browser, mode, url, expected, policy, links, confirmed, selector, "unknown", scope,
@@ -416,14 +444,21 @@ class Reader:
             status = page["status"]
             now = time.monotonic()
             if status == "target_changed":
-                observed, failure = self.observe_after_guard(browser, target, tab_url, expected, policy)
+                doc_url = page.get("document_url")
+                doc_reason = url_mismatch(doc_url, expected, policy)
+                if isinstance(doc_url, str) and doc_url.startswith(("http://", "https://")) and doc_reason:
+                    return mismatch_result(browser, doc_reason, doc_url)
+                allowed_document = not doc_reason or doc_url in ("about:blank", "")
+                observed, failure = self.observe_after_guard(browser, target, tab_url, expected, policy,
+                                                            allow_pending=created and allowed_document)
                 if failure is not None:
                     return failure
                 if now >= ready_deadline:
                     return mismatch_result(browser, "document_url_changed", observed)
-                # Only Chrome's stable tab ID allows a same-tab retry with a new exact guard.
+                # Safari retries only the unchanged guard at the same unique location.
                 tab_url = options[-1] = observed
                 last_status = status
+                time.sleep(min(0.25, max(0, ready_deadline - time.monotonic())))
                 continue
             if status == "passive_challenge" and passive_deadline is None:
                 passive_deadline = now + PASSIVE_TIMEOUT
@@ -483,7 +518,7 @@ class Reader:
             # Safari indices can shift. A matching URL at a different index is not the returned tab.
             matching = [other for other in tabs if not url_mismatch(other.get("url"), expected, policy)]
             if len(matching) > 1:
-                return None, tabs, result("tab_ambiguous", browser, MESSAGES["tab_ambiguous"])
+                return None, tabs, ambiguous_result(browser, matching)
             if matching and matching[0] is not tab:
                 return None, tabs, mismatch_result(browser, "tab_identity_unverified", status=mismatch)
             if disposition == "created":
@@ -491,7 +526,7 @@ class Reader:
         opened["tab_disposition"] = disposition
         return tab, tabs, mismatch_result(browser, reason, tab_url, mismatch) if reason else None
 
-    def observe_after_guard(self, browser, target, previous_url, expected, policy):
+    def observe_after_guard(self, browser, target, previous_url, expected, policy, allow_pending=False):
         # The CLI's document guard ran before challenge detection, readiness or content extraction.
         # Inspect metadata only; a caller may renew the guard on the same Chrome ID.
         try:
@@ -502,11 +537,14 @@ class Reader:
         if len(identified) != 1:
             return None, mismatch_result(browser, "tab_not_found" if not identified else "tab_identity_ambiguous")
         if browser == "safari":
+            if (allow_pending and identified[0].get("url") == previous_url
+                    and len(safari_selector_matches(tabs, previous_url)) == 1):
+                return previous_url, None
             # A different URL at the same Safari index need not belong to the original tab.
             return None, mismatch_result(browser, "tab_identity_unverified")
         observed = identified[0].get("url")
         reason = url_mismatch(observed, expected, policy)
-        if reason or observed == previous_url:
+        if reason or (observed == previous_url and not allow_pending):
             return None, mismatch_result(browser, reason or "document_url_changed", observed)
         return observed, None
 
