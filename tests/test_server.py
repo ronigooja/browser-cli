@@ -23,6 +23,7 @@ class Fake:
         self.calls = []
         self.state = "ok"
         self.update_required = False
+        self.wake_state = "disconnected"
         self.tabs = [tab()]
         self.pages = []
         self.opened = None
@@ -34,6 +35,8 @@ class Fake:
         self.calls.append((operation, dict(payload), timeout))
         if operation == "status":
             return {"status": self.state, **({"update_required": True} if self.update_required else {})}
+        if operation == "wake":
+            return {"status": self.wake_state}
         if operation == "find":
             return {"status": "ok", "tabs": self.tabs}
         if operation == "open":
@@ -113,6 +116,32 @@ class ServerTest(unittest.TestCase):
         self.assertNotIn("cleanup_token", output)
         self.assertEqual([call[0] for call in self.chrome.calls], ["status", "find", "read"])
         self.assertEqual(self.safari.calls, [])
+
+    def test_public_chrome_recovers_without_sending_url_to_wake(self):
+        self.chrome.state = "disconnected"
+        self.chrome.wake_state = "ok"
+        self.assertEqual(self.read()["status"], "ok")
+        self.assertEqual([(op, data) for op, data, _ in self.chrome.calls], [
+            ("status", {}), ("wake", {}), ("find", {"url": URL}),
+            ("read", {"ref": tab()["ref"], "expected_url": URL}),
+        ])
+
+    def test_recovery_is_not_a_setup_check_or_existing_tab_operation(self):
+        self.chrome.state = self.safari.state = "disconnected"
+        for call in (lambda: self.setup("check"), lambda: self.read(mode="existing_tab"),
+                     lambda: self.read(mode="session_tab"), lambda: self.read(browser="safari")):
+            self.assertEqual(call()["status"], "extension_disconnected")
+        self.assertEqual([op for op, _, _ in self.chrome.calls], ["status"] * 3)
+        self.assertEqual([op for op, _, _ in self.safari.calls], ["status"])
+
+    def test_failed_chrome_wake_does_not_send_a_url(self):
+        self.chrome.state = "disconnected"
+        self.assertEqual(self.read()["status"], "extension_disconnected")
+        self.assertEqual([(op, data) for op, data, _ in self.chrome.calls], [("status", {}), ("wake", {})])
+        self.chrome.calls.clear()
+        self.chrome.update_required = True
+        self.assertTrue(self.read()["update_required"])
+        self.assertEqual([(op, data) for op, data, _ in self.chrome.calls], [("status", {})])
 
     def test_login_confirmation_in_both_browsers(self):
         for browser, backend in (("safari", self.safari), ("chrome", self.chrome)):
@@ -266,9 +295,11 @@ class ServerTest(unittest.TestCase):
         for native, expected in states.items():
             with self.subTest(native=native):
                 self.chrome.state = native
+                self.chrome.calls.clear()
                 self.assertEqual(self.read()["status"], expected)
                 self.assertEqual(self.setup("check")["status"], expected)
-        self.assertEqual({call[0] for call in self.chrome.calls}, {"status"})
+                read_ops = ["status", "wake"] if native == "disconnected" else ["status"]
+                self.assertEqual([call[0] for call in self.chrome.calls], read_ops + ["status"])
 
     def test_old_protocol_update_requires_explicit_approval_and_single_use_grant(self):
         self.chrome.state, self.chrome.update_required = "disconnected", True

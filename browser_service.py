@@ -249,6 +249,11 @@ class BrowserService:
 
     def read_selected(self, args, scope, browser, mode, url, expected, policy, candidate, owned, fields):
         state = self.request(browser, "status")
+        if (browser == "chrome" and mode == "public_background" and owned is None
+                and state["status"] == "extension_disconnected" and state.get("update_required") is not True):
+            # The bridge may wake a verified running, windowless Chrome. Never pass a URL
+            # in this step or try to recover an existing tab's lost connection identity.
+            state = self.request(browser, "wake")
         if state["status"] != "ok":
             return blocker(browser, state)
         tabs, failure = self.find(browser, url)
