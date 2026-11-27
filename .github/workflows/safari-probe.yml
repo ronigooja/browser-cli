@@ -1,0 +1,28 @@
+name: Safari probe
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the unsigned host and check the profile gate
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/safari-probe-build.log"
+          if ! xcodebuild -project safari-prototype/SafariProbe.xcodeproj -scheme SafariProbe \
+            -configuration Debug -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/safari-probe" CODE_SIGNING_ALLOWED=NO build >"$log" 2>&1; then
+            tail -80 "$log"
+            exit 1
+          fi
+          app="$RUNNER_TEMP/safari-probe/Build/Products/Debug/SafariProbe.app"
+          test -f "$app/Contents/PlugIns/SafariProbeExtension.appex/Contents/Resources/manifest.json"
+          "$app/Contents/MacOS/SafariProbe" verify-gate
