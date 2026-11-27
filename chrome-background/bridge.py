@@ -25,6 +25,12 @@ INSTALL = Path.home() / "Library/Application Support/browser-cli/chrome-backgrou
 SETUP = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome install-background"
 REMOVE = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome uninstall-background"
 LIMIT = 65536
+WAKE_WAIT = 2
+WAKE_POLL = 0.05
+CHROME_WINDOWS = (
+    'if application id "com.google.Chrome" is not running then return "not-running"',
+    'tell application id "com.google.Chrome" to return count of windows',
+)
 
 
 def runtime_dir(*, create=True):
@@ -130,6 +136,13 @@ def native_host(origin):
                 pass
 
 
+def remaining_time(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    return remaining
+
+
 @contextmanager
 def connected_client(deadline):
     try:
@@ -140,10 +153,8 @@ def connected_client(deadline):
     with ExitStack() as stack:
         connected = None
         for endpoint in sorted(directory.glob("host-*/socket")):
-            if time.monotonic() >= deadline:
-                raise TimeoutError
             client = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
-            client.settimeout(max(0.001, deadline - time.monotonic()))
+            client.settimeout(remaining_time(deadline))
             try:
                 client.connect(str(endpoint))
             except (FileNotFoundError, ConnectionRefusedError):
@@ -155,28 +166,40 @@ def connected_client(deadline):
         yield connected
 
 
+def deliver_background_request(client, request, deadline):
+    client.settimeout(remaining_time(deadline))
+    try:
+        client.sendall(request)
+        reply = receive(client.fileno(), deadline)
+    except (OSError, EOFError):
+        raise ValueError("Chrome background connection timed out or closed; check Chrome before retrying (a tab may already have opened)") from None
+    except ValueError:
+        raise ValueError("Unexpected reply from Chrome background extension; check Chrome before retrying (a tab may already have opened)") from None
+    if "error" in reply:
+        raise ValueError(str(reply["error"]))
+    if type(reply.get("id")) is not int or reply["id"] < 0 or reply.get("action") not in ("created", "reused"):
+        raise ValueError("Unexpected reply from Chrome background extension; check Chrome before retrying (a tab may already have opened)")
+    print(f'id:{reply["id"]}\t{reply["action"]}')
+    return 0
+
+
 def background_open(url, timeout):
     validate_url(url)
     if not 0 < timeout <= 86400:
         raise ValueError("Chrome background timeout must be at most 86400 seconds")
     deadline = time.monotonic() + timeout
     request = frame({"url": url, "expires": int((time.time() + timeout) * 1000)})
+    mcp = os.environ.get("BROWSER_CLI_MCP") == "1"
     try:
         with connected_client(deadline) as client:
             if client is not None:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError
-                client.settimeout(max(0.001, deadline - time.monotonic()))
-                client.sendall(request)
-                reply = receive(client.fileno(), deadline)
-                if "error" in reply:
-                    raise ValueError(str(reply["error"]))
-                if type(reply.get("id")) is not int or reply["id"] < 0 or reply.get("action") not in ("created", "reused"):
-                    raise ValueError("Unexpected reply from Chrome background extension")
-                print(f'id:{reply["id"]}\t{reply["action"]}')
-                return 0
-    except (TimeoutError, EOFError, BrokenPipeError, ConnectionResetError):
-        raise ValueError("Chrome background connection timed out or closed; check Chrome before retrying (a tab may already have opened)") from None
+                return deliver_background_request(client, request, deadline)
+        if mcp:
+            return recover_background_open(request, deadline)
+    except TimeoutError:
+        if mcp:
+            recovery_refused("The deadline expired before the URL could be sent.")
+        raise ValueError("Chrome background connection timed out before sending the URL") from None
     return offer_setup()
 
 
@@ -280,6 +303,93 @@ def discover_profiles():
              and Path(key).name == key and (CHROME / key).is_dir()
              and not info.get("is_omitted")}
     return {key: names[key] for key in sorted(names, key=lambda key: (key != profile.get("last_used"), key))}
+
+
+def recovery_refused(reason):
+    raise ConnectionRequired("loaded", f"Chrome background recovery: {reason} The URL was not sent. "
+                             f"Check the extension in the intended regular Chrome profile, then run `{SETUP} --check`.")
+
+
+def recovery_profile():
+    origin = extension_origin(Path(__file__).resolve().parent / "extension")
+    try:
+        profiles = set(loaded_profiles(origin, strict=True, ignore_empty=True))
+    except ValueError:
+        recovery_refused("Could not verify which Chrome profiles have the extension installed.")
+    if not profiles:
+        require_connection(setup_state())
+    if len(profiles) != 1:
+        recovery_refused("The extension is recorded in more than one Chrome profile; no profile was chosen.")
+    profile, = profiles
+    try:
+        known = profile in discover_profiles() and not (CHROME / profile).is_symlink()
+    except (OSError, ValueError, AttributeError, TypeError):
+        known = False
+    if not known:
+        recovery_refused("The extension's profile could not be verified as a discoverable regular Chrome profile.")
+    if profile.startswith("-") or not profile.isprintable() or "\\" in profile:
+        recovery_refused("The extension's profile directory could not be safely passed to Chrome.")
+
+    manifest = host_manifest()
+    launcher = INSTALL / "native-host"
+    extension = INSTALL / "extension"
+    files = (manifest, launcher, INSTALL / "bridge.py", extension / "manifest.json")
+    try:
+        registration = None
+        if all(path.is_file() and not path.is_symlink() for path in files) and extension_origin(extension) == origin:
+            registration = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        registration = None
+    if (not isinstance(registration, dict) or registration.get("name") != HOST
+            or registration.get("type") != "stdio" or registration.get("path") != str(launcher)
+            or registration.get("allowed_origins") != [origin] or not os.access(launcher, os.X_OK)):
+        recovery_refused("The existing Chrome native host registration could not be verified.")
+    return profile
+
+
+def recover_background_open(request, deadline):
+    profile = recovery_profile()
+    # The running guard is in the same script as the count so an already stopped
+    # Chrome is never targeted with a window-count Apple event.
+    try:
+        windows = subprocess.run(["/usr/bin/osascript", "-e", CHROME_WINDOWS[0], "-e", CHROME_WINDOWS[1]],
+                                 check=True, capture_output=True, text=True,
+                                 timeout=remaining_time(deadline)).stdout.strip()
+    except (TimeoutError, subprocess.TimeoutExpired):
+        recovery_refused("Could not confirm zero Chrome windows before the deadline.")
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        recovery_refused("Could not confirm zero Chrome windows; the window-count query failed.")
+    if windows == "not-running":
+        recovery_refused("Chrome is not running; it was not launched.")
+    if windows != "0":
+        if windows.isascii() and windows.isdecimal():
+            recovery_refused("Chrome already has an open window; it was not woken.")
+        recovery_refused("Could not confirm zero Chrome windows.")
+
+    # A host may have connected while the window count was being checked.
+    with connected_client(deadline) as client:
+        if client is not None:
+            return deliver_background_request(client, request, deadline)
+
+    try:
+        subprocess.run(["/usr/bin/open", "-g", "-n", "-a", "Google Chrome", "--args",
+                        f"--profile-directory={profile}", "--no-startup-window"],
+                       check=True, capture_output=True, timeout=remaining_time(deadline))
+    except (TimeoutError, subprocess.TimeoutExpired):
+        recovery_refused("The deadline expired while attempting the background wake.")
+    except (OSError, subprocess.CalledProcessError):
+        recovery_refused("The Chrome background wake command failed.")
+
+    reconnect_deadline = min(deadline, time.monotonic() + WAKE_WAIT)
+    try:
+        while time.monotonic() < reconnect_deadline:
+            with connected_client(reconnect_deadline) as client:
+                if client is not None:
+                    return deliver_background_request(client, request, deadline)
+            time.sleep(min(WAKE_POLL, max(0, reconnect_deadline - time.monotonic())))
+    except TimeoutError:
+        pass
+    recovery_refused("The Chrome background wake did not reconnect the native host in time.")
 
 
 def choose_profile(selected=None):

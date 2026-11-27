@@ -19,7 +19,15 @@ async function openBackground({ url, expires }) {
   const normal = { windowTypes: ["normal"] };
   const windows = (await chrome.windows.getAll(normal)).filter(window => !window.incognito);
   if (!windows.length) {
-    throw new Error("Open a regular (non-Incognito) Chrome window in the profile with the extension first");
+    if (!Number.isFinite(expires) || Date.now() >= expires) {
+      throw new Error("Chrome background request expired before opening a tab");
+    }
+    const created = await chrome.windows.create({ url: target.href, type: "normal", incognito: false, focused: false });
+    const id = created?.tabs?.[0]?.id;
+    if (!Array.isArray(created?.tabs) || created.tabs.length !== 1 || !Number.isSafeInteger(id) || id < 0) {
+      throw new Error("Chrome did not return a single created tab with a valid integer ID; inspect Chrome before retrying");
+    }
+    return { id, action: "created" };
   }
   const lastFocused = await chrome.windows.getLastFocused(normal).catch(() => null);
   const window = windows.find(window => window.id === lastFocused?.id) ?? windows[0];

@@ -46,7 +46,13 @@ If you never loaded the extension, run the uninstall command directly.
 
 After setup, `browser-cli --browser chrome open --background https://example.com/` reuses a
 tab with the exact requested URL or adds an unselected tab without activating Chrome. It searches only within the
-profile with the connected extension, accepts HTTP(S) URLs, and requires an existing normal window.
+profile with the connected extension and accepts HTTP(S) URLs. If that profile has no normal
+window, the extension creates one without requesting focus. Its first tab is selected in the new
+window; it does not change any existing window's selected tab.
+For MCP public reads only, if Chrome is running with zero windows and exactly one verified
+regular profile has the extension installed, one background profile wake is attempted before
+opening the URL. If reconnection fails, the tool stops without sending the URL or falling back
+to a foreground open. A connection check never wakes Chrome.
 Keep the extension enabled in just one profile: the command fails if none or more than one are
 connected. It never falls back to opening in the foreground. The result is `id:<tab-id>` followed
 by a tab and `created` or `reused`; use the returned ID with `--tab`.
@@ -155,7 +161,7 @@ that need a tab fail. Two states exist:
 | Command | Zero windows | Safari window with zero tabs |
 | --- | --- | --- |
 | `open --foreground <url>` or Safari `open --background <url>` | creates a window | a new window replaces the empty one |
-| Chrome `open --background <url>` | fails without creating a window | not applicable |
+| Chrome `open --background <url>` | connected extension creates an inactive window | not applicable |
 | other tab commands | fail with a no-window error | can fail with localized AppleScript error `-1728` |
 | `wait`, `wait-challenge` | poll until timeout because there is no tab to probe | same |
 

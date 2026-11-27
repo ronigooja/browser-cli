@@ -75,8 +75,8 @@ browser-cli help | version | mcp
             default: front window's active tab
 --background  open only: Safari opens or reuses a tab without bringing Safari to the front;
               Chrome reuses or creates a tab without focusing Chrome or changing the active tab.
-              Chrome requires an HTTP(S) URL and a regular (non-Incognito) window in the one profile
-              with the browser-cli extension connected. If not set up, this prompts before installation
+              Chrome requires an HTTP(S) URL and one connected extension profile; when needed the
+              extension creates an inactive normal window. If not set up, this prompts before installation
               in a terminal. Use install-background --check to check the connection without opening a tab.
 --foreground  open only: bring the browser to the front and select the target tab
 --trusted   click, fill, or press: bring the target tab to the front and send real input (requires Accessibility permission)

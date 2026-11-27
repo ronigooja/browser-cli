@@ -7,9 +7,10 @@ const vm = require("node:vm");
 const script = fs.readFileSync(path.join(__dirname, "../chrome-background/extension/background.js"), "utf8");
 const noop = { addListener() {} };
 
-function extension(tabs, windows, focused) {
+function extension(tabs, windows, focused, createdWindow = { tabs: [{ id: 43 }] }) {
   let receive, reply;
   const creations = [];
+  const windowCreations = [];
   const port = {
     onMessage: { addListener(fn) { receive = fn; } },
     onDisconnect: noop,
@@ -22,11 +23,16 @@ function extension(tabs, windows, focused) {
       query: async options => { assert.equal(options.windowType, "normal"); return tabs; },
       create: async options => { creations.push({ ...options }); return { id: 42 }; },
     },
-    windows: { getAll: async () => windows, getLastFocused: async () => focused },
+    windows: {
+      getAll: async () => windows,
+      getLastFocused: async () => focused,
+      create: async options => { windowCreations.push({ ...options }); return createdWindow; },
+    },
   };
   vm.runInNewContext(script, { chrome, URL });
   return {
     creations,
+    windowCreations,
     async open(url, expires = Date.now() + 1000) {
       await receive({ url, expires });
       return reply;
@@ -66,11 +72,28 @@ test("create an inactive tab in the last focused normal window", async () => {
   assert.deepEqual(browser.creations, [{ windowId: 2, url: "https://example.com/", active: false }]);
 });
 
-test("reject unsupported requests, stale requests and no-window creation", async () => {
+test("create an unfocused normal window when no regular window exists", async () => {
+  const browser = extension([], [{ id: 1, incognito: true }]);
+  assert.deepEqual(await browser.open("https://example.com"), { id: 43, action: "created" });
+  assert.deepEqual(browser.windowCreations, [{ url: "https://example.com/", type: "normal", incognito: false, focused: false }]);
+  assert.deepEqual(browser.creations, []);
+});
+
+test("reject malformed window creation responses", async () => {
+  for (const result of [null, {}, { tabs: [] }, { tabs: [{ id: 1 }, { id: 2 }] }, { tabs: [{}] },
+    { tabs: [{ id: 1.5 }] }, { tabs: [{ id: -1 }] }]) {
+    const browser = extension([], [], undefined, result);
+    assert.match((await browser.open("https://example.com")).error, /single created tab.*integer ID/);
+    assert.equal(browser.windowCreations.length, 1);
+  }
+});
+
+test("reject unsupported and stale requests", async () => {
   const empty = extension([], []);
   assert.match((await empty.open("file:///tmp/test")).error, /HTTP\(S\)/);
   assert.match((await empty.open("https://name:password@example.com")).error, /credentials/);
-  assert.match((await empty.open("https://example.com")).error, /regular.*Chrome window/);
+  assert.match((await empty.open("https://example.com", 0)).error, /expired/);
+  assert.deepEqual(empty.windowCreations, []);
   const browser = extension([], [{ id: 1 }]);
   assert.match((await browser.open("https://example.com", 0)).error, /expired/);
   assert.deepEqual(browser.creations, []);

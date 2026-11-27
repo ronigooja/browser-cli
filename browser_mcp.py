@@ -102,7 +102,7 @@ MESSAGES = {
 CLI_ERRORS = {
     20: ("extension_required", "Ask the user whether to set up the Chrome extension via the MCP setup tool or open the tab manually."),
     21: ("extension_pending", "Use the MCP setup tool to show the loading steps and check the connection; do not reinstall."),
-    22: ("extension_disconnected", "Use the MCP setup tool to check the connection in the intended regular Chrome profile; do not reinstall."),
+    22: ("extension_disconnected", "Chrome background opening could not connect to the extension. Follow the recovery diagnostic if present; do not reinstall or retry in the foreground."),
     24: ("timeout", "The browser operation timed out. Inspect the browser before retrying; a tab might have opened."),
     25: ("permission_required", "Enable Allow JavaScript from Apple Events in the selected browser, then retry."),
 }
@@ -339,6 +339,8 @@ class Reader:
         # Forward known, bounded browser diagnostics; do not echo page JS exceptions or browser output.
         detail = error.diagnostic if error.code in (25, 26) or error.diagnostic.startswith("browser-cli: AppleScript error ") else ""
         if error.code == 1 and error.diagnostic.startswith("browser-cli: Chrome background connection timed out or closed"):
+            detail = error.diagnostic
+        if error.code == 22 and error.diagnostic.startswith("browser-cli: Chrome background recovery:"):
             detail = error.diagnostic
         return result(status, browser, message, **({"diagnostic": detail} if detail else {}))
 

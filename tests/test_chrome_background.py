@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import importlib.util
 import io
 import json
@@ -9,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "chrome-background"
@@ -127,6 +128,164 @@ class BackgroundTest(unittest.TestCase):
             self.assertTrue(bridge.check_setup())
         self.assertIn("setup complete", output.getvalue())
         self.assertEqual(select.select([host.stdout], [], [], 0.1)[0], [])
+
+    def mock_recovery_setup(self):
+        chrome = Path.home() / "chrome"
+        destination = Path.home() / "install"
+        self.enterContext(patch.object(bridge, "CHROME", chrome))
+        self.enterContext(patch.object(bridge, "INSTALL", destination))
+        self.enterContext(patch.dict(os.environ, BROWSER_CLI_MCP="1"))
+        profile = chrome / "Profile 5"
+        profile.mkdir(parents=True)
+        (chrome / "Local State").write_text(json.dumps({"profile": {"info_cache": {
+            profile.name: {"name": "Work"},
+        }}}))
+        with patch.object(bridge.subprocess, "run"), patch.object(sys, "stdout", io.StringIO()):
+            bridge.install(profile.name)
+        identifier = bridge.extension_origin(destination / "extension").split("/")[2]
+        preferences = json.dumps({"extensions": {"settings": {identifier: {"location": 4}}}})
+        (profile / "Preferences").write_text(preferences)
+        (profile / "Secure Preferences").write_text(preferences)  # Same profile, not ambiguous.
+        return profile
+
+    def test_mcp_wakes_zero_window_chrome_once_and_forwards_original_request(self):
+        profile = self.mock_recovery_setup()
+        client = Mock()
+        with patch.object(bridge, "connected_client", side_effect=[nullcontext(None), nullcontext(None),
+                                                                   nullcontext(None), nullcontext(client)]) as connect, \
+                patch.object(bridge.subprocess, "run", side_effect=[Mock(stdout="0\n"), Mock()]) as run, \
+                patch.object(bridge, "receive", return_value={"id": 42, "action": "created"}) as receive, \
+                patch.object(bridge.time, "monotonic", return_value=5), \
+                patch.object(bridge.time, "time", return_value=100), \
+                patch.object(bridge.time, "sleep") as sleep, patch.object(sys, "stdout", io.StringIO()) as output:
+            self.assertEqual(bridge.background_open("https://example.com/", 10), 0)
+        self.assertEqual(output.getvalue(), "id:42\tcreated\n")
+        query, wake = run.call_args_list
+        self.assertEqual(query.args[0][0], "/usr/bin/osascript")
+        self.assertIn("is not running", query.args[0][2])
+        self.assertIn("count of windows", query.args[0][4])
+        self.assertEqual(wake.args[0], ["/usr/bin/open", "-g", "-n", "-a", "Google Chrome", "--args",
+                                       f"--profile-directory={profile.name}", "--no-startup-window"])
+        self.assertEqual(wake.kwargs["timeout"], 10)
+        self.assertEqual([call.args[0] for call in connect.call_args_list], [15, 15, 7, 7])
+        sleep.assert_called_once_with(bridge.WAKE_POLL)
+        client.sendall.assert_called_once_with(bridge.frame({"url": "https://example.com/", "expires": 110000}))
+        receive.assert_called_once_with(client.fileno.return_value, 15)
+
+    def test_mcp_does_not_wake_when_chrome_is_stopped_has_windows_or_count_is_unknown(self):
+        self.mock_recovery_setup()
+        for count, diagnostic in (("not-running", "not running"), ("1", "open window"), ("?", "Could not confirm")):
+            with self.subTest(count=count), \
+                    patch.object(bridge, "connected_client", return_value=nullcontext(None)), \
+                    patch.object(bridge.subprocess, "run", return_value=Mock(stdout=count)) as run:
+                with self.assertRaisesRegex(bridge.ConnectionRequired, diagnostic) as raised:
+                    bridge.background_open("https://example.com/", 3)
+                self.assertEqual(raised.exception.state, "loaded")
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0][0], "/usr/bin/osascript")
+
+    def test_mcp_does_not_wake_if_host_connects_during_preflight(self):
+        self.mock_recovery_setup()
+        client = Mock()
+        with patch.object(bridge, "connected_client", side_effect=[nullcontext(None), nullcontext(client)]), \
+                patch.object(bridge.subprocess, "run", return_value=Mock(stdout="0")) as run, \
+                patch.object(bridge, "deliver_background_request", return_value=0) as deliver:
+            self.assertEqual(bridge.background_open("https://example.com/", 3), 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][0], "/usr/bin/osascript")
+        deliver.assert_called_once()
+        self.assertIs(deliver.call_args.args[0], client)
+
+    def test_mcp_refuses_ambiguous_or_undiscoverable_profile_and_bad_registration(self):
+        profile = self.mock_recovery_setup()
+        with patch.object(bridge, "connected_client", return_value=nullcontext(None)), \
+                patch.object(bridge.subprocess, "run") as run:
+            other = profile.with_name("Profile 6")
+            other.mkdir()
+            other_preferences = other / "Preferences"
+            other_preferences.write_bytes((profile / "Preferences").read_bytes())
+            with self.assertRaisesRegex(bridge.ConnectionRequired, "more than one Chrome profile"):
+                bridge.background_open("https://example.com/", 3)
+            other_preferences.unlink()
+            with patch.object(bridge, "discover_profiles", return_value={}):
+                with self.assertRaisesRegex(bridge.ConnectionRequired, "discoverable regular"):
+                    bridge.background_open("https://example.com/", 3)
+            registration = bridge.host_manifest()
+            data = json.loads(registration.read_bytes())
+            registration.write_text(json.dumps(dict(data, path="/some/other/native-host")))
+            with self.assertRaisesRegex(bridge.ConnectionRequired, "native host registration"):
+                bridge.background_open("https://example.com/", 3)
+            run.assert_not_called()
+
+    def test_mcp_wait_for_reconnect_does_not_extend_original_deadline(self):
+        self.mock_recovery_setup()
+        now = [0.0]
+
+        def advance(seconds):
+            now[0] += seconds
+
+        with patch.object(bridge.time, "monotonic", side_effect=lambda: now[0]), \
+                patch.object(bridge.time, "sleep", side_effect=advance), \
+                patch.object(bridge, "connected_client", return_value=nullcontext(None)) as connect, \
+                patch.object(bridge.subprocess, "run", side_effect=[Mock(stdout="0"), Mock()]) as run, \
+                patch.object(sys, "argv", ["bridge.py", "open", "https://example.com/", "1"]), \
+                patch.object(sys, "stderr", io.StringIO()) as error:
+            self.assertEqual(bridge.main(), 22)
+        self.assertIn("did not reconnect the native host in time. The URL was not sent", error.getvalue())
+        self.assertEqual(now[0], 1)
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(all(call.args == (1,) for call in connect.call_args_list))
+
+    def test_mcp_wake_failure_does_not_retry_or_forward(self):
+        self.mock_recovery_setup()
+        for failure in (subprocess.TimeoutExpired("open", 1), subprocess.CalledProcessError(1, "open")):
+            with self.subTest(failure=failure), \
+                    patch.object(bridge, "connected_client", return_value=nullcontext(None)) as connect, \
+                    patch.object(bridge.subprocess, "run", side_effect=[Mock(stdout="0"), failure]) as run, \
+                    patch.object(bridge, "deliver_background_request") as deliver:
+                with self.assertRaisesRegex(bridge.ConnectionRequired, "The URL was not sent"):
+                    bridge.background_open("https://example.com/", 3)
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual(connect.call_count, 2)
+                deliver.assert_not_called()
+
+    def test_cli_open_does_not_attempt_wake(self):
+        self.mock_recovery_setup()
+        with patch.dict(os.environ, BROWSER_CLI_MCP="0"), \
+                patch.object(bridge, "connected_client", return_value=nullcontext(None)), \
+                patch.object(bridge.subprocess, "run") as run:
+            with self.assertRaisesRegex(bridge.ConnectionRequired, "installed but not connected"):
+                bridge.background_open("https://example.com/", 3)
+            run.assert_not_called()
+
+    def test_mcp_never_wakes_or_resends_after_delivery_failure(self):
+        client = Mock()
+        for after_wake in (False, True):
+            with self.subTest(after_wake=after_wake), patch.dict(os.environ, BROWSER_CLI_MCP="1"), \
+                    patch.object(bridge, "connected_client", side_effect=(
+                        [nullcontext(None), nullcontext(None)] if after_wake else []
+                    ) + [nullcontext(client)]) as connect, \
+                    patch.object(bridge, "recovery_profile", return_value="Default") as profile, \
+                    patch.object(bridge.subprocess, "run", return_value=Mock(stdout="0")) as run, \
+                    patch.object(bridge, "receive", side_effect=EOFError):
+                client.reset_mock()
+                with self.assertRaisesRegex(ValueError, "a tab may already have opened"):
+                    bridge.background_open("https://example.com/", 3)
+                client.sendall.assert_called_once()
+                self.assertEqual(connect.call_count, 3 if after_wake else 1)
+                self.assertEqual(run.call_count, 2 if after_wake else 0)
+                self.assertEqual(profile.call_count, int(after_wake))
+
+    def test_mcp_check_remains_observation_only_when_disconnected(self):
+        self.mock_recovery_setup()
+        with patch.object(bridge, "connected_client", return_value=nullcontext(None)) as connect, \
+                patch.object(bridge.subprocess, "run") as run, \
+                patch.object(sys, "argv", ["bridge.py", "check"]), \
+                patch.object(sys, "stderr", io.StringIO()) as error:
+            self.assertEqual(bridge.main(), 22)
+        self.assertIn("installed but not connected", error.getvalue())
+        connect.assert_called_once()
+        run.assert_not_called()
 
     def test_multiple_profiles_do_not_send_a_native_request(self):
         hosts = [self.start_host(), self.start_host()]
