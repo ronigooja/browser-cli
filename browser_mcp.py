@@ -18,6 +18,7 @@ BROWSERS = ("safari", "chrome")
 MODES = ("existing_tab", "public_background", "session_tab")
 DEFAULT_MODE = "public_background"
 PASSIVE_TIMEOUT = 600
+CONTENT_TIMEOUT = 8
 INSTRUCTIONS = (
     "Use read_page to read real local Safari or Chrome without a separate skill. "
     "Unless the user explicitly needs their login or the requested content is unavailable and "
@@ -194,7 +195,11 @@ class Reader:
             return result("cleanup_unconfirmed", "chrome", "Could not confirm the tab was closed. Do not retry with a URL or index.")
         if status == "closed":
             return result("closed", "chrome")
-        return result("cleanup_unavailable", "chrome", "The original tab could not be identified; no replacement tab was closed.")
+        if status == "instance_changed":
+            return result("cleanup_instance_changed", "chrome", "The original Chrome process could not be verified; no tab was closed.")
+        if status == "not_found":
+            return result("cleanup_tab_not_found", "chrome", "The original tab is no longer in this Chrome instance; no tab was closed.")
+        return result("cleanup_unconfirmed", "chrome", "Could not confirm the tab was closed. Do not retry with a URL or index.")
 
     def read(self, args, scope=None):
         if not isinstance(args, dict) or args.keys() - TOOL["inputSchema"]["properties"].keys():
@@ -316,14 +321,17 @@ class Reader:
         target = (url if url in tab_url else tab_url) if browser == "safari" else f'id:{tab["id"]}'
         options = ["--tab", target, *(["--include-links"] if links else []),
                    *(["--selector", selector] if selector is not None else []), "--", tab_url]
-        ready_deadline = time.monotonic() + 4
+        created = opened.get("tab_disposition") == "created"
+        ready_deadline = time.monotonic() + (CONTENT_TIMEOUT if created else 4)
         passive_deadline = None
+        last_status = None
         while True:
             try:
-                if passive_deadline is not None:
-                    remaining = passive_deadline - time.monotonic()
+                if last_status is not None and (created or passive_deadline is not None):
+                    deadline = ready_deadline if last_status == "no_content" else passive_deadline or ready_deadline
+                    remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        status = "passive_challenge"
+                        status = last_status
                         break
                     raw = self.run(browser, "read-page", *options, timeout=min(5, math.ceil(remaining)))
                 else:
@@ -343,10 +351,13 @@ class Reader:
             now = time.monotonic()
             if status == "passive_challenge" and passive_deadline is None:
                 passive_deadline = now + PASSIVE_TIMEOUT
-            deadline = passive_deadline if passive_deadline is not None else ready_deadline
-            if status not in ("page_loading", "passive_challenge") or now >= deadline:
+            deadline = ready_deadline if status == "no_content" else passive_deadline or ready_deadline
+            retryable = status in ("page_loading", "passive_challenge") or (created and status == "no_content")
+            if not retryable or now >= deadline:
                 break
-            time.sleep(min(1 if passive_deadline is not None else 0.25, deadline - now))
+            last_status = status
+            interval = 1 if status == "passive_challenge" else 0.5 if created else 0.25
+            time.sleep(min(interval, deadline - now))
         if status != "ok":
             return result(status, browser, MESSAGES[status])
         if page["final_url"] != tab_url:

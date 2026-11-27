@@ -473,13 +473,18 @@ AS
   osa "$TIMEOUT" "$f" "$TAB"
 }
 
+# Share the normalization with the AppleScript recheck: BSD ps pads lstart with spaces.
+CHROME_START_COMMAND='LC_ALL=C TZ=UTC0 /bin/ps -p '
+CHROME_TRIM='s/^[[:space:]]*//;s/[[:space:]]*$//'
+CHROME_START_SUFFIX=" -o lstart= | /usr/bin/sed '$CHROME_TRIM'"
+
 # Only trust a single Chrome process. Include its start time because PIDs are reusable.
 chrome_instance() {
   local pid started
   pid="$(pgrep -x 'Google Chrome')" || return 1
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  started="$(LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart=)" || return 1
-  [ -n "$started" ] || return 1
+  started="$(LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= | /usr/bin/sed "$CHROME_TRIM")" || return 1
+  [ -n "$started" ] && [[ "$started" != *$'\n'* && "$started" != *$'\r'* && "$started" != *$'\t'* ]] || return 1
   printf '%s\t%s\n' "$pid" "$started"
 }
 
@@ -496,7 +501,7 @@ cmd_close_created() {
     usage_error 'close-created requires --tab id:<id> -- <expected-instance>'
   local instance
   if ! instance="$(chrome_instance)" || [ "$instance" != "${ARGS[0]}" ]; then
-    printf 'not_found\n'
+    printf 'instance_changed\n'
     return 0
   fi
   # Bash 3.2 misparses this quoted heredoc inside a command substitution.
@@ -505,7 +510,7 @@ cmd_close_created() {
 on run argv
   set wantedID to item 1 of argv
   set expectedInstance to item 2 of argv
-  if application "Google Chrome" is not running then return "not_found"
+  if application "Google Chrome" is not running then return "instance_changed"
   tell application "Google Chrome"
     -- Chrome's AppleScript tab IDs are text.
     set windowIDs to id of every window
@@ -514,28 +519,29 @@ on run argv
       set tabIDs to id of every tab of window id wi
       if tabIDs contains wantedID then
         -- Verify the browser instance again before sending the close event.
-        if my chromeInstance() is not expectedInstance then return "not_found"
+        if my chromeInstance(item 3 of argv, item 4 of argv) is not expectedInstance then return "instance_changed"
         close tab id wantedID of window id wi
         return "closed"
       end if
     end repeat
   end tell
+  if my chromeInstance(item 3 of argv, item 4 of argv) is not expectedInstance then return "instance_changed"
   return "not_found"
 end run
 
-on chromeInstance()
+on chromeInstance(startCommand, startSuffix)
   try
     set p to do shell script "/usr/bin/pgrep -x 'Google Chrome'"
     if (count of paragraphs of p) is not 1 then return ""
-    set started to do shell script "LC_ALL=C TZ=UTC0 /bin/ps -p " & quoted form of p & " -o lstart="
-    if started is "" then return ""
+    set started to do shell script (startCommand & quoted form of p & startSuffix)
+    if started is "" or (count of paragraphs of started) is not 1 or started contains (ASCII character 9) then return ""
     return p & (ASCII character 9) & started
   on error
     return ""
   end try
 end chromeInstance
 AS
-  osa "$TIMEOUT" "$f" "${TAB#id:}" "$instance"
+  osa "$TIMEOUT" "$f" "${TAB#id:}" "$instance" "$CHROME_START_COMMAND" "$CHROME_START_SUFFIX"
 }
 
 # Runs the expression in the tab; prints the value, exits 1 on a JS exception.

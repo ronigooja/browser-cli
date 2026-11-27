@@ -171,6 +171,46 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(self.reader.cleanup(args, "owner")["status"], "cleanup_unavailable")
         self.assertEqual(self.run_cli.call_count, 5)
 
+    def test_cleanup_distinguishes_instance_missing_tab_and_unconfirmed(self):
+        for raw, expected in (("instance_changed", "cleanup_instance_changed"),
+                              ("not_found", "cleanup_tab_not_found"), ("unexpected", "cleanup_unconfirmed")):
+            self.run_cli.return_value = raw
+            token = self.reader.claim("owner", "id:42", "instance")
+            args = {"cleanup_token": token}
+            with self.subTest(expected=expected):
+                self.assertEqual(self.reader.cleanup(args, "owner")["status"], expected)
+                self.assertEqual(self.reader.cleanup(args, "owner")["status"], "cleanup_unavailable")
+
+    def test_new_tab_waits_for_content_on_same_tab(self):
+        now = [0]
+        self.run_cli.side_effect = ["[]", "id:42\tcreated", json.dumps([TAB]),
+                                    json.dumps({"status": "no_content"}), json.dumps(PAGE)]
+        with patch.object(mcp.time, "monotonic", side_effect=lambda: now[0]), \
+                patch.object(mcp.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
+            response = self.reader.read({"url": URL, "browser": "chrome"})
+        self.assertEqual((now[0], response["status"]), (0.5, "ok"))
+        self.assertEqual(self.run_cli.call_args_list[-2:], [
+            call("chrome", "read-page", "--tab", "id:42", "--", URL),
+            call("chrome", "read-page", "--tab", "id:42", "--", URL, timeout=5),
+        ])
+
+    def test_new_tab_empty_wait_is_bounded_and_stops_for_blockers(self):
+        for status in ("no_content", "login_required", "verification_required", "target_changed"):
+            now = [0]
+            empty = json.dumps({"status": "no_content"})
+            probes = [empty] * 16 if status == "no_content" else [empty, json.dumps({"status": status})]
+            self.run_cli.side_effect = ["[]", "1:2\tcreated", json.dumps([TAB]), *probes]
+            with self.subTest(status=status), patch.object(mcp.time, "monotonic", side_effect=lambda: now[0]), \
+                    patch.object(mcp.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
+                response = self.reader.read({"url": URL, "browser": "safari"})
+                self.assertEqual(response["status"], status)
+                self.assertEqual(now[0], 8 if status == "no_content" else 0.5)
+
+    def test_empty_reused_tab_does_not_wait(self):
+        self.run_cli.side_effect = ["[]", "id:42\treused", json.dumps([TAB]), json.dumps({"status": "no_content"})]
+        self.assertEqual(self.reader.read({"url": URL, "browser": "chrome"})["status"], "no_content")
+        self.assertEqual(self.run_cli.call_count, 4)
+
     def test_reused_and_safari_indices_never_grant_cleanup(self):
         for browser, opening in (("chrome", "id:42\treused"), ("safari", "1:2\tcreated")):
             self.run_cli.side_effect = ["[]", opening, json.dumps([TAB]), json.dumps(PAGE)]

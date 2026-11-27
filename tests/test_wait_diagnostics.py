@@ -79,7 +79,7 @@ printf '%s\\n' "$result"
                                     capture_output=True, timeout=8,
                                     env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", MOCK_DIR=directory,
                                              BROWSER_CLI_MCP=str(int(mcp)), MOCK_BROWSER_RUNNING=str(int(running)),
-                                             MOCK_BROWSER_PIDS=pids, MOCK_BROWSER_START=START_TIME,
+                                              MOCK_BROWSER_PIDS=pids, MOCK_BROWSER_START="  " + START_TIME + "    ",
                                              MOCK_REJECT_EVAL=str(int(reject_eval))))
             if osa_calls is not None and (root / "osa-scripts").exists():
                 osa_calls.append(((root / "osa-scripts").read_text(), (root / "osa-targets").read_text()))
@@ -216,12 +216,12 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
             with self.subTest(running=running, instance=instance):
                 result, _ = self.run_cli("close-created", mcp=True, running=running,
                                          args=["--tab", "id:42", "--", instance], osa_calls=calls)
-                self.assertEqual((result.returncode, result.stdout), (0, "not_found\n"))
+                self.assertEqual((result.returncode, result.stdout), (0, "instance_changed\n"))
         self.assertEqual(calls, [])
 
     def test_close_created_targets_tab_and_window_by_id(self):
         calls = []
-        for status in ("closed", "not_found"):
+        for status in ("closed", "not_found", "instance_changed"):
             with self.subTest(status=status):
                 result, _ = self.run_cli("close-created", status, mcp=True,
                                          args=["--tab", "id:42", "--", CHROME_INSTANCE], osa_calls=calls)
@@ -230,7 +230,7 @@ global.document = {{title:'Example', readyState:'complete', querySelectorAll:()=
         self.assertEqual(tab_id, "42\n")
         self.assertIn('if application "Google Chrome" is not running', script)
         self.assertIn("if tabIDs contains wantedID then", script)
-        self.assertLess(script.index("if my chromeInstance() is not expectedInstance"),
+        self.assertLess(script.index("if my chromeInstance(item 3 of argv, item 4 of argv) is not expectedInstance"),
                         script.index("close tab id wantedID of window id wi"))
         self.assertEqual([line.strip() for line in script.splitlines() if line.strip().startswith("close ")],
                          ["close tab id wantedID of window id wi"])
