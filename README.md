@@ -1,6 +1,6 @@
 # Agent Browser
 
-`agent_browser` is a local stdio MCP server for reading pages in the user's real Chrome or Safari. Both browser backends require their extension; neither uses Apple Events, a standalone CLI, or a foreground fallback. Chrome needs version 120 or later. The Safari backend is experimental pending signed GUI acceptance; see [Safari setup and limitations](safari-background/README.md).
+`agent_browser` is a local stdio MCP server for reading pages in the user's real Chrome or Safari. Both browser backends require their extension; neither uses Apple Events, a standalone CLI, or a foreground fallback. Chrome needs version 120 or later.
 
 ## Register the server
 
@@ -15,7 +15,7 @@ Replace any registration that still points to the removed executable. There is n
 ## Set up an extension
 
 - **Chrome:** `setup_extension` with `browser: "chrome"`, `action: "check"` reports setup state. After explicit approval, call `prepare` with `approved: true`, select the single or user-confirmed profile, then call `install` with the grant. Follow the returned Load unpacked instructions in that profile. If the server reports `update_required`, ask before preparing with `update: true`, and reload rather than adding a second copy. Leave the extension enabled in one regular profile, with **Site access → On all sites**. Run `check` again; ordinary disconnection does not justify reinstalling.
-- **Safari:** follow the [signed host and named-profile setup](safari-background/README.md). Enable Agent Browser in only the intended named profile, keep Private Browsing access off, and grant all-site access once in Safari settings. Enable background requests in its setup popup and configure the returned UUID in `AGENT_BROWSER_SAFARI_PROFILE` for the MCP process. Run `setup_extension` with `browser: "safari"`, `action: "check"`. Do not install the development probe as the production backend.
+- **Safari:** follow the [signed host and named-profile setup](safari-background/README.md#explicit-setup), then call `setup_extension` with `browser: "safari"`, `action: "check"`.
 
 Each extension needs one broad HTTP(S) authorization for unattended reading, including logged-in pages. Do not request per-site permission in response to a read. If browser settings withhold access or the connection fails, stop and report it rather than changing browser or opening a foreground tab.
 

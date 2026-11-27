@@ -1,6 +1,4 @@
-# Agent Browser Safari background candidate
-
-This separate signed app/extension implements the modern background read protocol on macOS Safari. It does not replace the restricted `safari-prototype` app. The candidate needs real Safari acceptance and focus tests before deployment; it does not use Apple Events, host dispatch, browser launch, network servers, content-page command entry, or a fallback read/open path.
+# Agent Browser for Safari
 
 ## Build and package
 
@@ -23,7 +21,7 @@ For live testing use a runner provisioned for signing both targets with the same
 ## Explicit setup
 
 1. Place the signed app at `~/Applications/AgentBrowserSafari.app` (or configure its absolute binary path) and open that **app** once without arguments to register its embedded extension. This does not open Safari. Enable the extension only in the intended **named** Safari profile; turn off **Allow in Private Browsing**. Do not use a Safari web app or the unnamed default context. The operator, not a UUID or window order, identifies the named profile in Safari.
-2. In Safari’s settings, grant the extension access to all websites once. The extension declares the HTTP(S) scopes at installation and does not request permissions at runtime. Then open the **Agent Browser Safari Setup** toolbar popup in that profile and click **Enable background requests**. It must show `enabled` and a browser-supplied UUID. If Safari cannot grant both scopes, do not work around it with per-site prompts. Set the MCP process environment:
+2. In that profile, open an ordinary HTTP(S) page such as `https://example.com/`, not the Safari Start Page. Use the extension’s toolbar button to grant access to **all websites** once. In the **Agent Browser Safari Setup** popup, click **Enable background requests**. Expect `enabled` and a UUID. If the all-sites option is unavailable, do not grant access site by site. Set the MCP process environment:
 
    ```sh
    export AGENT_BROWSER_SAFARI_PROFILE='<UUID shown by the setup popup>'
@@ -60,4 +58,4 @@ PY
 
 For a separately consented new-tab test, use an HTTP(S) URL not already open. Require `created: true`, unchanged selection and foreground, use the returned `ref` and exact `url` in `read`, and pass the returned `ownership` only to `close`. Repeat status/find with Safari idle, then with all windows closed without quitting. A stopped browser must remain stopped. Test two named profiles for isolation, the default scenario for missing metadata, grant revocation and per-site Ask/Deny overrides for absence of prompts, an actual navigation/redirect during read, ref invalidation after restart, and owned close without foreground or selection changes. Safari can generate permission UI internally in some tab/scripting APIs; this build requests no per-site permissions, gates operations on broad access and will not extract when the browser withholds the frame URL. The target release's UI and permission-change races must still be checked live. Do not deploy on a release/configuration that presents site prompts during a request.
 
-Polling is one second after each complete native exchange and requires the browser-managed MV2 persistent background to be alive. This avoids a Safari launch or slow per-operation alarm; it neither wakes a dead context nor promises low latency when Safari throttles. [MDN MV2 persistence data](https://github.com/mdn/browser-compat-data/blob/main/webextensions/manifest/background.json) and [Apple background guidance](https://developer.apple.com/documentation/safariservices/optimizing-your-web-extension-for-safari) identify it as a macOS Safari candidate, not proof of current acceptance. [WebNavigation](https://github.com/mdn/browser-compat-data/blob/main/webextensions/api/webNavigation.json) and [scripting](https://github.com/mdn/browser-compat-data/blob/main/webextensions/api/scripting.json) list relevant document IDs in Safari 18.4+. MV2 + scripting, signed App Group access, the all-sites grant, inactive profile selection, document targeting and background focus behavior need signed live verification. No automatic wake or MV3 fallback is attempted.
+The MV2 background polls one second after each native exchange. A suspended context cannot be woken by the adapter; no MV3 fallback is attempted. Document targeting requires the [Safari 18.4+ scripting APIs](https://github.com/mdn/browser-compat-data/blob/main/webextensions/api/scripting.json).
