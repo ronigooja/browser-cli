@@ -168,10 +168,37 @@ class BackgroundTest(unittest.TestCase):
         }}}))
         with patch.object(bridge, "CHROME", chrome), patch.object(sys, "stderr", io.StringIO()):
             with patch.object(sys.stdin, "isatty", return_value=False):
-                with self.assertRaisesRegex(ValueError, "interactive terminal"):
+                with self.assertRaisesRegex(ValueError, "Ask the user which profile"):
                     bridge.choose_profile()
-            with patch.object(sys.stdin, "isatty", return_value=True), patch("builtins.input", return_value="2"):
+                self.assertEqual(bridge.choose_profile("Profile 2"), ("Profile 2", "'Work'"))
+                with self.assertRaisesRegex(ValueError, "Unknown Chrome profile"):
+                    bridge.choose_profile("../Profile 2")
+            with patch.object(sys.stdin, "isatty", return_value=True), \
+                    patch.object(sys.stderr, "isatty", return_value=True), patch("builtins.input", return_value="2"):
                 self.assertEqual(bridge.choose_profile(), ("Profile 2", "'Work'"))
+
+    def test_uninstall_requires_removal_in_chrome_then_only_cleans_known_files(self):
+        chrome = Path.home() / "chrome"
+        destination = Path.home() / "install"
+        with patch.object(bridge, "CHROME", chrome), patch.object(bridge, "INSTALL", destination), \
+                patch.object(bridge.subprocess, "run"), patch.object(sys, "stdout", io.StringIO()):
+            bridge.install()
+            origin = bridge.extension_origin(destination / "extension")
+            profile = chrome / "Default"
+            profile.mkdir()
+            preferences = profile / "Preferences"
+            preferences.write_text(json.dumps({"extensions": {"settings": {origin.split("/")[2]: {}}}}))
+            with self.assertRaisesRegex(ValueError, "Remove browser-cli Background Tabs"):
+                bridge.uninstall()
+            self.assertTrue(bridge.host_manifest().is_file())
+            preferences.write_text("{}")
+            unrelated = destination / "keep.txt"
+            unrelated.touch()
+            bridge.uninstall()
+            bridge.uninstall()
+            self.assertFalse(bridge.host_manifest().exists())
+            self.assertEqual(list(destination.iterdir()), [unrelated])
+            self.assertEqual(preferences.read_text(), "{}")
 
 
 if __name__ == "__main__":

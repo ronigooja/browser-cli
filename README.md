@@ -25,8 +25,9 @@ Requires Chrome 120+ and Python 3. From the repository checkout, run:
 ./browser-cli --browser chrome install-background
 ```
 
-The installer selects the sole Chrome profile (or the default for a fresh Chrome) or prompts if
-there are several. It copies the extension and bridge into `~/Library/Application Support/browser-cli/chrome-background/`,
+The installer selects the sole Chrome profile (or the default for a fresh Chrome). If there are
+several, it prompts in a terminal or lists their names and `--profile DIRECTORY` values for a
+noninteractive caller. It copies the extension and bridge into `~/Library/Application Support/browser-cli/chrome-background/`,
 registers the native messaging host in Chrome, and requests `chrome://extensions/` in the selected
 profile. Verify the profile before loading: if Chrome opens a different profile, switch manually.
 Turn on **Developer mode**, click **Load unpacked**, and select the extension directory printed by
@@ -37,6 +38,11 @@ it reports the setup command and asks the caller to obtain consent first. Setup 
 requested page. The installer returns after printing the manual loading instructions; it does not
 wait for Chrome to connect. After loading the extension, run `install-background --check` (with
 `--browser chrome`) to confirm the connection without opening a tab.
+
+To uninstall, remove **browser-cli Background Tabs** from `chrome://extensions/` in every profile
+where it was loaded, then run `browser-cli --browser chrome uninstall-background`. The command
+removes only the staged files and native host registration, not the CLI or Chrome profile data.
+If you never loaded the extension, run the uninstall command directly.
 
 After setup, `browser-cli --browser chrome open --background https://example.com/` reuses a
 matching tab or adds an unselected tab without activating Chrome. It searches only within the

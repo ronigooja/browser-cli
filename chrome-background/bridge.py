@@ -23,6 +23,7 @@ HOST = "com.browser_cli.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/browser-cli/chrome-background"
 SETUP = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome install-background"
+REMOVE = f"{shlex.quote(os.environ.get('BROWSER_CLI_PATH', './browser-cli'))} --browser chrome uninstall-background"
 LIMIT = 65536
 
 
@@ -184,19 +185,25 @@ def host_manifest():
     return CHROME / "NativeMessagingHosts" / f"{HOST}.json"
 
 
-def setup_state():
+def loaded_profiles(origin, *, strict=False):
     # Chrome records unpacked extensions in either profile preferences file.
     # A missing entry is not proof that an extension is absent (e.g. custom profiles).
-    source = Path(__file__).resolve().parent / "extension"
-    identifier = extension_origin(source).split("/")[2]
+    identifier = origin.split("/")[2]
     for filename in ("Preferences", "Secure Preferences"):
         for path in CHROME.glob(f"*/{filename}"):
             try:
                 preferences = json.loads(path.read_text(encoding="utf-8"))
                 if identifier in preferences.get("extensions", {}).get("settings", {}):
-                    return "loaded"
+                    yield path.parent.name
             except (OSError, ValueError, AttributeError, TypeError):
+                if strict:
+                    raise ValueError(f"Could not check Chrome profile {path.parent.name!r}; no files removed") from None
                 continue
+
+
+def setup_state():
+    if any(loaded_profiles(extension_origin(Path(__file__).resolve().parent / "extension"))):
+        return "loaded"
     if host_manifest().is_file() and (INSTALL / "extension/manifest.json").is_file():
         return "pending"
     return "missing"
@@ -235,7 +242,7 @@ def check_setup():
     return False
 
 
-def choose_profile():
+def choose_profile(selected=None):
     try:
         state = json.loads((CHROME / "Local State").read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -247,19 +254,25 @@ def choose_profile():
                 and Path(key).name == key and (CHROME / key).is_dir()
                 and not info.get("is_omitted")]
     if not profiles:
+        if selected not in (None, "Default"):
+            raise ValueError("No matching Chrome profile; the only available profile is Default")
         return "Default", "Default"
     names = {key: cache[key].get("name") or key for key in profiles}
     labels = {key: f"{name!r} ({key!r})" if list(names.values()).count(name) > 1 else repr(name)
               for key, name in names.items()}
-    if len(profiles) == 1:
+    if selected in labels:
+        return selected, labels[selected]
+    if selected is None and len(profiles) == 1:
         key = profiles[0]
         return key, labels[key]
     profiles.sort(key=lambda key: (key != profile.get("last_used"), key))
     for index, key in enumerate(profiles, 1):
         # Escape control characters from the profile name before writing to a terminal.
-        print(f"  {index}. {labels[key]}", file=sys.stderr)
-    if not sys.stdin.isatty():
-        raise ValueError("Multiple Chrome profiles found; rerun this command in an interactive terminal to choose one")
+        print(f"  {index}. {labels[key]} — --profile {shlex.quote(key)}", file=sys.stderr)
+    if selected is not None:
+        raise ValueError("Unknown Chrome profile directory; choose one of the listed --profile values")
+    if not sys.stdin.isatty() or not sys.stderr.isatty():
+        raise ValueError(f"Multiple Chrome profiles found. Ask the user which profile to use, then run `{SETUP} --profile <directory>` with its listed directory. No changes made.")
     try:
         print("Choose a Chrome profile number: ", end="", file=sys.stderr, flush=True)
         choice = int(input())
@@ -284,9 +297,9 @@ def atomic_write(path, content, mode):
                 temporary.unlink()
 
 
-def install():
+def install(selected=None):
     source = Path(__file__).resolve().parent
-    profile, label = choose_profile()
+    profile, label = choose_profile(selected)
     extension = INSTALL / "extension"
     extension.mkdir(parents=True, exist_ok=True)
     for filename in ("manifest.json", "background.js"):
@@ -311,11 +324,47 @@ def install():
     print(f"Setup is pending until Chrome loads and connects the extension. After loading it, run `{SETUP} --check`.")
 
 
+def uninstall():
+    origin = extension_origin(Path(__file__).resolve().parent / "extension")
+    profiles = sorted(set(loaded_profiles(origin, strict=True)))
+    with connected_client(time.monotonic() + 1) as client:
+        connected = client is not None
+    if profiles or connected:
+        where = " (" + ", ".join(map(repr, profiles)) + ")" if profiles else ""
+        raise ValueError(f"Remove browser-cli Background Tabs in chrome://extensions/ in each profile where it is loaded{where}, then run `{REMOVE}` again. No files removed.")
+
+    destination = host_manifest()
+    # Do not follow directory symlinks into other locations or remove another host's registration.
+    for directory in (CHROME, destination.parent, INSTALL.parent, INSTALL, INSTALL / "extension"):
+        if directory.is_symlink():
+            raise ValueError(f"Refusing to remove files through a symlink: {directory}")
+    if destination.is_symlink():
+        raise ValueError(f"Refusing to remove a symlinked host registration: {destination}")
+    if destination.exists():
+        registration = json.loads(destination.read_text(encoding="utf-8"))
+        if (not isinstance(registration, dict) or registration.get("name") != HOST
+                or registration.get("path") != str(INSTALL / "native-host")
+                or registration.get("allowed_origins") != [origin]):
+            raise ValueError(f"Unrecognized host registration; no files removed: {destination}")
+    files = [destination, INSTALL / "native-host", INSTALL / "bridge.py",
+             INSTALL / "extension/manifest.json", INSTALL / "extension/background.js"]
+    if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in files):
+        raise ValueError("Unexpected file type in Chrome background setup; no files removed")
+    for path in files:
+        path.unlink(missing_ok=True)
+    for directory in (INSTALL / "extension", INSTALL):
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+    print("Chrome background setup files and host registration removed (if present).")
+
+
 def main():
     command, *args = sys.argv[1:]
     try:
         if command == "install":
-            install()
+            install(*args)
+        elif command == "uninstall":
+            uninstall()
         elif command == "check":
             if not check_setup():
                 require_connection(setup_state())

@@ -28,8 +28,10 @@ browser-cli help | version
   open (--foreground | --background) <url>
                                 match a URL prefix or open a page; prints <target> <TAB> reused|created
                                 target: id:<tab-id> for Chrome background; otherwise <window>:<tab>
-  install-background            Chrome only: prepare setup; you then click Load unpacked in Chrome
+  install-background [--profile DIRECTORY]
+                                Chrome only: prepare setup; you then click Load unpacked in Chrome
                                 --check reports whether the extension is connected
+  uninstall-background          Chrome only: remove setup files after removing the extension in Chrome
   close [--tab T]               close a tab
   eval [--tab T] <js>           run a JavaScript expression, print its value (strings as is, others as JSON)
   file [--tab T] <path.js>      same, with the expression read from a file
@@ -360,8 +362,18 @@ cmd_install_background() {
     chrome_background check
     return
   fi
-  [ "$#" -eq 0 ] || usage_error 'install-background accepts only --check'
+  if [ "$#" -eq 2 ] && [ "$1" = --profile ] && [[ "$2" != --* ]] && [ -n "$2" ]; then
+    chrome_background install "$2"
+    return
+  fi
+  [ "$#" -eq 0 ] || usage_error 'install-background accepts --check or --profile DIRECTORY'
   chrome_background install
+}
+
+cmd_uninstall_background() {
+  [ "$BROWSER" = chrome ] || usage_error 'uninstall-background requires --browser chrome'
+  [ "$#" -eq 0 ] || usage_error 'uninstall-background takes no options or arguments'
+  chrome_background uninstall
 }
 
 cmd_open() {
@@ -1383,6 +1395,7 @@ case "$cmd" in
   help|-h|--help) usage ;;
   --version|version) echo "$VERSION" ;;
   install-background) cmd_install_background "$@" ;;
+  uninstall-background) cmd_uninstall_background "$@" ;;
   tabs|open|close|eval|file|wait|wait-challenge|status|info|text|links|html|snapshot|screenshot|click|fill|select|press|scroll|submit)
     parse "$@"
     [ -n "$BROWSER" ] || { echo 'browser-cli: --browser safari|chrome is required' >&2; exit 2; }
