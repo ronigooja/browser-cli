@@ -313,7 +313,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(output["reason"], "safari_production_host_unavailable")
         self.safari.state = "permission_required"
         output = self.setup("check", browser="safari")
-        self.assertIn("all websites once", output["instructions"])
+        self.assertIn("grant all HTTP(S) access once", output["instructions"])
+        self.assertIn("AGENT_BROWSER_SAFARI_PROFILE", output["instructions"])
         self.assertEqual(self.safari.install_calls, [])
 
     def test_chrome_setup_adapter_stages_without_launching_and_does_not_pollute_stdout(self):
