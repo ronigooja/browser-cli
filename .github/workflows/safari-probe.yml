@@ -26,3 +26,18 @@ jobs:
           app="$RUNNER_TEMP/safari-probe/Build/Products/Debug/SafariProbe.app"
           test -f "$app/Contents/PlugIns/SafariProbeExtension.appex/Contents/Resources/manifest.json"
           "$app/Contents/MacOS/SafariProbe" verify-gate
+      - name: Build and verify the Safari backend
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/agent-browser-safari.log"
+          if ! xcodebuild -project safari-background/AgentBrowserSafari.xcodeproj -scheme AgentBrowserSafari \
+            -configuration Release -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/agent-browser-safari" CODE_SIGNING_ALLOWED=NO build >"$log" 2>&1; then
+            tail -80 "$log"
+            exit 1
+          fi
+          app="$RUNNER_TEMP/agent-browser-safari/Build/Products/Release/AgentBrowserSafari.app"
+          bundle="$app/Contents/PlugIns/AgentBrowserSafariExtension.appex/Contents/Resources"
+          cmp extension/shared/read-page.js "$bundle/read-page.js"
+          test -f "$bundle/manifest.json"
+          "$app/Contents/MacOS/AgentBrowserSafari" verify-gate

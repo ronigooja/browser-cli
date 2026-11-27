@@ -62,7 +62,7 @@ def default_backends(root=None):
     root = Path(root) if root is not None else Path(__file__).resolve().parent
     routes = {
         "chrome": ("chrome-background", ChromeBackend, "chrome_transport_unavailable"),
-        "safari": ("safari", ExtensionBackend, "safari_production_host_unavailable"),
+        "safari": ("safari-background", ExtensionBackend, "safari_production_host_unavailable"),
     }
     backends = {}
     for name, (folder, adapter, reason) in routes.items():
