@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import select
+import socket
 import subprocess
 import sys
 import tempfile
@@ -162,6 +163,160 @@ class BackgroundTest(unittest.TestCase):
             bridge.install(open_settings=False)
             self.assertFalse(bridge.staged_update_required())
             self.assertEqual(bridge.request("status", {}, 3), {"status": "disconnected"})
+
+    def stage_wake_setup(self):
+        self.enterContext(patch.object(bridge, "CHROME", Path.home() / "chrome"))
+        self.enterContext(patch.object(bridge, "INSTALL", Path.home() / "install"))
+        self.enterContext(patch.object(bridge.sys, "platform", "darwin"))
+        profile = bridge.CHROME / "Profile 2"
+        profile.mkdir(parents=True)
+        local_state = bridge.CHROME / "Local State"
+        local_state.write_text(json.dumps({"profile": {"info_cache": {profile.name: {"name": "Work"}}}}))
+        with patch.object(sys, "stdout", io.StringIO()):
+            bridge.install()
+        identifier = bridge.extension_origin(SOURCE / "extension").split("/")[2]
+        entry = {"location": 4, "path": str(bridge.INSTALL / "extension"), "disable_reasons": []}
+        settings = {"extensions": {"settings": {identifier: entry}}}
+        (profile / "Preferences").write_text(json.dumps({"extensions": {"ui": {"developer_mode": True}}}))
+        prefs = profile / "Secure Preferences"
+        prefs.write_text(json.dumps(settings))
+        return profile, prefs, settings, entry
+
+    def test_wake_uses_status_only_and_one_bounded_attempt(self):
+        profile, _, _, _ = self.stage_wake_setup()
+        client = Mock()
+        with patch.object(bridge, "connected_client", side_effect=[nullcontext(None), nullcontext(None), nullcontext(client)]) as connect, \
+                patch.object(bridge, "notify_running_chrome", return_value=True) as notify, \
+                patch.object(bridge, "receive", return_value={"v": bridge.PROTOCOL, "id": "0" * 32, "status": "ok"}), \
+                patch.object(bridge.secrets, "token_hex", return_value="0" * 32):
+            self.assertEqual(bridge.request("wake", {}, 5), {"status": "ok"})
+        initial_deadline = connect.call_args_list[0].args[0]
+        wake_deadline = notify.call_args.args[1]
+        notify.assert_called_once_with(profile.name, wake_deadline)
+        self.assertLess(wake_deadline, initial_deadline)
+        self.assertEqual(connect.call_args_list[-1].args[0], wake_deadline)
+        client.sendall.assert_called_once()
+        message = json.loads(client.sendall.call_args.args[0][4:])
+        self.assertEqual((message["operation"], message["payload"]), ("status", {}))
+        self.assertEqual(bridge.request("wake", {"url": "https://example.com"}, 5), {"status": "invalid_request"})
+        with self.assertRaisesRegex(ValueError, "Invalid Chrome background request"):
+            bridge.native_request(dict(message, operation="wake"))
+
+    def test_no_wake_for_ordinary_requests_or_when_host_reconnects_itself(self):
+        self.stage_wake_setup()
+        with patch.object(bridge, "notify_running_chrome") as notify:
+            self.assertFalse(bridge.check_setup())
+            for operation in ("status", "find", "open", "read"):
+                self.assertEqual(bridge.request(operation, {}, 3), {"status": "disconnected"})
+            self.assertEqual(bridge.request("close", {}, 3), {"status": "cleanup_instance_changed"})
+            for connected_on_first_check in (True, False):
+                client = Mock()
+                connections = [nullcontext(client)] if connected_on_first_check else [nullcontext(None), nullcontext(client)]
+                with patch.object(bridge, "connected_client", side_effect=connections), \
+                        patch.object(bridge, "receive", return_value={"v": bridge.PROTOCOL, "id": "0" * 32, "status": "ok"}), \
+                        patch.object(bridge.secrets, "token_hex", return_value="0" * 32):
+                    self.assertEqual(bridge.request("wake", {}, 5), {"status": "ok"})
+            notify.assert_not_called()
+
+    def test_wake_requires_unambiguous_enabled_regular_profile_and_current_registration(self):
+        profile, prefs, settings, entry = self.stage_wake_setup()
+        self.assertEqual(bridge.wake_profile(), profile.name)
+        for fields in ({"disable_reasons": [1]}, {"disable_reasons": 1}, {"state": 0}, {"blacklist_state": 1},
+                       {"path": "/other/extension"}, {"location": 8}):
+            with self.subTest(fields=fields):
+                entry.update(fields)
+                prefs.write_text(json.dumps(settings))
+                self.assertIsNone(bridge.wake_profile())
+                for field in fields:
+                    entry.pop(field)
+                entry.update(location=4, path=str(bridge.INSTALL / "extension"), disable_reasons=[])
+        prefs.write_text(json.dumps(settings))
+        main_prefs = profile / "Preferences"
+        before = main_prefs.read_bytes()
+        main_prefs.write_text(json.dumps({"extensions": {"ui": {"developer_mode": False}}}))
+        self.assertIsNone(bridge.wake_profile())
+        main_prefs.write_bytes(before)
+        local_state = bridge.CHROME / "Local State"
+        state = local_state.read_bytes()
+        for attrs in ({"is_omitted": True}, {"is_ephemeral": True}, {"force_signin_profile_locked": True}):
+            local_state.write_text(json.dumps({"profile": {"info_cache": {profile.name: attrs}}}))
+            self.assertIsNone(bridge.wake_profile())
+        local_state.write_bytes(state)
+        copy = bridge.CHROME / "Undiscoverable Profile"
+        copy.mkdir()
+        other = copy / "Preferences"
+        other.write_text(json.dumps(settings))
+        with patch.object(bridge, "notify_running_chrome") as notify:
+            self.assertEqual(bridge.request("wake", {}, 3), {"status": "disconnected"})
+            other.write_text("invalid JSON")
+            self.assertEqual(bridge.request("wake", {}, 3), {"status": "disconnected"})
+            other.unlink()
+            host = bridge.INSTALL / "bridge.py"
+            host.write_text("PROTOCOL = 1\n")
+            self.assertEqual(bridge.request("wake", {}, 3), {"status": "disconnected"})
+            host.write_text(f"PROTOCOL = {bridge.PROTOCOL}\n")
+            manifest = bridge.host_manifest()
+            registration = json.loads(manifest.read_bytes())
+            manifest.write_text(json.dumps(dict(registration, allowed_origins=["chrome-extension://wrong/"])))
+            self.assertEqual(bridge.request("wake", {}, 3), {"status": "disconnected"})
+            notify.assert_not_called()
+
+    def test_wake_sends_only_silent_profile_load_to_verified_live_singleton(self):
+        profile, _, _, _ = self.stage_wake_setup()
+        pid = 314
+        target = Path.home() / "singleton" / "SingletonSocket"
+        target.parent.mkdir(mode=0o700)
+        listener = self.enterContext(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+        listener.bind(str(target))
+        listener.listen()
+        listener.settimeout(3)
+        (bridge.CHROME / "SingletonSocket").symlink_to(target)
+        (bridge.CHROME / "SingletonLock").symlink_to(f"{socket.gethostname()}-{pid}")
+        (bridge.CHROME / "SingletonCookie").symlink_to("cookie")
+        remote_cookie = target.parent / "SingletonCookie"
+        remote_cookie.symlink_to("wrong")
+        executable = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        with patch.object(bridge, "singleton_peer_pid", return_value=pid) as peer, \
+                patch.object(bridge, "chrome_executable", return_value=executable), \
+                patch.object(bridge, "chrome_has_no_windows", return_value=False) as no_windows:
+            deadline = lambda: time.monotonic() + 3
+            self.assertFalse(bridge.notify_running_chrome(profile.name, deadline()))
+            peer.assert_not_called()
+            remote_cookie.unlink()
+            remote_cookie.symlink_to("cookie")
+            peer.return_value = pid + 1
+            self.assertFalse(bridge.notify_running_chrome(profile.name, deadline()))
+            with listener.accept()[0] as client:
+                self.assertEqual(client.recv(4096), b"")
+            no_windows.assert_not_called()
+            peer.return_value = pid
+            for observation in (False, None):
+                no_windows.return_value = observation
+                self.assertFalse(bridge.notify_running_chrome(profile.name, deadline()))
+                with listener.accept()[0] as client:
+                    self.assertEqual(client.recv(4096), b"")
+            no_windows.return_value = True
+            observed = []
+
+            def chrome():
+                with listener.accept()[0] as client:
+                    client.settimeout(3)
+                    observed.append(client.recv(4096))
+                    client.sendall(b"ACK")
+
+            thread = threading.Thread(target=chrome)
+            thread.start()
+            try:
+                self.assertTrue(bridge.notify_running_chrome(profile.name, deadline()))
+            finally:
+                thread.join(3)
+            self.assertEqual(observed[0].split(b"\0"), [b"START", os.fsencode(bridge.CHROME), os.fsencode(executable),
+                                                        b"--profile-directory=Profile 2", b"--no-startup-window"])
+            with self.assertRaises(TimeoutError):
+                bridge.notify_running_chrome(profile.name, time.monotonic() - 1)
+            listener.close()
+            with self.assertRaises(ConnectionRefusedError):
+                bridge.notify_running_chrome(profile.name, deadline())
 
     def test_installer_refuses_browser_launch(self):
         with self.assertRaisesRegex(ValueError, "Launching Chrome is not supported"):

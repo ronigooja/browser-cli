@@ -1,11 +1,14 @@
 """Installer, local request client, and native messaging host for Chrome."""
 
+import ast
 import base64
 from contextlib import ExitStack, contextmanager
+import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import select
 import secrets
 import shlex
@@ -24,6 +27,8 @@ INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-backgr
 LIMIT = 65536
 PROTOCOL = 2
 OPERATIONS = {"status", "find", "open", "read", "close"}
+WAKE_WAIT = 2
+WAKE_POLL = 0.05
 
 
 def runtime_dir(*, create=True):
@@ -191,11 +196,16 @@ class AmbiguousConnection(ValueError):
 
 
 def request(operation, payload, timeout):
-    """Call the installed extension without invoking the CLI, Apple Events, or Chrome.
+    """Call the installed extension without Apple Events or launching Chrome.
 
-    Status calls accept {} or None. The timeout is in seconds. Transport failures
-    after dispatch never replay a write; callers must not retry unconfirmed writes.
+    Only the local wake operation may request a silent profile load before status.
+    The timeout is in seconds. Transport failures never replay uncertain writes.
     """
+    wake = isinstance(operation, str) and operation == "wake"
+    if wake:
+        if not isinstance(payload, dict) or payload:
+            return {"status": "invalid_request"}
+        operation = "status"
     if operation == "status" and payload is None:
         payload = {}
     if (not isinstance(operation, str) or operation not in OPERATIONS or not isinstance(payload, dict)
@@ -210,14 +220,18 @@ def request(operation, payload, timeout):
         return {"status": "invalid_request"}
     dispatched = False
     try:
-        with connected_client(deadline) as client:
+        with ExitStack() as stack:
+            client = stack.enter_context(connected_client(deadline))
             if client is None:
                 state = setup_state(ignore_empty=True)
                 if operation == "close":
                     return {"status": "cleanup_instance_changed"}
                 if state != "missing" and staged_update_required():
                     return {"status": "disconnected", "update_required": True}
-                return {"status": {"missing": "extension_required", "pending": "pending", "loaded": "disconnected"}[state]}
+                if wake and state == "loaded":
+                    client = stack.enter_context(woken_client(deadline))
+                if client is None:
+                    return {"status": {"missing": "extension_required", "pending": "pending", "loaded": "disconnected"}[state]}
             # Older hosts and workers reject this version before dispatching any write.
             client.settimeout(remaining_time(deadline))
             dispatched = True
@@ -347,6 +361,257 @@ def discover_profiles():
     return {key: names[key] for key in sorted(names, key=lambda key: (key != profile.get("last_used"), key))}
 
 
+def wake_profile():
+    """Return a verified regular profile, or None if there is insufficient evidence."""
+    source = Path(__file__).resolve().parent
+    extension = INSTALL / "extension"
+    launcher = INSTALL / "native-host"
+    host = INSTALL / "bridge.py"
+    manifest = host_manifest()
+    local_state = CHROME / "Local State"
+    files = (local_state, manifest, host, launcher, extension / "manifest.json",
+             extension / "background.js", extension / "read-page.js")
+    if (any(path.is_symlink() for path in (CHROME, manifest.parent, INSTALL.parent, INSTALL, extension, *files))
+            or not all(path.is_file() for path in files)):
+        return None
+    origin = extension_origin(source / "extension")
+    registration = json.loads(manifest.read_bytes())
+    if (registration.get("name") != HOST or registration.get("type") != "stdio"
+            or registration.get("path") != str(launcher) or registration.get("allowed_origins") != [origin]
+            or not os.access(launcher, os.X_OK)):
+        return None
+    for name, bundled in (("manifest.json", source / "extension/manifest.json"),
+                          ("background.js", source / "extension/background.js"),
+                          ("read-page.js", source.parent / "extension/shared/read-page.js")):
+        if (extension / name).read_bytes() != bundled.read_bytes():
+            return None
+    # Existing installs need not contain this local-only recovery code. Verify their
+    # native protocol and the installer-generated launcher without executing either.
+    nodes = ast.parse(host.read_bytes()).body
+    versions = [node.value.value for node in nodes if isinstance(node, ast.Assign)
+                and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "PROTOCOL" and isinstance(node.value, ast.Constant)]
+    if len(versions) != 1 or type(versions[0]) is not int or versions[0] != PROTOCOL:
+        return None
+    script = launcher.read_text(encoding="utf-8")
+    args = shlex.split(script.splitlines()[1])
+    if (len(args) != 6 or not Path(args[1]).is_absolute() or not os.access(args[1], os.X_OK)
+            or script != native_launcher(args[1], host).decode()):
+        return None
+
+    identifier = origin.split("/")[2]
+    profiles = {}
+    developer_profiles = set()
+    disabled_profiles = set()
+    for directory in CHROME.iterdir():
+        if not directory.is_dir():
+            continue
+        for name in ("Preferences", "Secure Preferences"):
+            path = directory / name
+            if path.is_symlink():
+                return None
+            try:
+                if not stat.S_ISREG(path.stat().st_mode):
+                    return None
+                preferences = json.loads(path.read_bytes()).get("extensions", {})
+            except FileNotFoundError:
+                continue
+            settings = preferences.get("settings", {})
+            if not isinstance(settings, dict):
+                return None
+            entry = settings.get(identifier, {})
+            if entry != {}:
+                profiles.setdefault(directory.name, []).append(entry)
+            developer_mode = preferences.get("ui", {}).get("developer_mode")
+            if developer_mode is True:
+                developer_profiles.add(directory.name)
+            if preferences.get("disabled") or developer_mode is False:
+                disabled_profiles.add(directory.name)
+    if len(profiles) != 1:
+        return None
+    profile, = profiles
+    attrs = json.loads(local_state.read_bytes())["profile"]["info_cache"][profile]
+    if (profile not in developer_profiles or profile in disabled_profiles
+            or profile in ("System Profile", "Guest Profile") or profile.startswith("-") or "\\" in profile
+            or not profile.isprintable() or profile != profile.strip() or (CHROME / profile).is_symlink()
+            or attrs.get("is_omitted") or attrs.get("is_ephemeral") or attrs.get("force_signin_profile_locked")):
+        return None
+    for entry in profiles[profile]:
+        reasons = entry.get("disable_reasons", [])
+        if (type(entry.get("location")) is not int or entry["location"] != 4
+                or entry.get("path") != str(extension) or not (reasons == [] or type(reasons) is int and reasons == 0)
+                or ("state" in entry and (type(entry["state"]) is not int or entry["state"] != 1))
+                or any(entry.get(key, 0) for key in ("blacklist", "blacklist_state", "omaha_blocklist_state",
+                                                   "extension_telemetry_service_blocklist_state"))):
+            return None
+    return profile
+
+
+def native_function(library, name, result, *args):
+    function = getattr(library, name)
+    function.restype = result
+    function.argtypes = args
+    return function
+
+
+def chrome_executable(pid):
+    libproc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    proc_pidpath = native_function(libproc, "proc_pidpath", ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+    path = ctypes.create_string_buffer(4096)
+    if not 0 < proc_pidpath(pid, path, len(path)) < len(path):
+        return None
+    executable = Path(os.fsdecode(path.value))
+    if executable.parts[-3:] != ("Contents", "MacOS", "Google Chrome"):
+        return None
+    bundle = plistlib.loads((executable.parents[1] / "Info.plist").read_bytes())
+    if bundle.get("CFBundleIdentifier") != "com.google.Chrome" or bundle.get("CFBundleExecutable") != executable.name:
+        return None
+    return executable
+
+
+def chrome_has_no_windows(pid):
+    """Fail closed on unavailable Quartz data; count off-screen Chrome windows too."""
+    quartz = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    foundation = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    ptr, index = ctypes.c_void_p, ctypes.c_long
+    session_info = native_function(quartz, "CGSessionCopyCurrentDictionary", ptr)
+    window_info = native_function(quartz, "CGWindowListCopyWindowInfo", ptr, ctypes.c_uint32, ctypes.c_uint32)
+    release = native_function(foundation, "CFRelease", None, ptr)
+    count = native_function(foundation, "CFArrayGetCount", index, ptr)
+    get_item = native_function(foundation, "CFArrayGetValueAtIndex", ptr, ptr, index)
+    get_value = native_function(foundation, "CFDictionaryGetValue", ptr, ptr, ptr)
+    number_value = native_function(foundation, "CFNumberGetValue", ctypes.c_ubyte, ptr, index, ptr)
+    type_id = native_function(foundation, "CFGetTypeID", ctypes.c_ulong, ptr)
+    number_type = native_function(foundation, "CFNumberGetTypeID", ctypes.c_ulong)()
+    make_string = native_function(foundation, "CFStringCreateWithCString", ptr, ptr, ctypes.c_char_p, ctypes.c_uint32)
+    owner_pid = ptr.in_dll(quartz, "kCGWindowOwnerPID")
+    session = session_info()
+    if not session:
+        return False
+    try:
+        # Never infer a windowless browser from a background/non-console session.
+        for name, expected in ((b"kCGSSessionOnConsoleKey", ptr.in_dll(foundation, "kCFBooleanTrue").value),
+                               (b"kCGSSessionUserIDKey", None)):
+            key = make_string(None, name, 0x08000100)  # kCFStringEncodingUTF8
+            if not key:
+                return False
+            try:
+                value = get_value(session, key)
+            finally:
+                release(key)
+            if not value:
+                return False
+            if expected is not None:
+                if value != expected:
+                    return False
+            else:
+                uid = ctypes.c_int()
+                if type_id(value) != number_type or not number_value(value, 9, ctypes.byref(uid)) or uid.value != os.getuid():
+                    return False
+    finally:
+        release(session)
+    windows = window_info(0, 0)  # kCGWindowListOptionAll, kCGNullWindowID
+    if not windows:
+        return False
+    try:
+        size = count(windows)
+        if size <= 0:  # No positive evidence that this is a working GUI session.
+            return False
+        for i in range(size):
+            window = get_item(windows, i)
+            owner = get_value(window, owner_pid) if window else None
+            value = ctypes.c_int()
+            if (not owner or type_id(owner) != number_type
+                    or not number_value(owner, 9, ctypes.byref(value)) or value.value == pid):  # kCFNumberIntType
+                return False
+        return True
+    finally:
+        release(windows)
+
+
+def singleton_peer_pid(client):
+    return client.getsockopt(0, 2)  # Darwin SOL_LOCAL, LOCAL_PEERPID
+
+
+def notify_running_chrome(profile, deadline):
+    """Ask the existing singleton to load the profile, without starting any process."""
+    if sys.platform != "darwin":
+        return False
+    lock = CHROME / "SingletonLock"
+    endpoint = CHROME / "SingletonSocket"
+    cookie_path = CHROME / "SingletonCookie"
+    lock_target = os.readlink(lock)
+    hostname, _, pid_text = lock_target.rpartition("-")
+    if hostname != socket.gethostname() or not pid_text.isascii() or not pid_text.isdecimal():
+        return False
+    pid = int(pid_text)
+    if not 0 < pid < 2**31:
+        return False
+    target = Path(os.readlink(endpoint))
+    cookie = os.readlink(cookie_path)
+    peer_cookie = target.parent / cookie_path.name
+    if not target.is_absolute() or target.name != endpoint.name or not cookie:
+        return False
+    directory = target.parent.lstat()
+    if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid() or directory.st_mode & 0o077
+            or not stat.S_ISSOCK(target.lstat().st_mode) or os.readlink(peer_cookie) != cookie):
+        return False
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(remaining_time(deadline))
+        client.connect(str(target))
+        if singleton_peer_pid(client) != pid or not (executable := chrome_executable(pid)):
+            return False
+        if (os.readlink(lock) != lock_target or Path(os.readlink(endpoint)) != target
+                or os.readlink(cookie_path) != cookie or os.readlink(peer_cookie) != cookie):
+            return False
+        # Chromium ProcessSingleton's POSIX notification format: no URL, no launch,
+        # no user interaction, and no fallback if Chrome is gone or will not ACK.
+        argv = ("START", str(CHROME), str(executable), f"--profile-directory={profile}", "--no-startup-window")
+        if chrome_has_no_windows(pid) is not True:
+            return False
+        client.settimeout(remaining_time(deadline))
+        client.sendall(b"\0".join(map(os.fsencode, argv)))
+        reply = bytearray()
+        while len(reply) <= 3:
+            client.settimeout(remaining_time(deadline))
+            part = client.recv(4 - len(reply))
+            if not part:
+                return reply == b"ACK"
+            reply.extend(part)
+        return False
+
+
+@contextmanager
+def woken_client(deadline):
+    if sys.platform != "darwin":
+        yield None
+        return
+    try:
+        profile = wake_profile()
+    except (AttributeError, IndexError, KeyError, OSError, RecursionError, SyntaxError, TypeError, ValueError):
+        profile = None
+    if profile is not None:
+        # A host may have already connected while checking on-disk setup.
+        with connected_client(deadline) as client:
+            if client is not None:
+                yield client
+                return
+        reconnect_deadline = min(deadline, time.monotonic() + WAKE_WAIT)
+        try:
+            woken = notify_running_chrome(profile, reconnect_deadline)
+        except (AttributeError, OSError, TypeError, ValueError):
+            woken = False
+        if woken:
+            while time.monotonic() < reconnect_deadline:
+                with connected_client(reconnect_deadline) as client:
+                    if client is not None:
+                        yield client
+                        return
+                time.sleep(min(WAKE_POLL, max(0, reconnect_deadline - time.monotonic())))
+    yield None
+
+
 def choose_profile(selected=None):
     names = discover_profiles()
     if not names:
@@ -392,6 +657,10 @@ def atomic_write(path, content, mode):
                 temporary.unlink()
 
 
+def native_launcher(python, bridge):
+    return f'#!/bin/sh\nexec {shlex.quote(str(python))} -I {shlex.quote(str(bridge))} host "${{1-}}"\n'.encode()
+
+
 def install(selected=None, *, open_settings=False, timeout=None):
     """Stage bundled files without touching Chrome preferences; caller must obtain consent.
 
@@ -409,9 +678,7 @@ def install(selected=None, *, open_settings=False, timeout=None):
         atomic_write(extension / filename, files[filename], 0o644)
     atomic_write(INSTALL / "bridge.py", (source / "bridge.py").read_bytes(), 0o644)
     launcher = INSTALL / "native-host"
-    python = shlex.quote(str(Path(sys.executable).absolute()))
-    bridge = shlex.quote(str(INSTALL / "bridge.py"))
-    atomic_write(launcher, f'#!/bin/sh\nexec {python} -I {bridge} host "${{1-}}"\n'.encode(), 0o755)
+    atomic_write(launcher, native_launcher(Path(sys.executable).absolute(), INSTALL / "bridge.py"), 0o755)
     destination = host_manifest()
     destination.parent.mkdir(parents=True, exist_ok=True)
     manifest = {"name": HOST, "description": "agent-browser local Chrome extension transport",
