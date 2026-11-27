@@ -1,4 +1,4 @@
-"""Chrome native host, background-open client, and macOS installer."""
+"""Installer, local request client, and native messaging host for Chrome."""
 
 import base64
 from contextlib import ExitStack, contextmanager
@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import select
+import secrets
 import shlex
 import signal
 import socket
@@ -25,6 +26,8 @@ INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-backgr
 SETUP = f"{shlex.quote(os.environ.get('AGENT_BROWSER_PATH', './agent-browser'))} --browser chrome install-background"
 REMOVE = f"{shlex.quote(os.environ.get('AGENT_BROWSER_PATH', './agent-browser'))} --browser chrome uninstall-background"
 LIMIT = 65536
+PROTOCOL = 1
+OPERATIONS = {"status", "find", "open", "read", "close"}
 WAKE_WAIT = 2
 WAKE_POLL = 0.05
 CHROME_WINDOWS = (
@@ -46,10 +49,14 @@ def runtime_dir(*, create=True):
 
 
 def frame(message):
-    data = json.dumps(message).encode("utf-8")
+    data = json.dumps(message, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(data) > LIMIT:
         raise ValueError("Chrome background message is too large")
     return struct.pack("=I", len(data)) + data
+
+
+class InvalidFrameSize(ValueError):
+    pass
 
 
 def receive(fd, deadline):
@@ -67,7 +74,7 @@ def receive(fd, deadline):
 
     size, = struct.unpack("=I", exact(4))
     if not 0 < size <= LIMIT:
-        raise ValueError("Invalid Chrome background message size")
+        raise InvalidFrameSize("Invalid Chrome background message size")
     result = json.loads(exact(size))
     if not isinstance(result, dict):
         raise ValueError("Invalid Chrome background message")
@@ -84,6 +91,33 @@ def validate_url(url):
         raise ValueError("URLs with embedded credentials are not supported")
 
 
+def native_request(message):
+    expires = message.get("expires")
+    remaining = (expires - int(time.time() * 1000)) / 1000 if type(expires) is int else 0
+    if not 0 < remaining <= 86400:
+        raise ValueError("Invalid or expired Chrome background deadline")
+    if "v" in message:
+        if (type(message["v"]) is not int or message["v"] != PROTOCOL
+                or message.keys() != {"v", "id", "operation", "payload", "expires"}
+                or not isinstance(message["id"], str) or len(message["id"]) != 32
+                or not isinstance(message["operation"], str) or message["operation"] not in OPERATIONS
+                or not isinstance(message["payload"], dict)):
+            raise ValueError("Invalid Chrome background request")
+        return frame(message), remaining
+    url = message.get("url")
+    validate_url(url)
+    return frame({"url": url, "expires": expires}), remaining
+
+
+def response_too_large(request):
+    if "v" not in request:
+        return {"error": "Chrome background reply was too large; check Chrome before retrying"}
+    operation = request.get("operation")
+    status = ("open_unconfirmed" if operation == "open" else
+              "cleanup_unconfirmed" if operation == "close" else "response_too_large")
+    return {"v": PROTOCOL, "id": request.get("id"), "status": status}
+
+
 def serve(listener):
     while True:
         # A readable native stdin with no request in flight indicates disconnection.
@@ -92,33 +126,48 @@ def serve(listener):
             return
         client, _ = listener.accept()
         with client:
+            poison = False
             try:
                 request = receive(client.fileno(), time.monotonic() + 1)
             except (EOFError, ValueError, TimeoutError, OSError):
                 continue
 
             try:
-                url = request.get("url")
-                validate_url(url)
-                expires = request.get("expires")
-                remaining = (expires - int(time.time() * 1000)) / 1000 if type(expires) is int else 0
-                if not 0 < remaining <= 86400:
-                    raise ValueError("Invalid or expired Chrome background deadline")
-                request_bytes = frame({"url": url, "expires": expires})
+                request_bytes, remaining = native_request(request)
             except ValueError as error:
-                reply = {"error": str(error)}
+                if "v" in request:
+                    status = "timeout" if type(request.get("expires")) is int and request["expires"] <= time.time() * 1000 else "invalid_request"
+                    if request.get("operation") == "close":
+                        status = "cleanup_unconfirmed"
+                    reply = {"v": PROTOCOL, "id": request.get("id"), "status": status}
+                else:
+                    reply = {"error": str(error)}
             else:
                 # A missing reply terminates this connection; a late reply cannot
                 # be mistaken for the next operation. The extension reconnects.
                 sys.stdout.buffer.write(request_bytes)
                 sys.stdout.buffer.flush()
-                reply = receive(0, time.monotonic() + remaining)
+                try:
+                    reply = receive(0, time.monotonic() + remaining)
+                except InvalidFrameSize:
+                    # Do not drain an arbitrary amount of native input or reuse a
+                    # stream with unread bytes; reply explicitly before disconnecting.
+                    reply = response_too_large(request)
+                    poison = True
 
             try:
+                try:
+                    response_bytes = frame(reply)
+                except ValueError:
+                    # Native input is UTF-8; re-encoding as ASCII may expand it.
+                    # Never lose a write result without marking it unconfirmed.
+                    response_bytes = frame(response_too_large(request))
                 client.settimeout(1)
-                client.sendall(frame(reply))
+                client.sendall(response_bytes)
             except (OSError, ValueError):
                 pass
+            if poison:
+                return
 
 
 def native_host(origin):
@@ -132,7 +181,7 @@ def native_host(origin):
             listener.listen()
             try:
                 serve(listener)
-            except (EOFError, TimeoutError, BrokenPipeError):
+            except (EOFError, TimeoutError, BrokenPipeError, ValueError):
                 pass
 
 
@@ -161,9 +210,71 @@ def connected_client(deadline):
                 client.close()
                 continue
             if connected is not None:
-                raise ValueError("The agent-browser extension is connected in more than one Chrome profile. Leave it enabled only in the profile you want to use.")
+                raise AmbiguousConnection("The agent-browser extension is connected in more than one Chrome profile. Leave it enabled only in the profile you want to use.")
             connected = client
         yield connected
+
+
+class AmbiguousConnection(ValueError):
+    pass
+
+
+def request(operation, payload, timeout):
+    """Call the installed extension without invoking the CLI, Apple Events, or Chrome.
+
+    Status calls accept {} or None. The timeout is in seconds. Transport failures
+    after dispatch never replay a write; callers must not retry unconfirmed writes.
+    """
+    if operation == "status" and payload is None:
+        payload = {}
+    if (not isinstance(operation, str) or operation not in OPERATIONS or not isinstance(payload, dict)
+            or type(timeout) not in (int, float) or not 0 < timeout <= 86400):
+        return {"status": "invalid_request"}
+    deadline = time.monotonic() + timeout
+    message_id = secrets.token_hex(16)
+    try:
+        data = frame({"v": PROTOCOL, "id": message_id, "operation": operation, "payload": payload,
+                      "expires": int((time.time() + timeout) * 1000)})
+    except (TypeError, ValueError, RecursionError):
+        return {"status": "invalid_request"}
+    dispatched = False
+    try:
+        with connected_client(deadline) as client:
+            if client is None:
+                state = setup_state(ignore_empty=True)
+                if operation == "close":
+                    return {"status": "cleanup_instance_changed"}
+                if state != "missing" and staged_update_required():
+                    return {"status": "disconnected", "update_required": True}
+                return {"status": {"missing": "extension_required", "pending": "pending", "loaded": "disconnected"}[state]}
+            # Neither a legacy host nor a legacy extension accepts this envelope:
+            # the legacy open request requires an HTTP(S) URL at the top level.
+            client.settimeout(remaining_time(deadline))
+            dispatched = True
+            client.sendall(data)
+            reply = receive(client.fileno(), deadline)
+            if type(reply.get("v")) is not int or reply["v"] != PROTOCOL or reply.get("id") != message_id:
+                if "v" not in reply and "error" in reply:
+                    if operation == "close":
+                        return {"status": "cleanup_instance_changed"}
+                    return {"status": "disconnected", "update_required": True}
+                raise ValueError("Invalid Chrome background reply")
+            if not isinstance(reply.get("status"), str):
+                raise ValueError("Invalid Chrome background status")
+            if reply["status"] == "protocol_mismatch":
+                return {"status": "cleanup_instance_changed"} if operation == "close" else {
+                    "status": "disconnected", "update_required": True}
+            return {key: value for key, value in reply.items() if key not in ("v", "id")}
+    except AmbiguousConnection:
+        return {"status": "cleanup_unconfirmed" if operation == "close" else "ambiguous"}
+    except (OSError, EOFError, ValueError, RecursionError) as error:
+        if operation == "close":
+            return {"status": "cleanup_unconfirmed"}
+        if operation == "open" and dispatched:
+            return {"status": "open_unconfirmed"}
+        if operation != "status" and isinstance(error, TimeoutError):
+            return {"status": "timeout"}
+        return {"status": "disconnected"}
 
 
 def deliver_background_request(client, request, deadline):
@@ -231,14 +342,29 @@ def loaded_profiles(origin, *, strict=False, ignore_empty=False):
                 continue
 
 
-def setup_state():
+def setup_state(*, ignore_empty=None):
     origin = extension_origin(Path(__file__).resolve().parent / "extension")
     # Chrome can leave an empty entry after removal. Keep strict uninstall checks unchanged.
-    if any(loaded_profiles(origin, ignore_empty=os.environ.get("AGENT_BROWSER_MCP") == "1")):
+    if ignore_empty is None:
+        ignore_empty = os.environ.get("AGENT_BROWSER_MCP") == "1"
+    if any(loaded_profiles(origin, ignore_empty=ignore_empty)):
         return "loaded"
     if host_manifest().is_file() and (INSTALL / "extension/manifest.json").is_file():
         return "pending"
     return "missing"
+
+
+def staged_update_required():
+    source = Path(__file__).resolve().parent / "extension" / "manifest.json"
+    target = INSTALL / "extension" / "manifest.json"
+    if not target.is_file():
+        return False
+    try:
+        current = json.loads(source.read_bytes())["version"]
+        installed = json.loads(target.read_bytes())["version"]
+        return current != installed or not (target.parent / "read-page.js").is_file()
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
 
 
 def loading_instructions():
@@ -284,10 +410,15 @@ def offer_setup():
 
 
 def check_setup():
-    with connected_client(time.monotonic() + 1) as client:
-        if client is not None:
-            print("Chrome background setup complete. You can retry open --background.")
-            return True
+    result = request("status", {}, 1)
+    if result["status"] == "ok":
+        print("Chrome background setup complete. You can retry open --background.")
+        return True
+    if result.get("update_required"):
+        raise ConnectionRequired("loaded", "Agent Browser must be updated before connecting. With the user's approval, "
+                                 f"stage the current version via `{SETUP}`, then reload it in the intended regular Chrome profile.")
+    if result["status"] == "ambiguous":
+        raise AmbiguousConnection("Leave Agent Browser enabled in only one regular Chrome profile before checking again.")
     return False
 
 
@@ -437,13 +568,21 @@ def atomic_write(path, content, mode):
                 temporary.unlink()
 
 
-def install(selected=None):
+def install(selected=None, *, open_settings=True, timeout=None):
+    """Stage bundled files without touching Chrome preferences; caller must obtain consent.
+
+    Raises ValueError for profile selection, OSError for staging, and
+    subprocess.SubprocessError for a settings launch failure (files may be staged).
+    Pass open_settings=False to stage and print instructions without launching Chrome.
+    """
     source = Path(__file__).resolve().parent
     profile, label = choose_profile(selected)
     extension = INSTALL / "extension"
+    files = {name: (source / "extension" / name).read_bytes() for name in ("manifest.json", "background.js")}
+    files["read-page.js"] = (source.parent / "extension/shared/read-page.js").read_bytes()
     extension.mkdir(parents=True, exist_ok=True)
-    for filename in ("manifest.json", "background.js"):
-        atomic_write(extension / filename, (source / "extension" / filename).read_bytes(), 0o644)
+    for filename in ("read-page.js", "background.js", "manifest.json"):
+        atomic_write(extension / filename, files[filename], 0o644)
     atomic_write(INSTALL / "bridge.py", (source / "bridge.py").read_bytes(), 0o644)
     launcher = INSTALL / "native-host"
     python = shlex.quote(str(Path(sys.executable).absolute()))
@@ -451,15 +590,16 @@ def install(selected=None):
     atomic_write(launcher, f'#!/bin/sh\nexec {python} -I {bridge} host "${{1-}}"\n'.encode(), 0o755)
     destination = host_manifest()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {"name": HOST, "description": "agent-browser Chrome background tabs",
+    manifest = {"name": HOST, "description": "agent-browser local Chrome extension transport",
                 "path": str(launcher), "type": "stdio", "allowed_origins": [extension_origin(extension)]}
     atomic_write(destination, (json.dumps(manifest, indent=2) + "\n").encode(), 0o644)
 
     print(f"Finish setup in Chrome profile {label}.")
     print("If the extensions page does not open in that profile, go to chrome://extensions/ there.")
     print(loading_instructions(), flush=True)
-    subprocess.run(["/usr/bin/open", "-na", "Google Chrome", "--args",
-                    f"--profile-directory={profile}", "chrome://extensions/"], check=True)
+    if open_settings:
+        subprocess.run(["/usr/bin/open", "-na", "Google Chrome", "--args",
+                        f"--profile-directory={profile}", "chrome://extensions/"], check=True, timeout=timeout)
     print(f"Setup is pending until Chrome loads and connects the extension. After loading it, run `{SETUP} --check`.")
 
 
@@ -486,7 +626,7 @@ def uninstall():
                 or registration.get("allowed_origins") != [origin]):
             raise ValueError(f"Unrecognized host registration; no files removed: {destination}")
     files = [destination, INSTALL / "native-host", INSTALL / "bridge.py",
-             INSTALL / "extension/manifest.json", INSTALL / "extension/background.js"]
+             INSTALL / "extension/manifest.json", INSTALL / "extension/background.js", INSTALL / "extension/read-page.js"]
     if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in files):
         raise ValueError("Unexpected file type in Chrome background setup; no files removed")
     for path in files:

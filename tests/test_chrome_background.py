@@ -8,6 +8,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -74,6 +75,92 @@ class BackgroundTest(unittest.TestCase):
         self.assertEqual(client.communicate(timeout=3), ("id:42\tcreated\n", ""))
         self.assertEqual(client.returncode, 0)
 
+    def production_round_trip(self, host, operation, payload, replies):
+        observed = []
+
+        def extension():
+            message = bridge.receive(host.stdout.fileno(), time.monotonic() + 3)
+            observed.append(message)
+            for reply in replies(message):
+                host.stdin.write(reply)
+                host.stdin.flush()
+
+        thread = threading.Thread(target=extension)
+        thread.start()
+        try:
+            return bridge.request(operation, payload, 3), observed
+        finally:
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+
+    def test_native_versioned_round_trip(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        response, observed = self.production_round_trip(host, "find", {"url": "https://example.com"},
+            lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok", "tabs": []})])
+        self.assertEqual(response, {"status": "ok", "tabs": []})
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["operation"], "find")
+        self.assertEqual(observed[0]["payload"], {"url": "https://example.com"})
+        self.assertNotIn("url", observed[0])  # A legacy receiver can't perform a write.
+
+    def test_reencoding_an_oversize_response_does_not_disconnect(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+
+        def oversized(req):
+            # Native UTF-8 fits but ASCII-escaped JSON is too large.
+            content = json.dumps({"v": 1, "id": req["id"], "status": "ok", "text": "界" * 12000}, ensure_ascii=False).encode()
+            return [bridge.struct.pack("=I", len(content)) + content]
+
+        response, _ = self.production_round_trip(host, "read", {}, oversized)
+        self.assertEqual(response, {"status": "response_too_large"})
+        response, _ = self.production_round_trip(host, "status", None,
+            lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok"})])
+        self.assertEqual(response, {"status": "ok"})
+
+    def test_oversize_native_frame_replies_before_retiring_connection(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        response, _ = self.production_round_trip(host, "open", {"url": "https://example.com"},
+            lambda req: [bridge.struct.pack("=I", bridge.LIMIT + 1)])
+        self.assertEqual(response, {"status": "open_unconfirmed"})
+        self.assertEqual(host.wait(3), 0)
+
+    def test_legacy_extension_reply_reports_update_not_connected(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        response, _ = self.production_round_trip(host, "status", None,
+            lambda req: [bridge.frame({"error": "Chrome background open requires an HTTP(S) URL"})])
+        self.assertEqual(response, {"status": "disconnected", "update_required": True})
+
+    def test_request_does_not_retry_uncertain_writes(self):
+        for operation, status in (("open", "open_unconfirmed"), ("close", "cleanup_unconfirmed")):
+            with self.subTest(operation=operation):
+                client = Mock()
+                with patch.object(bridge, "connected_client", return_value=nullcontext(client)) as connect, \
+                        patch.object(bridge, "receive", side_effect=EOFError):
+                    self.assertEqual(bridge.request(operation, {}, 3), {"status": status})
+                connect.assert_called_once()
+                client.sendall.assert_called_once()
+
+    def test_status_reports_missing_pending_disconnected_and_update_without_launch(self):
+        with patch.object(bridge, "CHROME", Path.home() / "chrome"), \
+                patch.object(bridge, "INSTALL", Path.home() / "install"), \
+                patch.object(bridge.subprocess, "run") as launch, patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(bridge.request("status", {}, 3), {"status": "extension_required"})
+            bridge.install(open_settings=False)
+            self.assertEqual(bridge.request("status", {}, 3), {"status": "pending"})
+            origin = bridge.extension_origin(bridge.INSTALL / "extension")
+            profile = bridge.CHROME / "Default"
+            profile.mkdir()
+            (profile / "Preferences").write_text(json.dumps({"extensions": {"settings": {origin.split("/")[2]: {"location": 4}}}}))
+            self.assertEqual(bridge.request("status", {}, 3), {"status": "disconnected"})
+            target = bridge.INSTALL / "extension/manifest.json"
+            target.write_text(json.dumps(dict(json.loads(target.read_bytes()), version="1.0.0")))
+            self.assertEqual(bridge.request("status", {}, 3), {"status": "disconnected", "update_required": True})
+            launch.assert_not_called()
+
     def test_missing_extension(self):
         client = self.start_client()
         output, error = client.communicate(timeout=3)
@@ -124,9 +211,12 @@ class BackgroundTest(unittest.TestCase):
         self.assertFalse(bridge.check_setup())
         host = self.start_host()
         self.wait_for_hosts(1)
-        with patch.object(sys, "stdout", io.StringIO()) as output:
+        response, observed = self.production_round_trip(host, "status", {},
+            lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok"})])
+        self.assertEqual(observed[0]["operation"], "status")
+        with patch.object(sys, "stdout", io.StringIO()) as output, patch.object(bridge, "request", return_value=response):
             self.assertTrue(bridge.check_setup())
-        self.assertIn("setup complete", output.getvalue())
+            self.assertIn("setup complete", output.getvalue())
         self.assertEqual(select.select([host.stdout], [], [], 0.1)[0], [])
 
     def mock_recovery_setup(self):
@@ -295,6 +385,7 @@ class BackgroundTest(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("more than one Chrome profile", error)
         self.assertEqual(client.returncode, 1)
+        self.assertEqual(bridge.request("status", None, 3), {"status": "ambiguous"})
         self.assertEqual(select.select([host.stdout for host in hosts], [], [], 0.1)[0], [])
 
     def test_installer_stages_files_for_single_profile(self):
@@ -319,6 +410,18 @@ class BackgroundTest(unittest.TestCase):
         registration = json.loads((chrome / "NativeMessagingHosts" / f"{bridge.HOST}.json").read_text())
         self.assertTrue(os.access(registration["path"], os.X_OK))
         self.assertEqual(registration["allowed_origins"], [bridge.extension_origin(destination / "extension")])
+        staged = destination / "extension/read-page.js"
+        self.assertFalse(staged.is_symlink())
+        self.assertEqual(staged.read_bytes(), (SOURCE.parent / "extension/shared/read-page.js").read_bytes())
+        with self.enterContext(subprocess.Popen([registration["path"], registration["allowed_origins"][0]],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=self.env)) as host:
+            self.wait_for_hosts(1)
+            try:
+                response, _ = self.production_round_trip(host, "status", None,
+                    lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": "ok"})])
+                self.assertEqual(response, {"status": "ok"})
+            finally:
+                self.stop_host(host)
 
     def test_multiple_profiles_require_selection(self):
         chrome = Path.home() / "chrome"
