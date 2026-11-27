@@ -3,7 +3,7 @@
   "name": "Agent Browser Safari Probe",
   "description": "A development-only Safari profile and native messaging probe.",
   "version": "0.1.0",
-  "permissions": ["nativeMessaging", "scripting"],
+  "permissions": ["nativeMessaging", "scripting", "alarms", "storage"],
   "host_permissions": ["https://example.com/*"],
   "background": {"scripts": ["background.js"], "persistent": false},
   "action": {"default_title": "Safari Probe Identity", "default_popup": "identity.html"}
