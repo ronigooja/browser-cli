@@ -9,7 +9,7 @@ CLI = Path(__file__).resolve().parents[1] / "browser-cli"
 
 
 class WaitDiagnosticsTest(unittest.TestCase):
-    def run_cli(self, command, *probes):
+    def run_cli(self, command, *probes, reject_eval=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             mock = root / "osascript"
@@ -17,6 +17,10 @@ class WaitDiagnosticsTest(unittest.TestCase):
 if [ "$1" = -e ]; then
   printf '%s\\n' "${@: -2:1}" >> "$MOCK_DIR/notifications"
   exit 1
+fi
+if [ "$MOCK_REJECT_EVAL" = 1 ] && grep -q 'eval(' "$3"; then
+  echo 'err:string eval blocked'
+  exit 0
 fi
 count=0
 if [ -f "$MOCK_DIR/count" ]; then read -r count < "$MOCK_DIR/count"; fi
@@ -38,9 +42,14 @@ printf '%s\\n' "$result"
                 args.append("false")
             result = subprocess.run([CLI, "--browser", "chrome", *args], text=True,
                                     capture_output=True, timeout=8,
-                                    env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", MOCK_DIR=directory))
+                                    env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", MOCK_DIR=directory,
+                                             MOCK_REJECT_EVAL=str(int(reject_eval))))
             notice = root / "notifications"
             return result, notice.read_text() if notice.exists() else ""
+
+    def test_info_does_not_use_string_eval(self):
+        result, _ = self.run_cli("info", "str:challenge: none", reject_eval=True)
+        self.assertEqual((result.returncode, result.stdout), (0, "challenge: none"))
 
     def test_initial_none_does_not_claim_clearance(self):
         result, notice = self.run_cli("wait-challenge", "str:none\nexample.com")

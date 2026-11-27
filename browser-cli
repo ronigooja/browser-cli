@@ -429,14 +429,19 @@ js_string() {
 }
 
 run_js() {
+  local direct=0
+  if [ "$1" = --direct ]; then
+    direct=1
+    shift
+  fi
   local code="$1" limit="$2"
   local trusted_tab_ref="tab ((item 1 of argv) as integer) of window id $AS_WINDOW_ID"
   if [ -n "${5-}" ]; then
     trusted_tab_ref='tab id (item 1 of argv) of window id (item 3 of argv)'
   fi
-  # Trusted actions supply a controlled expression and a stable window ID; Chrome also supplies a tab ID.
-  # Run it directly so site CSP rules against eval do not block hit testing.
-  if [ -z "${4-}" ]; then
+  # Fixed expressions can run directly even when the page disallows string eval.
+  # Trusted actions also supply a stable window ID and, on Chrome, a tab ID.
+  if [ "$direct" = 0 ] && [ -z "${4-}" ]; then
     code="(
 $code
 )"
@@ -524,7 +529,7 @@ CHALLENGE_JS='function challengeState() {
 
 cmd_info() {
   [ ${#ARGS[@]} -eq 0 ] || usage_error 'info takes no positional arguments'
-  run_js "(function(){ $CHALLENGE_JS
+  run_js --direct "(function(){ $CHALLENGE_JS
     return \"title: \" + document.title + \"\\nurl: \" + location.href + \"\\nreadyState: \" + document.readyState + \"\\ninnerText characters: \" + (document.body ? document.body.innerText.length : 0) + \"\\nouterHTML characters: \" + (document.documentElement ? document.documentElement.outerHTML.length : 0) + \"\\nchallenge: \" + challengeState() + \"\\n\"; })()" "$TIMEOUT"
 }
 
