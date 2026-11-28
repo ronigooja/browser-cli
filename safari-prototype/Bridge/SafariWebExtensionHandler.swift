@@ -62,12 +62,15 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
     private func pull(_ message: [String: Any], profile: UUID?, profileError: String,
                       instance: UUID) throws -> [String: Any] {
-        guard let wake = message["wake"] as? String, wake == "alarm" || wake == "warm_poll" else {
+        guard let wake = message["wake"] as? String, ["alarm", "warm_poll", "qualification_poll"].contains(wake) else {
             throw ProbeError("invalid_pull_wake")
         }
         guard let request = try Mailbox.pendingPull() else { return ["status": "no_pending_pull"] }
         return try Mailbox.access(request, via: .pull, update: true) { command in
             guard !command.expired else { return ["status": "expired"] }
+            guard (wake == "qualification_poll") == (command.operation == "qualify-window") else {
+                return ["status": "wrong_pull_mode"]
+            }
             let decision: [String: Any]
             if let profile {
                 decision = claim(&command, from: Binding(profile: profile, instance: instance), via: .pull)

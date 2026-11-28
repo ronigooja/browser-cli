@@ -36,7 +36,10 @@ func verifyGate() throws {
     var unboundRead = Command(expires: deadline, operation: "windows", target: nil, window: nil, tab: nil)
     var pullWrite = Command(expires: deadline, operation: "add-tab", target: a, window: 1, tab: nil)
     var expiredRead = Command(expires: 0, operation: "windows", target: nil, window: nil, tab: nil,
-                              readProfile: a.profile)
+                               readProfile: a.profile)
+    var qualification = Command(expires: deadline, operation: "qualify-window", target: a, window: nil, tab: nil)
+    var unboundQualification = Command(expires: deadline, operation: "qualify-window", target: nil, window: nil, tab: nil,
+                                        readProfile: a.profile)
     guard pullDiscovery.claim(from: a, via: .pull) == "discovered", !pullDiscovery.claimed,
           !pullDiscovery.acceptsResult(from: a, via: .pull),
           unboundRead.claim(from: a, via: .pull) == "unsupported_pull_operation", !unboundRead.claimed,
@@ -50,6 +53,16 @@ func verifyGate() throws {
           expiredRead.claim(from: a, via: .pull) == "expired" else { throw ProbeError("pull_gate_check_failed") }
     pullRead.result = Data()
     guard !pullRead.acceptsResult(from: stale, via: .pull) else { throw ProbeError("duplicate_pull_result_allowed") }
+    guard qualification.claim(from: a) == "invalid_push_target",
+          unboundQualification.claim(from: a, via: .pull) == "unsupported_pull_operation",
+          qualification.claim(from: b, via: .pull) == "wrong_profile",
+          qualification.claim(from: stale, via: .pull) == "wrong_instance", !qualification.claimed,
+          qualification.claim(from: a, via: .pull) == "claimed",
+          qualification.claim(from: a, via: .pull) == "already_claimed",
+          !qualification.acceptsResult(from: a), !qualification.acceptsResult(from: stale, via: .pull),
+          qualification.acceptsResult(from: a, via: .pull) else { throw ProbeError("qualification_gate_check_failed") }
+    qualification.result = Data()
+    guard !qualification.acceptsResult(from: a, via: .pull) else { throw ProbeError("duplicate_qualification_result_allowed") }
     try emit(["status": "gate_check_passed", "liveSafari": false])
 }
 
@@ -73,15 +86,22 @@ func runProbe(_ args: [String], via transport: Transport, budget: TimeInterval) 
     var tab: Int?
     var marker: String?
     if transport == .pull {
-        target = nil
         switch operation {
         case "discover":
             guard args.count == 1 else { throw ProbeError("unexpected_arguments") }
+            target = nil
         case "windows":
             guard args.count == 2, let profile = UUID(uuidString: args[1]) else {
                 throw ProbeError("expected_profile_uuid")
             }
+            target = nil
             readProfile = profile
+        case "qualify-window":
+            guard args.count == 4, args[3] == "--allow-fixture-window",
+                  let profile = UUID(uuidString: args[1]), let instance = UUID(uuidString: args[2]) else {
+                throw ProbeError("expected_profile_and_instance_uuids_and_allow_fixture_window")
+            }
+            target = Binding(profile: profile, instance: instance)
         default: throw ProbeError("unsupported_pull_operation")
         }
     } else {
@@ -90,7 +110,7 @@ func runProbe(_ args: [String], via transport: Transport, budget: TimeInterval) 
             guard args.count == 1 else { throw ProbeError("unexpected_arguments") }
             target = nil
             if operation == "verify-gate" { try verifyGate(); return 0 }
-        case "windows", "inspect", "add-tab", "new-window":
+        case "windows", "inspect", "add-tab":
             let needsID = operation == "inspect" || operation == "add-tab"
             guard args.count == (needsID ? 5 : 3),
                   let profile = UUID(uuidString: args[1]), let instance = UUID(uuidString: args[2]) else {
@@ -110,7 +130,8 @@ func runProbe(_ args: [String], via transport: Transport, budget: TimeInterval) 
 
     // Dispatch may launch Safari. Do not call it against a browser which is not running.
     // There remains a quit/dispatch race; this is not an atomic no-launch guarantee.
-    guard let safari = NSRunningApplication.runningApplications(withBundleIdentifier: safariID).first,
+    let candidates = NSRunningApplication.runningApplications(withBundleIdentifier: safariID)
+    guard candidates.count == 1, let safari = candidates.first,
           !safari.isTerminated, safari.isFinishedLaunching else { throw ProbeError("safari_not_running") }
     _ = try Mailbox.root(transport, create: true)
     let hostLock = transport == .pull ? try Mailbox.lockPullHost() : nil
@@ -127,6 +148,9 @@ func runProbe(_ args: [String], via transport: Transport, budget: TimeInterval) 
     }
     defer { workspace.notificationCenter.removeObserver(observer) }
     let frontBefore = workspace.frontmostApplication?.bundleIdentifier ?? "unknown"
+    if operation == "qualify-window", frontBefore == safariID || frontBefore == "unknown" {
+        throw ProbeError("qualification_requires_another_frontmost_app")
+    }
     let delivery = Evidence()
     let publishedAt = Date().timeIntervalSince1970
     let command = Command(expires: publishedAt + budget, operation: operation, target: target,
@@ -153,7 +177,15 @@ func runProbe(_ args: [String], via transport: Transport, budget: TimeInterval) 
     }
     guard let final else { throw ProbeError("final_mailbox_contended_outcome_unknown") }
     let result = try final.result.map { try JSONSerialization.jsonObject(with: $0) }
-    let resultStatus = (result as? [String: Any])?["status"] as? String
+    let frontAfter = workspace.frontmostApplication?.bundleIdentifier ?? "unknown"
+    let activation = activationEvents.snapshot
+    let safariStillRunning = !safari.isTerminated
+    var resultStatus = (result as? [String: Any])?["status"] as? String
+    if operation == "qualify-window", resultStatus == "candidate_observed",
+       activation.safariActivated || activation.truncated || frontAfter != frontBefore || !safariStillRunning {
+        resultStatus = "operation_outcome_unknown"
+    }
+    // A qualification is evidence for manual review, not a verified background creation.
     let success = operation == "discover" ? !final.receipts.isEmpty : ["ok", "created"].contains(resultStatus ?? "")
     let failure = final.claimed ? "claimed_outcome_unknown" : final.pullObservations.last?.status ?? "no_verified_reply"
     var payload: [String: Any] = [
@@ -164,8 +196,11 @@ func runProbe(_ args: [String], via transport: Transport, budget: TimeInterval) 
         "receipts": final.receipts.map { ["profile": $0.sender.profile.uuidString,
                                           "instance": $0.sender.instance.uuidString, "status": $0.status] },
         "frontBefore": frontBefore,
-        "frontAfter": workspace.frontmostApplication?.bundleIdentifier ?? "unknown",
-        "activationEvents": activationEvents.entries,
+        "frontAfter": frontAfter,
+        "activationEvents": activation.entries,
+        "activationEventsTruncated": activation.truncated,
+        "safariActivationObserved": activation.safariActivated,
+        "safariProcessStillRunning": safariStillRunning,
     ]
     if transport == .pull {
         payload["budgetSeconds"] = budget
@@ -200,13 +235,20 @@ func dispatchPush(_ request: UUID, delivery: Evidence) {
 final class Evidence: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String] = []
+    private var truncated = false
+    private var safariActivated = false
     var entries: [String] {
+        snapshot.entries
+    }
+    var snapshot: (entries: [String], truncated: Bool, safariActivated: Bool) {
         lock.lock(); defer { lock.unlock() }
-        return values
+        return (values, truncated, safariActivated)
     }
     func activated(_ value: String) {
         lock.lock(); defer { lock.unlock() }
+        if value == safariID { safariActivated = true }
         if values.count < 32 { values.append(value) }
+        else { truncated = true }
     }
 }
 

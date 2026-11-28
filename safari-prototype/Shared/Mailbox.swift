@@ -49,18 +49,19 @@ struct Command: Codable {
     mutating func claim(from sender: Binding, via transport: Transport = .push) -> String {
         guard !expired else { return "expired" }
         if transport == .pull {
-            guard target == nil, window == nil, tab == nil, marker == nil,
-                  ((operation == "discover" && readProfile == nil) ||
-                   (operation == "windows" && readProfile != nil)) else {
+            guard window == nil, tab == nil, marker == nil,
+                  ((operation == "discover" && target == nil && readProfile == nil) ||
+                   (operation == "windows" && target == nil && readProfile != nil) ||
+                   (operation == "qualify-window" && target != nil && readProfile == nil)) else {
                 return "unsupported_pull_operation"
             }
-        } else if readProfile != nil {
+        } else if readProfile != nil || operation == "qualify-window" || operation == "new-window" {
             return "invalid_push_target"
         }
         let status: String
         if operation == "discover" { status = "discovered" }
         else if (target?.profile ?? readProfile) != sender.profile { status = "wrong_profile" }
-        else if transport == .push && target?.instance != sender.instance { status = "wrong_instance" }
+        else if let target, target.instance != sender.instance { status = "wrong_instance" }
         else if claimed { status = "already_claimed" }
         else {
             status = "claimed"
@@ -75,8 +76,11 @@ struct Command: Codable {
 
     func acceptsResult(from sender: Binding, via transport: Transport = .push) -> Bool {
         guard !expired, claimedBy == sender, result == nil else { return false }
-        if transport == .pull { return operation == "windows" && target == nil && readProfile == sender.profile }
-        return target == sender
+        if transport == .pull {
+            return (operation == "windows" && target == nil && readProfile == sender.profile) ||
+                   (operation == "qualify-window" && target == sender && readProfile == nil)
+        }
+        return operation != "qualify-window" && operation != "new-window" && target == sender
     }
 }
 

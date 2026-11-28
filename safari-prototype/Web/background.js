@@ -124,12 +124,7 @@ async function openFixture(grant, before) {
             return {status: "created", id: tab.id, reportedWindow: tab.windowId, reportedActive: tab.active,
                 before, after: await snapshot(), events};
         }
-        if (before.windows.length !== 0 || before.otherWindowCount !== 0) {
-            return {status: "not_zero_windows_in_extension_snapshot", before};
-        }
-        attempted = true;
-        const window = await browser.windows.create({url: destination, type: "normal", focused: false, incognito: false});
-        return {status: "created", id: window.id, reportedFocused: window.focused, before, after: await snapshot(), events};
+        return {status: "unknown_operation"};
     } catch {
         return {status: attempted ? "operation_outcome_unknown" : "operation_not_started", events};
     } finally {
@@ -142,7 +137,7 @@ async function run(grant) {
     const before = await snapshot();
     if (before.status !== "ok" || grant.operation === "windows") return before;
     if (grant.operation === "inspect") return inspect(grant, before);
-    if (grant.operation === "add-tab" || grant.operation === "new-window") return openFixture(grant, before);
+    if (grant.operation === "add-tab") return openFixture(grant, before);
     return {status: "unknown_operation"};
 }
 
@@ -186,14 +181,64 @@ function stopPush() {
 // persisted mode prevents a native port opening on restart, including on an alarm wake.
 let pullMode = false;
 const alarms = browser.alarms;
-async function pullOnce(wake, alarmScheduledAt) {
+
+// Qualification only. No API can verify a global zero-window precondition or choose a
+// named Safari profile here; the operator must independently verify both in the fixture.
+async function qualifyWindow(grant, armed) {
+    const permitted = () => pullMode && warmSession === armed && performance.now() < armed.ends && validGrant(grant);
+    const events = [];
+    let eventsTruncated = false;
+    const note = (kind, id) => {
+        if (events.length < 16) events.push({kind, id});
+        else eventsTruncated = true;
+    };
+    const onCreated = window => note("created", window.id);
+    const onFocus = id => note("focus", id);
+    let attempted = false;
+    let beforeCount;
+    try {
+        if (!permitted() || grant.profile.toLowerCase() !== armed.profile) return {status: "qualification_not_armed"};
+        if (browser.extension?.inIncognitoContext !== false || await browser.extension?.isAllowedIncognitoAccess?.() !== false) {
+            return {status: "private_access_enabled_or_unverified"};
+        }
+        if (await browser.permissions.contains({origins: ["https://example.com/*"]}) !== true) {
+            return {status: "fixture_access_not_granted"};
+        }
+        browser.windows.onCreated.addListener(onCreated);
+        browser.windows.onFocusChanged.addListener(onFocus);
+        const before = await browser.windows.getAll({populate: false});
+        beforeCount = before.length;
+        if (beforeCount !== 0 || events.length !== 0) return {status: "window_seen_before_operation", beforeCount, events};
+        if (!permitted()) return {status: "qualification_not_armed", beforeCount};
+        // Consume the arm before mutation, even if the API throws or the result is lost.
+        stopWarmPoll();
+        attempted = true;
+        const window = await browser.windows.create({url: destination, type: "normal", focused: false, incognito: false});
+        const after = await browser.windows.getAll({populate: false});
+        const regularUnfocused = w => w?.type === "normal" && w.incognito === false && w.focused === false;
+        const id = window?.id;
+        const candidate = Number.isInteger(id) && id >= 0 && regularUnfocused(window) &&
+            after.length === 1 && after[0].id === id && regularUnfocused(after[0]) &&
+            !eventsTruncated && !events.some(event => (event.kind === "focus" && event.id !== -1) ||
+                (event.kind === "created" && event.id !== id));
+        return {status: candidate ? "candidate_observed" : "operation_outcome_unknown", id, beforeCount,
+            reportedRegularUnfocused: regularUnfocused(window), afterCount: after.length, events, eventsTruncated};
+    } catch {
+        return {status: attempted ? "operation_outcome_unknown" : "operation_not_started", beforeCount, events, eventsTruncated};
+    } finally {
+        browser.windows.onCreated?.removeListener(onCreated);
+        browser.windows.onFocusChanged?.removeListener(onFocus);
+    }
+}
+
+async function pullOnce(wake, alarmScheduledAt, armed) {
     const evidence = {wake, backgroundStartedAt};
     if (Number.isFinite(alarmScheduledAt)) evidence.alarmScheduledAt = alarmScheduledAt;
     const grant = await native("pull", evidence);
-    if (!validGrant(grant) || grant.operation !== "windows" ||
+    if (!validGrant(grant) || grant.operation !== (armed ? "qualify-window" : "windows") ||
         typeof grant.request !== "string" || !idPattern.test(grant.request)) return;
     let result;
-    try { result = await snapshot({includeFixtures: false}); }
+    try { result = armed ? await qualifyWindow(grant, armed) : await snapshot({includeFixtures: false}); }
     catch { result = {status: "probe_api_failed"}; }
     await native("pull-result", {request: grant.request, result});
 }
@@ -225,8 +270,8 @@ function stopWarmPoll() {
     warmSession = undefined;
 }
 
-function startWarmPoll() {
-    const session = {ends: performance.now() + warmLifetimeMs, ticks: 0};
+function startWarmPoll(profile) {
+    const session = {ends: performance.now() + warmLifetimeMs, ticks: 0, profile};
     warmSession = session;
     const tick = async () => {
         if (warmSession !== session) return;
@@ -235,7 +280,7 @@ function startWarmPoll() {
             return;
         }
         session.ticks += 1;
-        try { await pullOnce("warm_poll"); }
+        try { await pullOnce(profile ? "qualification_poll" : "warm_poll", undefined, profile ? session : undefined); }
         catch { /* Continue observing; a lost claim is never replayed. */ }
         if (warmSession === session) session.timer = setTimeout(tick, warmIntervalMs);
     };
@@ -258,6 +303,15 @@ async function control(message) {
     await browser.storage.local.set({pullMode: true});
     pullMode = true;
     stopPush();
+    if (message === "probe-arm-window-qualification") {
+        // An old read-only alarm must not be confused with this in-memory arm.
+        await alarms.clear(pullAlarm);
+        const identity = await native("identify");
+        if (identity?.status !== "identified" || !idPattern.test(identity.profile) ||
+            identity.instance?.toLowerCase() !== instance) return {status: "qualification_identity_unavailable"};
+        startWarmPoll(identity.profile.toLowerCase());
+        return {status: "window_qualification_armed", profile: identity.profile, instance};
+    }
     // A one-shot 60s delay leaves room for a cold background wake on WebKit and
     // avoids newer (shorter) clamp assumptions. Never rearm automatically.
     await alarms.create(pullAlarm, {delayInMinutes: 1});
@@ -275,7 +329,7 @@ browser.runtime.onMessage.addListener((message, sender, respond) => {
         native("identify").then(respond, () => respond({status: "identity_unavailable"}));
         return true;
     }
-    if (!["probe-arm-pull", "probe-arm-warm", "probe-use-push", "probe-mode"].includes(message)) return false;
+    if (!["probe-arm-pull", "probe-arm-warm", "probe-arm-window-qualification", "probe-use-push", "probe-mode"].includes(message)) return false;
     controls = controls.then(() => control(message)).then(respond, () => respond({status: "mode_control_failed"}));
     return true;
 });
