@@ -214,7 +214,11 @@ test("foreground open is explicit, unowned and never creates a window", async ()
   const empty = await harness();
   assert.equal((await empty.call("front_open", {url})).status, "no_regular_window");
   const browser = await harness({windows: windowWithTab()});
-  const result = await browser.call("front_open", {url});
+  const reused = await browser.call("front_open", {url});
+  assert.equal(reused.created, false);
+  assert.equal(browser.counters().focuses, 0);
+  assert.equal(browser.counters().creates, 0);
+  const result = await browser.call("front_open", {url: "https://example.org/"});
   assert.equal(result.status, "ok");
   assert.equal(result.created, true);
   assert.equal(result.ownership, undefined);

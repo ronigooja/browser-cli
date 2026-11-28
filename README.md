@@ -19,6 +19,8 @@ Replace any registration that still points to the removed executable. There is n
 
 Each extension needs one broad HTTP(S) authorization for unattended reading, including logged-in pages. Do not request per-site permission in response to a read. If browser settings withhold access or the connection fails, stop and report it rather than changing browser or opening a foreground tab.
 
+To uninstall, remove Agent Browser in the browser's Extensions settings first (in every Chrome profile that loaded it). After confirming removal, the user can remove the Chrome staging directory and `com.agent_browser.background.json` registration, or the signed Safari companion app. Do not treat a lost connection as confirmation of removal. See the Safari setup link for custom app locations.
+
 Chrome public-background reads can reconnect a verified running, windowless Chrome without sending a URL during recovery. If Quartz cannot distinguish internal surfaces from browser windows, confirmation requires existing macOS Accessibility access; no permission prompt is issued.
 
 ## Tools
