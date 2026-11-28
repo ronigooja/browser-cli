@@ -64,6 +64,8 @@ class Setup:
         if status in ("ok", "uninstall_requested", "uninstall_unverified", "uninstall_unconfirmed", "action_unconfirmed", "timeout", "browser_error"):
             return result("uninstall_unconfirmed", browser,
                           "Chrome removal could not be verified. Check Agent Browser is gone from the intended profile at chrome://extensions/. Do not retry automatically. Native host files were retained.")
+        if status == "extension_ambiguous":
+            return result(status, browser, "Multiple Chrome extensions are connected. No uninstall request was sent. Disconnect all profiles except the intended one, then check again.")
         if status == "uninstall_unavailable":
             return result(status, browser, "Chrome did not offer self-removal. Remove Agent Browser manually at chrome://extensions/ in the intended profile.")
         return blocker(browser, reply)

@@ -49,7 +49,7 @@ class Fake:
         if operation == "close":
             return {"status": self.closed}
         if operation == "uninstall":
-            return {"status": "uninstall_unverified"}
+            return {"status": getattr(self, "uninstall_status", "uninstall_unverified")}
         raise AssertionError(operation)
 
     def profiles(self):
@@ -273,6 +273,10 @@ class ServerTest(unittest.TestCase):
         self.assertEqual([call[0] for call in self.chrome.calls], ["uninstall"])
         self.assertEqual(self.setup("uninstall", browser="safari", approved=True)["status"], "manual_uninstall_required")
         self.assertEqual(self.safari.calls, [])
+        self.chrome.uninstall_status = "ambiguous"
+        refused = self.setup("uninstall", approved=True)
+        self.assertEqual(refused["status"], "extension_ambiguous")
+        self.assertIn("No uninstall request was sent", refused["message"])
 
     def test_uninstall_cleanup_requires_confirmation_and_no_live_connection(self):
         with patch("browser_setup.cleanup_installation", return_value={"moved": [], "errors": []}) as cleanup:
