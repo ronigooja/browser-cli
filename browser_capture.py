@@ -77,7 +77,7 @@ def pixel_box(size, geometry):
             or not 0 <= geometry[k] <= 65536 for k in keys):
         raise CaptureError("capture_geometry_unavailable")
     x, y, w, h, vw, vh = (geometry[k] for k in keys)
-    if min(w, h, vw, vh) <= 0 or x + w > vw + 0.001 or y + h > vh + 0.001:
+    if min(w, h) <= 0 or min(vw, vh) < 1 or x + w > vw + 0.001 or y + h > vh + 0.001:
         raise CaptureError("capture_geometry_unavailable")
     pw, ph = size
     sx, sy = pw / vw, ph / vh
