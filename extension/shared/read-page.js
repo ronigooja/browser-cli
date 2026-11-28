@@ -1,8 +1,8 @@
-// Fixed, read-only main-document probe. All dependencies are inside readPage so
+// Fixed main-document operations. All dependencies are inside readPage so
 // the function can be serialized for execution in a page's isolated world.
-function agentBrowserPageOperation(options) {
+function readPage(options) {
   const { selector, waitForSelector, includeLinks = false, kind } = options;
-  const expectedURL = kind ? options.expectedUrl : options.expectedURL;
+  const expectedURL = options.expectedURL ?? options.expectedUrl;
   const hasSelector = selector !== undefined;
   const hasWaitSelector = waitForSelector !== undefined;
   function challengeState() {
@@ -273,5 +273,5 @@ function agentBrowserPageOperation(options) {
   return result;
 }
 
-var readPage = agentBrowserPageOperation;
+var agentBrowserPageOperation = readPage;
 if (typeof module !== "undefined" && module.exports) module.exports = { readPage, agentBrowserPageOperation };
