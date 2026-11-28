@@ -95,3 +95,39 @@ test('fill uses literal text and press dispatches only synthetic keyboard events
   assert.equal(p.run({kind:'press', selector:'#go', key:'Enter'}).status, 'ok');
   assert.deepEqual(events, [['input',undefined],['change',undefined],['keydown','Enter'],['keyup','Enter']]);
 });
+
+test('capture geometry returns fractional viewport-clipped coordinates without scrolling', () => {
+  const p = setup();
+  Object.assign(p.context, {innerWidth:800, innerHeight:600,
+    visualViewport:{scale:1, offsetLeft:0, offsetTop:0, width:800, height:600},
+    scrollTo() { throw new Error('unexpected scroll'); }});
+  p.node.getBoundingClientRect = () => ({left:-10.5, top:20.25, right:125.75, bottom:620, width:136.25, height:599.75});
+  const crop = p.run({kind:'capture_geometry', selector:'#go'}).crop;
+  assert.deepEqual(JSON.parse(JSON.stringify(crop)), {x:0,y:20.25,width:125.75,height:579.75,viewport_width:800,viewport_height:600});
+  assert.deepEqual(JSON.parse(JSON.stringify(p.run({kind:'capture_geometry'}).crop)),
+    {x:0,y:0,width:800,height:600,viewport_width:800,viewport_height:600});
+  p.node.getBoundingClientRect = () => ({left:900,top:0,right:910,bottom:10,width:10,height:10});
+  assert.equal(p.run({kind:'capture_geometry', selector:'#go'}).status, 'no_match');
+});
+
+test('capture geometry fails closed for gates, selectors and ambiguous viewports', () => {
+  const p = setup();
+  Object.assign(p.context, {innerWidth:800, innerHeight:600,
+    visualViewport:{scale:1, offsetLeft:0, offsetTop:0, width:800, height:600}});
+  assert.equal(p.run({kind:'capture_geometry', expectedURL:'https://wrong/'}).status, 'target_changed');
+  assert.equal(p.run({kind:'capture_geometry', selector:'['}).status, 'invalid_selector');
+  assert.equal(p.run({kind:'capture_geometry', selector:'#missing'}).status, 'no_match');
+  p.context.visualViewport.scale = 2;
+  assert.equal(p.run({kind:'capture_geometry'}).status, 'action_unavailable');
+  p.context.visualViewport.scale = 1;
+  p.context.visualViewport.offsetLeft = 1;
+  assert.equal(p.run({kind:'capture_geometry'}).status, 'action_unavailable');
+  p.context.visualViewport.offsetLeft = 0;
+  p.context.visualViewport.width = 700;
+  assert.equal(p.run({kind:'capture_geometry'}).status, 'action_unavailable');
+  p.document.title = 'Attention Required';
+  assert.equal(p.run({kind:'capture_geometry'}).status, 'verification_required');
+  p.document.title = 'Page';
+  p.context.location = new URL('https://example.com/login');
+  assert.equal(p.run({kind:'capture_geometry', expectedURL:p.context.location.href}).status, 'login_required');
+});

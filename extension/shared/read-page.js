@@ -93,6 +93,29 @@ function readPage(options) {
       try { const u = new URL(value); return /^https?:$/.test(u.protocol) && !u.username && !u.password && u.href.length <= 2048; } catch (_) { return false; }
     }
     if (kind === 'info') return result('ok', {title:clip(document.title,500), ready_state:document.readyState, challenge:'none'});
+    if (kind === 'capture_geometry') {
+      // Pinch zoom and shifted visual viewports make screenshot mapping ambiguous.
+      const viewport = window.visualViewport;
+      const width = window.innerWidth, height = window.innerHeight;
+      if (!viewport || viewport.scale !== 1 || viewport.offsetLeft !== 0 || viewport.offsetTop !== 0 ||
+          !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 ||
+          !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height) ||
+          Math.abs(viewport.width - width) > 1 || Math.abs(viewport.height - height) > 1) return result('action_unavailable');
+      let x = 0, y = 0, right = width, bottom = height;
+      if (hasSelector) {
+        if (typeof selector !== 'string' || !selector) return result('invalid_selector');
+        const found = query(selector);
+        if (found.error) return result('invalid_selector');
+        const target = found.nodes.find(visible);
+        if (!target) return result('no_match');
+        const rect = target.getBoundingClientRect();
+        if (![rect.left, rect.top, rect.right, rect.bottom].every(Number.isFinite)) return result('action_unavailable');
+        x = Math.max(0, rect.left); y = Math.max(0, rect.top);
+        right = Math.min(width, rect.right); bottom = Math.min(height, rect.bottom);
+        if (right <= x || bottom <= y) return result('no_match');
+      }
+      return result('ok', {crop:{x,y,width:right-x,height:bottom-y,viewport_width:width,viewport_height:height}});
+    }
     function scroll(target) {
       if (options.direction === 'top' || options.direction === 'bottom') {
         const bottom = target === window ? document.scrollingElement?.scrollHeight : target.scrollHeight;
