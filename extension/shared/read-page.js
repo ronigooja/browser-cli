@@ -113,7 +113,7 @@ function readPage(options) {
       if (found.error) return result('invalid_selector');
       const nodes = found.nodes.filter(visible);
       const elements = [];
-      for (const node of nodes.slice(offset, offset + 50)) {
+      for (const node of nodes.slice(offset, offset + 25)) {
         const bytes = new Uint8Array(12); crypto.getRandomValues(bytes);
         const ref = Array.from(bytes, b => b.toString(16).padStart(2,'0')).join('');
         if (store.refs.size >= 500) store.refs.delete(store.refs.keys().next().value);
@@ -151,10 +151,11 @@ function readPage(options) {
           if (depth > 50 || truncated) { truncated = true; return; }
           const tag = node.tagName.toLowerCase();
           if (!visible(node) || /^(?:script|style|noscript|template|iframe|textarea|input|select)$/.test(tag) || node.isContentEditable) return;
-          const end = passiveTags.test(tag) && tag !== 'br' && tag !== 'hr' ? `</${tag}>` : '';
-          if (budget < end.length) { truncated = true; return; }
+          const start = passiveTags.test(tag) ? `<${tag}>` : '';
+          const end = start && tag !== 'br' && tag !== 'hr' ? `</${tag}>` : '';
+          if (budget < start.length + end.length) { truncated = true; return; }
           budget -= end.length;
-          if (passiveTags.test(tag) && !append(`<${tag}>`)) return;
+          if (start) append(start);
           for (const child of node.childNodes) {
             if (truncated) break;
             if (child.nodeType === 1) walk(child,depth + 1);

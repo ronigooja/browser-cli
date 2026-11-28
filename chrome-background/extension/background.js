@@ -4,6 +4,8 @@ const host = "com.agent_browser.background";
 const reconnect = "reconnect-native-host";
 const version = 3;
 const frameLimit = 65536;
+const pageKinds = new Set(["info", "snapshot", "html", "extract", "wait", "click", "scroll", "fill", "select", "press", "submit"]);
+const pageWrites = new Set(["click", "scroll", "fill", "select", "press", "submit"]);
 let port;
 
 function httpURL(value) {
@@ -176,6 +178,7 @@ async function listTabs(state, expires) {
 }
 
 async function guardedPage(state, data, expires) {
+  const uncertain = { status: pageWrites.has(data.kind) ? "action_unconfirmed" : "read_unavailable" };
   const expected = httpURL(data.expected_url).href;
   const entry = state.tab(data.ref);
   const navigation = entry?.navigation;
@@ -191,17 +194,17 @@ async function guardedPage(state, data, expires) {
   try {
     results = await chrome.scripting.executeScript({ target: { tabId: entry.id, documentIds: [frame.documentId] },
       world: "ISOLATED", func: agentBrowserPageOperation, args: [{ ...options, expectedURL: expected }] });
-  } catch (_) { return { status: "action_unconfirmed" }; }
+  } catch (_) { return uncertain; }
   const postMismatch = boundary(await currentTab(state, entry), expected);
   const postFrame = await topDocument(entry.id);
   if (postMismatch || !state.active() || state.tab(ref) !== entry || entry.navigation !== navigation ||
       !activeDocument(postFrame, expected) || postFrame.documentId !== frame.documentId || Date.now() >= expires ||
       results?.length !== 1 || results[0].frameId !== 0 || results[0].documentId !== frame.documentId) {
-    return { status: "action_unconfirmed" };
+    return uncertain;
   }
   const result = results[0].result;
   if (!result || typeof result !== "object" || Array.isArray(result) || typeof result.status !== "string" ||
-      (result.final_url !== undefined && result.final_url !== expected)) return { status: "action_unconfirmed" };
+      (result.final_url !== undefined && result.final_url !== expected)) return uncertain;
   return { ...result, final_url: expected };
 }
 
@@ -422,7 +425,7 @@ function validPayload(operation, data) {
   if (operation === "status") return only();
   if (operation === "list") return only();
   if (operation === "page") return only("ref", "expected_url", "kind", "selector", "elementRef", "text", "key", "value", "direction", "pixels", "condition", "offset", "raw") &&
-    validToken(data.ref) && !!httpURL(data.expected_url) && typeof data.kind === "string" && data.kind.length > 0 && data.kind.length <= 64 &&
+    validToken(data.ref) && !!httpURL(data.expected_url) && pageKinds.has(data.kind) &&
     ["selector", "elementRef", "text", "key", "value", "direction", "condition"].every(key => !(key in data) || (typeof data[key] === "string" && data[key].length <= 10000)) &&
     ["pixels", "offset"].every(key => !(key in data) || Number.isSafeInteger(data[key])) &&
     (!("raw" in data) || typeof data.raw === "boolean");
@@ -453,7 +456,7 @@ async function operation(state, { operation, payload, expires }) {
   return findOrOpen(state, operation, payload, expires);
 }
 
-function withinBudget(response, operation) {
+function withinBudget(response, operation, kind) {
   // The host re-encodes as ASCII JSON. Budget six bytes per non-ASCII UTF-16
   // unit (including either half of an emoji), and include HTML-sensitive escapes
   // that the browser's native serializer may add. JSON.stringify already escapes controls.
@@ -467,7 +470,7 @@ function withinBudget(response, operation) {
   }
   const { v, id } = response;
   return { v, id, status: response.created || operation === "front_open" ? "open_unconfirmed" :
-    ["page", "tab"].includes(operation) ? "action_unconfirmed" : "response_too_large" };
+    operation === "tab" || (operation === "page" && pageWrites.has(kind)) ? "action_unconfirmed" : "response_too_large" };
 }
 
 let forgetTab = () => {};
@@ -509,7 +512,7 @@ function connect() {
       result = { status: request?.operation === "close" ? "cleanup_unconfirmed" : request?.operation === "front_open" ? "open_unconfirmed" :
         ["page", "tab"].includes(request?.operation) ? "action_unconfirmed" : "browser_error" };
     }
-    response = withinBudget({ v: version, id, ...result }, request?.operation);
+    response = withinBudget({ v: version, id, ...result }, request?.operation, request?.payload?.kind);
     if (port === connection) connection.postMessage(response);
   });
   connection.onDisconnect.addListener(() => {
