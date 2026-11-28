@@ -61,8 +61,9 @@ TOOLS = [
     }, ["cleanup_token"], destructiveHint=True, openWorldHint=False),
     tool("setup_extension", "Check the selected local browser extension. For Chrome, use prepare after explicit user approval, then install once with its grant and the sole profile or the profile the user selects. For an update_required result, obtain explicit approval to update and use update=true on prepare. Relay the full manual loading or reload instructions, then check. Safari production setup is manual; never install the development probe.", {
         "browser": enum(BROWSERS),
-        "action": enum(("check", "prepare", "install", "uninstall")),
-        "approved": {"type": "boolean", "description": "For Chrome prepare or uninstall, only after explicit user approval."},
+        "action": enum(("check", "prepare", "install", "uninstall", "cleanup_uninstall")),
+        "approved": {"type": "boolean", "description": "For prepare, uninstall, or cleanup_uninstall, only after explicit user approval."},
+        "removal_confirmed": {"type": "boolean", "description": "For cleanup_uninstall, true only after the user confirms in-browser removal from all profiles where loaded. A disconnect is not proof."},
         "update": {"type": "boolean", "description": "Chrome prepare only, after update_required and explicit approval to update the existing installation."},
         "grant": token("Single-use Chrome install grant returned by prepare."),
         "profile": {"type": "string", "maxLength": 255, "description": "Chrome profile directory returned by prepare."},

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from browser_backends import ChromeBackend, default_backends
 from browser_policy import url_key, url_mismatch
@@ -272,6 +273,15 @@ class ServerTest(unittest.TestCase):
         self.assertEqual([call[0] for call in self.chrome.calls], ["uninstall"])
         self.assertEqual(self.setup("uninstall", browser="safari", approved=True)["status"], "manual_uninstall_required")
         self.assertEqual(self.safari.calls, [])
+
+    def test_uninstall_cleanup_requires_confirmation_and_no_live_connection(self):
+        with patch("browser_setup.cleanup_installation", return_value={"moved": [], "errors": []}) as cleanup:
+            self.assertEqual(self.setup("cleanup_uninstall", approved=True)["status"], "consent_required")
+            self.assertEqual(self.setup("cleanup_uninstall", approved=True, removal_confirmed=True)["status"], "cleanup_refused")
+            cleanup.assert_not_called()
+            self.chrome.state = "disconnected"
+            self.assertEqual(self.setup("cleanup_uninstall", approved=True, removal_confirmed=True)["status"], "cleanup_complete")
+            cleanup.assert_called_once_with("chrome")
 
     def test_setup_consent_profile_connection(self):
         self.chrome.state = "extension_required"

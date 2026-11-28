@@ -3,6 +3,7 @@
 import time
 
 from browser_policy import BROWSERS, clipped, result, token_valid
+from browser_removal import cleanup as cleanup_installation
 from browser_service import Capabilities, blocker
 
 
@@ -23,22 +24,25 @@ class Setup:
 
     def call(self, args, scope):
         allowed = {"check": set(), "prepare": {"approved", "update"}, "install": {"grant", "profile"},
-                   "uninstall": {"approved"}}
+                   "uninstall": {"approved"}, "cleanup_uninstall": {"approved", "removal_confirmed"}}
         if not isinstance(args, dict) or args.get("browser") not in BROWSERS:
             raise ValueError("Choose safari or chrome for setup_extension.")
         browser, action = args["browser"], args.get("action")
         if not isinstance(action, str) or action not in allowed or args.keys() - allowed[action] - {"action", "browser"}:
-            raise ValueError("Choose check, prepare, install, or uninstall with the appropriate arguments.")
-        if browser == "safari" and action not in ("check", "uninstall") and (action == "install" or {"approved", "update"} & args.keys()):
+            raise ValueError("Choose check, prepare, install, uninstall, or cleanup_uninstall with the appropriate arguments.")
+        if browser == "safari" and action not in ("check", "uninstall", "cleanup_uninstall") and (action == "install" or {"approved", "update"} & args.keys()):
             raise ValueError("Safari setup is manual; use check for production setup guidance.")
         if action == "prepare" and any(type(args.get(key, False)) is not bool for key in ("approved", "update")):
             raise ValueError("approved and update must be booleans.")
         if action == "install" and (not token_valid(args.get("grant")) or (
                 "profile" in args and not profile_directory(args["profile"]))):
             raise ValueError("Use the grant and profile returned by prepare.")
-        if action == "uninstall" and type(args.get("approved", False)) is not bool:
-            raise ValueError("approved must be a boolean.")
+        if action in ("uninstall", "cleanup_uninstall") and any(
+                type(args.get(key, False)) is not bool for key in ("approved", "removal_confirmed")):
+            raise ValueError("Approval and removal confirmation must be booleans.")
         try:
+            if action == "cleanup_uninstall":
+                return self.cleanup_uninstall(browser, args.get("approved", False), args.get("removal_confirmed", False))
             if action == "uninstall":
                 return self.uninstall(browser, args.get("approved", False))
             if action == "check" or browser == "safari":
@@ -61,6 +65,18 @@ class Setup:
             return result("uninstall_unconfirmed", browser,
                           "Chrome removal could not be verified. Check Agent Browser is gone from the intended profile at chrome://extensions/. Do not retry automatically. Native host files were retained.")
         return blocker(browser, reply)
+
+    def cleanup_uninstall(self, browser, approved, confirmed):
+        if not (approved and confirmed):
+            return result("consent_required", browser, "Ask the user to confirm they removed Agent Browser and approve moving its local files to Trash. For Chrome, check every profile that had the extension.")
+        if browser == "chrome":
+            reply = self.service.request(browser, "status")
+            if reply["status"] not in ("extension_disconnected", "extension_pending", "extension_required") or reply.get("update_required") is True:
+                return result("cleanup_refused", browser, "The current Chrome connection state does not permit cleanup. No files were moved.")
+        outcome = cleanup_installation(browser)
+        moved, errors = outcome["moved"], outcome["errors"]
+        status = "cleanup_partial" if moved and errors else "cleanup_refused" if errors else "cleanup_complete"
+        return result(status, browser, moved=moved, errors=errors)
 
     def pending(self, backend, profile=None, update=False):
         instructions = backend.loading_instructions()

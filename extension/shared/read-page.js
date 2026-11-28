@@ -97,10 +97,12 @@ function readPage(options) {
       // Pinch zoom and shifted visual viewports make screenshot mapping ambiguous.
       const viewport = window.visualViewport;
       const width = window.innerWidth, height = window.innerHeight;
+      const matchesViewport = (actual, inner, client) => Number.isFinite(actual) &&
+        (Math.abs(actual - inner) <= 1 || (Number.isFinite(client) && Math.abs(actual - client) <= 1));
       if (!viewport || viewport.scale !== 1 || viewport.offsetLeft !== 0 || viewport.offsetTop !== 0 ||
           !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 ||
-          !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height) ||
-          Math.abs(viewport.width - width) > 1 || Math.abs(viewport.height - height) > 1) return result('action_unavailable');
+          !matchesViewport(viewport.width, width, document.documentElement?.clientWidth) ||
+          !matchesViewport(viewport.height, height, document.documentElement?.clientHeight)) return result('action_unavailable');
       let x = 0, y = 0, right = width, bottom = height;
       if (hasSelector) {
         if (typeof selector !== 'string' || !selector) return result('invalid_selector');
