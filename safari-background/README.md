@@ -76,6 +76,8 @@ The MV2 background polls one second after each native exchange, reduced to 50 ms
 
 ### Optional zero-window qualification
 
+The internal `qualify_window_diagnose {}` operation samples only the native host's read-only process, foreground, Quartz and Accessibility gates. It does not use a profile, inspect or consume an arm, touch the mailbox, contact the extension or dispatch a browser request. `qualification_ready` describes only that native snapshot, not permission or approval to dispatch. `qualification_blocked` reports the failing native gate; detailed snapshot reasons are `quartz_snapshot_unavailable`, `quartz_owner_unverified`, `accessibility_timeout_configuration_failed`, `accessibility_query_failed` and `accessibility_result_invalid`. An AX query failure does not establish its cause: Accessibility trust is process-specific and does not override the signed host's sandbox. No permissions are requested; a shell AX result is not equivalent evidence.
+
 With separate operator consent for possible focus changes or placement in a different profile, use the signed production extension in two distinguishable disposable named profiles:
 
 1. Independently confirm the intended named profile and match its popup UUID to `AGENT_BROWSER_SAFARI_PROFILE`. With background requests already enabled, click **Arm one zero-window qualification (120 seconds)** in that profile's setup popup. The arm is tied to the browser-authenticated UUID and the current background instance; restarting it or changing the setup selection invalidates the arm. The caller cannot arm it.

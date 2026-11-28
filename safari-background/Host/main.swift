@@ -8,17 +8,26 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     func response(_ status: String) -> [String: Any] { ["v": IPC.version, "id": id, "status": status] }
     func blocked(_ reason: IPC.QualificationBlock) -> [String: Any] { reason.response(id: id) }
     guard IPC.integer(request["v"]) == IPC.version else { return response("protocol_mismatch") }
-    guard Set(request.keys) == ["v", "id", "profile", "operation", "payload", "expires"],
-          IPC.id(request["id"]) != nil, let operation = request["operation"] as? String, IPC.operations.contains(operation),
-          let profileValue = request["profile"] as? String, let profile = UUID(uuidString: profileValue),
+    guard IPC.id(request["id"]) != nil, let operation = request["operation"] as? String, IPC.operations.contains(operation),
           let payload = request["payload"] as? [String: Any], let expires = IPC.integer(request["expires"]) else { return response("invalid_request") }
-    let now = IPC.now
+    let diagnostic = operation == "qualify_window_diagnose"
     let qualification = operation == "qualify_window"
-    guard !qualification || payload.isEmpty else { return response("invalid_request") }
-    guard expires > now else { return qualification ? blocked(.leaseExpired) : response("timeout") }
+    var fields: Set<String> = ["v", "id", "operation", "payload", "expires"]
+    if !diagnostic { fields.insert("profile") }
+    let profile = (request["profile"] as? String).flatMap(UUID.init(uuidString:))
+    guard Set(request.keys) == fields, diagnostic || profile != nil,
+          !(qualification || diagnostic) || payload.isEmpty else { return response("invalid_request") }
+    let now = IPC.now
+    guard expires > now else { return qualification || diagnostic ? blocked(.leaseExpired) : response("timeout") }
     guard expires <= now + 300_000 else { return response("invalid_request") }
     let remaining = expires - now
     let deadline = ProcessInfo.processInfo.systemUptime + Double(remaining) / 1000
+    let safari = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari")
+    let running = safari.count == 1 ? safari.first : nil
+    let browser = running.flatMap { !$0.isTerminated && $0.isFinishedLaunching ? $0 : nil }
+    // Native-only observation: no app group lookup, files, heartbeat, arm or lease.
+    if diagnostic { return diagnoseQualification(id: id, browser: browser, expires: expires, deadline: deadline) }
+    guard let profile else { return response("invalid_request") }
     let kind = payload["kind"] as? String ?? ""
     let mutation = qualification || operation == "open" || operation == "close" || operation == "tab" || operation == "front_open" ||
         (operation == "page" && IPC.pageMutations.contains(kind))
@@ -26,9 +35,6 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     let foregroundMutation = operation == "front_open" || (operation == "tab" && kind == "activate")
     let capture = operation == "capture"
     let uncertain = qualification ? "unconfirmed" : operation == "open" ? "open_unconfirmed" : operation == "close" ? "cleanup_unconfirmed" : "action_unconfirmed"
-    let safari = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari")
-    let running = safari.count == 1 ? safari.first : nil
-    let browser = running.flatMap { !$0.isTerminated && $0.isFinishedLaunching ? $0 : nil }
     if browser == nil && !qualification {
         return response(operation == "close" ? "cleanup_instance_changed" : "disconnected")
     }
@@ -72,10 +78,7 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     }
 
     func qualificationBackgroundBlock() -> IPC.QualificationBlock? {
-        guard let browser, !browser.isTerminated, browser.isFinishedLaunching, safariPID > 0 else { return .safariNotRunning }
-        guard let frontPID, frontPID > 0, frontPID != safariPID, !focus.observed,
-              workspace.frontmostApplication?.processIdentifier == frontPID else { return .foregroundUnverified }
-        return nil
+        qualificationProcessBlock(browser: browser, frontPID: frontPID, workspace: workspace, focus: focus)
     }
 
     func checkedResult(_ data: Data) throws -> [String: Any] {
@@ -157,7 +160,7 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
                     if let reason = qualificationBackgroundBlock() { return blocked(reason) }
                     guard let arm = consumed else { return blocked(.armMissingOrInvalid) }
                     guard let frontPID else { return blocked(.foregroundUnverified) }
-                    let windowBlock = qualificationWindowBlock(pid: safariPID, frontPID: frontPID)
+                    let windowBlock = qualificationWindowFailure(pid: safariPID, frontPID: frontPID)?.block
                     if let reason = qualificationBackgroundBlock() { return blocked(reason) }
                     guard live(), IPC.now < arm.expires else { return blocked(.leaseExpired) }
                     if let windowBlock { return blocked(windowBlock) }
@@ -224,9 +227,62 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     return response(claimed && mutation ? uncertain : operation == "status" ? "disconnected" : "timeout")
 }
 
+func qualificationProcessBlock(browser: NSRunningApplication?, frontPID: pid_t?, workspace: NSWorkspace,
+                               focus: FocusEvidence) -> IPC.QualificationBlock? {
+    guard let browser, !browser.isTerminated, browser.isFinishedLaunching, browser.processIdentifier > 0 else { return .safariNotRunning }
+    guard let frontPID, frontPID > 0, frontPID != browser.processIdentifier, !focus.observed,
+          workspace.frontmostApplication?.processIdentifier == frontPID else { return .foregroundUnverified }
+    return nil
+}
+
+func diagnoseQualification(id: String, browser: NSRunningApplication?, expires: Int64, deadline: TimeInterval) -> [String: Any] {
+    let workspace = NSWorkspace.shared
+    let frontPID = workspace.frontmostApplication?.processIdentifier
+    let focus = FocusEvidence()
+    let observer = workspace.notificationCenter.addObserver(
+        forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil
+    ) { _ in focus.mark() }
+    defer { workspace.notificationCenter.removeObserver(observer) }
+    func processBlock() -> IPC.QualificationBlock? {
+        qualificationProcessBlock(browser: browser, frontPID: frontPID, workspace: workspace, focus: focus)
+    }
+    if let reason = processBlock() { return reason.response(id: id) }
+    guard let browser, let frontPID else { return IPC.QualificationBlock.foregroundUnverified.response(id: id) }
+    let failure = qualificationWindowFailure(pid: browser.processIdentifier, frontPID: frontPID)
+    if let reason = processBlock() { return reason.response(id: id) }
+    guard ProcessInfo.processInfo.systemUptime < deadline, IPC.now < expires else {
+        return IPC.QualificationBlock.leaseExpired.response(id: id)
+    }
+    if let failure { return ["v": IPC.version, "id": id, "status": "qualification_blocked", "reason": failure.rawValue] }
+    return ["v": IPC.version, "id": id, "status": "qualification_ready"]
+}
+
+enum QualificationWindowFailure: String {
+    case screenCaptureUnavailable = "screen_capture_unavailable"
+    case foregroundUnverified = "foreground_unverified"
+    case quartzSnapshotUnavailable = "quartz_snapshot_unavailable"
+    case quartzOwnerUnverified = "quartz_owner_unverified"
+    case accessibilityUntrusted = "accessibility_untrusted"
+    case accessibilityTimeoutConfigurationFailed = "accessibility_timeout_configuration_failed"
+    case accessibilityQueryFailed = "accessibility_query_failed"
+    case accessibilityResultInvalid = "accessibility_result_invalid"
+    case safariWindowsPresent = "safari_windows_present"
+
+    var block: IPC.QualificationBlock {
+        switch self {
+        case .screenCaptureUnavailable: return .screenCaptureUnavailable
+        case .foregroundUnverified: return .foregroundUnverified
+        case .accessibilityUntrusted: return .accessibilityUntrusted
+        case .safariWindowsPresent: return .safariWindowsPresent
+        case .quartzSnapshotUnavailable, .quartzOwnerUnverified, .accessibilityTimeoutConfigurationFailed,
+             .accessibilityQueryFailed, .accessibilityResultInvalid: return .windowSnapshotUnavailable
+        }
+    }
+}
+
 // Quartz must establish positive console/foreground evidence independently of AX.
 // Do not filter on name, layer, minimization or profile; no permission requests.
-func qualificationWindowBlock(pid: pid_t, frontPID: pid_t) -> IPC.QualificationBlock? {
+func qualificationWindowFailure(pid: pid_t, frontPID: pid_t) -> QualificationWindowFailure? {
     guard CGPreflightScreenCaptureAccess() else { return .screenCaptureUnavailable }
     guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
           session["kCGSSessionOnConsoleKey"] as? Bool == true,
@@ -238,22 +294,20 @@ func qualificationWindowBlock(pid: pid_t, frontPID: pid_t) -> IPC.QualificationB
         guard AXIsProcessTrusted() else { return .accessibilityUntrusted }
         let app = AXUIElementCreateApplication(pid)
         var value: CFTypeRef?
-        guard AXUIElementSetMessagingTimeout(app, 0.5) == .success,
-              AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-              let value, CFGetTypeID(value) == CFArrayGetTypeID(), let windows = value as? [Any] else {
-            return .windowSnapshotUnavailable
-        }
+        guard AXUIElementSetMessagingTimeout(app, 0.5) == .success else { return .accessibilityTimeoutConfigurationFailed }
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success else { return .accessibilityQueryFailed }
+        guard let value, CFGetTypeID(value) == CFArrayGetTypeID(), let windows = value as? [Any] else { return .accessibilityResultInvalid }
         return windows.isEmpty ? nil : .safariWindowsPresent
     }
 }
 
 func qualificationSurfaceBlock(_ windows: [[String: Any]]?, pid: pid_t, frontPID: pid_t,
-                               resolveSafari: () -> IPC.QualificationBlock?) -> IPC.QualificationBlock? {
-    guard let windows, !windows.isEmpty else { return .windowSnapshotUnavailable }
+                                resolveSafari: () -> QualificationWindowFailure?) -> QualificationWindowFailure? {
+    guard let windows, !windows.isEmpty else { return .quartzSnapshotUnavailable }
     var frontObserved = false
     var safariObserved = false
     for window in windows {
-        guard let owner = IPC.integer(window[kCGWindowOwnerPID as String]), owner > 0 else { return .windowSnapshotUnavailable }
+        guard let owner = IPC.integer(window[kCGWindowOwnerPID as String]), owner > 0 else { return .quartzOwnerUnverified }
         if owner == Int64(frontPID) { frontObserved = true }
         if owner == Int64(pid) { safariObserved = true }
     }
@@ -276,22 +330,35 @@ func verifyGate() -> Bool {
     let id = String(repeating: "a", count: 32)
     let owner = kCGWindowOwnerPID as String
     let front = [owner: 10], safari = [owner: 20]
-    func surface(_ windows: [[String: Any]]?, ax: IPC.QualificationBlock? = nil) -> (IPC.QualificationBlock?, Bool) {
+    func surface(_ windows: [[String: Any]]?, ax: QualificationWindowFailure? = nil) -> (QualificationWindowFailure?, Bool) {
         var queried = false
         let result = qualificationSurfaceBlock(windows, pid: 20, frontPID: 10) { queried = true; return ax }
         return (result, queried)
     }
-    let cases: [([[String: Any]]?, IPC.QualificationBlock?, IPC.QualificationBlock?, Bool)] = [
-        (nil, nil, .windowSnapshotUnavailable, false), ([], nil, .windowSnapshotUnavailable, false),
-        ([safari], nil, .foregroundUnverified, false), ([front, [:]], nil, .windowSnapshotUnavailable, false),
+    let cases: [([[String: Any]]?, QualificationWindowFailure?, QualificationWindowFailure?, Bool)] = [
+        (nil, nil, .quartzSnapshotUnavailable, false), ([], nil, .quartzSnapshotUnavailable, false),
+        ([safari], nil, .foregroundUnverified, false), ([front, [:]], nil, .quartzOwnerUnverified, false),
         ([front], .accessibilityUntrusted, nil, false), ([front, safari], nil, nil, true),
         ([front, safari], .accessibilityUntrusted, .accessibilityUntrusted, true),
-        ([front, safari], .windowSnapshotUnavailable, .windowSnapshotUnavailable, true),
+        ([front, safari], .accessibilityTimeoutConfigurationFailed, .accessibilityTimeoutConfigurationFailed, true),
+        ([front, safari], .accessibilityQueryFailed, .accessibilityQueryFailed, true),
+        ([front, safari], .accessibilityResultInvalid, .accessibilityResultInvalid, true),
         ([front, safari], .safariWindowsPresent, .safariWindowsPresent, true),
     ]
     for (windows, ax, expected, queried) in cases {
         guard surface(windows, ax: ax) == (expected, queried) else { return false }
     }
+    for unavailable in [QualificationWindowFailure.quartzSnapshotUnavailable, .quartzOwnerUnverified,
+                         .accessibilityTimeoutConfigurationFailed, .accessibilityQueryFailed, .accessibilityResultInvalid] {
+        guard unavailable.block == .windowSnapshotUnavailable else { return false }
+    }
+    let diagnostic: [String: Any] = ["v": IPC.version, "id": id, "operation": "qualify_window_diagnose",
+                                     "payload": [String: Any](), "expires": IPC.now - 1]
+    var badDiagnostic = diagnostic
+    badDiagnostic["profile"] = profile.uuidString
+    guard let expired = try? run(diagnostic, id: id),
+          expired["status"] as? String == "qualification_blocked", expired["reason"] as? String == "lease_expired",
+          let invalid = try? run(badDiagnostic, id: id), invalid["status"] as? String == "invalid_request" else { return false }
     let refusal = IPC.QualificationBlock.safariWindowsPresent.response(id: id)
     let unexpected = refusal.merging(["ref": "unsafe"]) { first, _ in first }
     let nativeOnly = IPC.QualificationBlock.accessibilityUntrusted.response(id: id)

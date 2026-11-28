@@ -178,6 +178,15 @@ test("qualification fails closed for any existing window, stale arm, or selectio
   }
 });
 
+test("the native qualification diagnostic cannot dispatch through the extension or consume its arm", async () => {
+  const browser = await qualificationHarness();
+  assert.equal((await browser.popup("arm_qualification")).status, "qualification_armed");
+  assert.equal((await browser.call("qualify_window_diagnose", {})).status, "invalid_request");
+  assert.deepEqual(await browser.request({requestExtras: {operation: "qualify_window_diagnose"}}), qualificationReply("invalid_request"));
+  assert.equal(browser.windowCreates.length, 0);
+  assert.deepEqual(await browser.request(), qualificationReply("candidate_observed"));
+});
+
 test("qualification reports failures before create without reusing the arm", async () => {
   let grant = true;
   for (const [options, request, reason] of [

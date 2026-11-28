@@ -14,12 +14,17 @@ LIMIT = 65536
 VERSION = 3
 MAX_TIMEOUT = 300
 OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk",
-              "qualify_window"}
+              "qualify_window", "qualify_window_diagnose"}
 PAGE_MUTATIONS = ("click", "scroll", "fill", "select", "press", "submit")
 QUALIFICATION_BLOCK_REASONS = frozenset((
     "arm_missing_or_invalid", "safari_not_running", "foreground_unverified", "screen_capture_unavailable",
     "window_snapshot_unavailable", "accessibility_untrusted", "safari_windows_present", "lease_expired",
     "permissions_unverified", "mailbox_unavailable",
+))
+QUALIFICATION_DIAGNOSTIC_REASONS = frozenset((
+    "safari_not_running", "foreground_unverified", "screen_capture_unavailable", "quartz_snapshot_unavailable",
+    "quartz_owner_unverified", "accessibility_untrusted", "accessibility_timeout_configuration_failed",
+    "accessibility_query_failed", "accessibility_result_invalid", "safari_windows_present", "lease_expired",
 ))
 DEFAULT_BINARY = Path.home() / "Applications/AgentBrowserSafari.app/Contents/MacOS/AgentBrowserSafari"
 
@@ -47,13 +52,15 @@ def request(operation, payload, timeout):
             or type(timeout) not in (int, float) or not 0 < timeout <= MAX_TIMEOUT):
         return {"status": "invalid_request"}
     qualification = operation == "qualify_window"
-    if qualification and payload:
+    diagnostic = operation == "qualify_window_diagnose"
+    if (qualification or diagnostic) and payload:
         return {"status": "invalid_request"}
-    profile = os.environ.get("AGENT_BROWSER_SAFARI_PROFILE", "")
-    try:
-        profile = str(UUID(profile))
-    except ValueError:
-        return {"status": "profile_required"}
+    frame = {}
+    if not diagnostic:
+        try:
+            frame["profile"] = str(UUID(os.environ.get("AGENT_BROWSER_SAFARI_PROFILE", "")))
+        except ValueError:
+            return {"status": "profile_required"}
     binary = Path(os.environ.get("AGENT_BROWSER_SAFARI_BINARY", str(DEFAULT_BINARY))).expanduser()
     if not binary.is_absolute():
         return {"status": "extension_required"}
@@ -63,8 +70,8 @@ def request(operation, payload, timeout):
                  else "action_unconfirmed" if operation in ("tab", "front_open") or (
                      operation == "page" and payload.get("kind") in PAGE_MUTATIONS) else None)
     try:
-        data = json.dumps({"v": VERSION, "id": message_id, "profile": profile, "operation": operation,
-                           "payload": payload, "expires": expires}, separators=(",", ":"), allow_nan=False).encode()
+        frame.update(v=VERSION, id=message_id, operation=operation, payload=payload, expires=expires)
+        data = json.dumps(frame, separators=(",", ":"), allow_nan=False).encode()
         if len(data) > LIMIT:
             return {"status": "invalid_request"}
     except (TypeError, ValueError, RecursionError):
@@ -84,12 +91,15 @@ def request(operation, payload, timeout):
             return {"status": "disconnected", "update_required": True}
         if reply["v"] != VERSION:
             raise ValueError
-        if qualification:
-            candidate = set(reply) == {"v", "id", "status"} and reply["status"] == "candidate_observed"
+        if qualification or diagnostic:
+            success = "qualification_ready" if diagnostic else "candidate_observed"
+            if set(reply) == {"v", "id", "status"} and reply["status"] == success:
+                return {"status": success}
+            reasons = QUALIFICATION_DIAGNOSTIC_REASONS if diagnostic else QUALIFICATION_BLOCK_REASONS
             if (set(reply) == {"v", "id", "status", "reason"} and reply["status"] == "qualification_blocked"
-                    and isinstance(reply["reason"], str) and reply["reason"] in QUALIFICATION_BLOCK_REASONS):
+                    and isinstance(reply["reason"], str) and reply["reason"] in reasons):
                 return {"status": "qualification_blocked", "reason": reply["reason"]}
-            return {"status": "candidate_observed" if candidate else "unconfirmed"}
+            return {"status": "disconnected" if diagnostic else "unconfirmed"}
         return {key: value for key, value in reply.items() if key not in ("v", "id")}
     except (FileNotFoundError, PermissionError):
         return {"status": "extension_required"}

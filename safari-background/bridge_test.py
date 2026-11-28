@@ -68,6 +68,36 @@ class BridgeTest(unittest.TestCase):
                 self.assertEqual(bridge.request("qualify_window", {}, 5), expected)
                 run.assert_called_once()
 
+    def test_native_diagnostic_needs_no_profile_and_exposes_only_fixed_outcomes(self):
+        operation = "qualify_window_diagnose"
+        blocked = "qualification_blocked"
+        disconnected = {"status": "disconnected"}
+        with patch.object(bridge.subprocess, "run") as run:
+            for payload in (None, {"profile": "unsafe"}, {"url": "https://example.com/"}):
+                self.assertEqual(bridge.request(operation, payload, 5), {"status": "invalid_request"})
+            run.assert_not_called()
+
+        cases = [("qualification_ready", {}, {"status": "qualification_ready"}),
+                 ("qualification_ready", {"title": "unsafe"}, disconnected),
+                 ("candidate_observed", {}, disconnected), ("invalid_request", {}, disconnected),
+                 (blocked, {}, disconnected), (blocked, {"reason": "unsafe"}, disconnected),
+                 (blocked, {"reason": ["accessibility_query_failed"]}, disconnected),
+                 (blocked, {"reason": "accessibility_query_failed", "profile": "unsafe"}, disconnected)]
+        cases.extend((blocked, {"reason": reason}, {"status": blocked, "reason": reason})
+                     for reason in bridge.QUALIFICATION_DIAGNOSTIC_REASONS)
+        for status, extras, expected in cases:
+            def host(argv, **kwargs):
+                frame = json.loads(kwargs["input"])
+                self.assertEqual(set(frame), {"v", "id", "operation", "payload", "expires"})
+                self.assertEqual((frame["v"], frame["operation"], frame["payload"]), (3, operation, {}))
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"v": 3, "id": frame["id"],
+                                                                         "status": status, **extras}).encode())
+
+            with self.subTest(status=status, extras=extras), patch.dict(os.environ, {"AGENT_BROWSER_SAFARI_PROFILE": ""}), \
+                    patch.object(bridge.subprocess, "run", side_effect=host) as run:
+                self.assertEqual(bridge.request(operation, {}, 5), expected)
+                run.assert_called_once()
+
     def test_subprocess_timeout_distinguishes_reads_from_possible_writes(self):
         with patch.object(bridge.subprocess, "run", side_effect=subprocess.TimeoutExpired("ipc", 5)):
             for operation, payload, status in (("page", {"kind": "info"}, "timeout"),
@@ -77,6 +107,7 @@ class BridgeTest(unittest.TestCase):
                                                 ("open", {}, "open_unconfirmed"),
                                                 ("close", {}, "cleanup_unconfirmed"),
                                                 ("qualify_window", {}, "unconfirmed"),
+                                                ("qualify_window_diagnose", {}, "timeout"),
                                                 ("capture", {}, "timeout")):
                 with self.subTest(operation=operation, payload=payload):
                     self.assertEqual(bridge.request(operation, payload, 5), {"status": status})

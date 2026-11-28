@@ -8,7 +8,7 @@ enum IPC {
     static let version: Int64 = 3
     static let limit = 65_536
     static let stateLimit = 262_144
-    static let operations: Set<String> = ["status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk", "qualify_window"]
+    static let operations: Set<String> = ["status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk", "qualify_window", "qualify_window_diagnose"]
     static let qualificationLifetime: Int64 = 120_000
     static let pageMutations: Set<String> = ["click", "scroll", "fill", "select", "press", "submit"]
     static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
