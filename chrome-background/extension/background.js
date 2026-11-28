@@ -698,7 +698,12 @@ function connect() {
         // The official self-uninstall can terminate the worker and host before
         // anything else can be reported. A sent marker is not proof of removal.
         try { await chrome.management.uninstallSelf({ showConfirmDialog: false }); }
-        catch (_) { /* The native client reports the result as unverified. */ }
+        catch (_) {
+          // A browser rejection must not strand ordinary read operations.
+          // The same request is never replayed by the native client.
+          uninstallDispatched = false;
+          if (port !== connection) chrome.alarms.create(reconnect, { delayInMinutes: 0.5 });
+        }
       }
     }
   });
