@@ -277,6 +277,8 @@ class ServerTest(unittest.TestCase):
         refused = self.setup("uninstall", approved=True)
         self.assertEqual(refused["status"], "extension_ambiguous")
         self.assertIn("No uninstall request was sent", refused["message"])
+        self.chrome.uninstall_status = "uninstall_rejected"
+        self.assertEqual(self.setup("uninstall", approved=True)["status"], "uninstall_rejected")
 
     def test_uninstall_cleanup_requires_confirmation_and_no_live_connection(self):
         with patch("browser_setup.cleanup_installation", return_value={"moved": [], "errors": []}) as cleanup:

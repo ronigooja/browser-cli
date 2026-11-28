@@ -68,6 +68,8 @@ class Setup:
             return result(status, browser, "Multiple Chrome extensions are connected. No uninstall request was sent. Disconnect all profiles except the intended one, then check again.")
         if status == "uninstall_unavailable":
             return result(status, browser, "Chrome did not offer self-removal. Remove Agent Browser manually at chrome://extensions/ in the intended profile.")
+        if status == "uninstall_rejected":
+            return result(status, browser, "Chrome rejected the self-removal request. Check the intended profile at chrome://extensions/ before taking further action. Native host files were retained.")
         return blocker(browser, reply)
 
     def cleanup_uninstall(self, browser, approved, confirmed):
