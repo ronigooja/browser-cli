@@ -159,7 +159,9 @@ class BrowserOperations:
             fields.update(self.issue(Target(browser, tab), scope, candidate=not created))
             if created and action == "open_background" and "cleanup_token" not in fields:
                 fields["cleanup_note"] = "The tab cannot be safely identified for automated cleanup; leave it open."
-            return result("ok", browser, **fields)
+            message = ("An existing tab matched and was not activated. Confirm it before requesting activation."
+                       if not created and action == "open_foreground" else None)
+            return result("ok", browser, message, **fields)
         token = args["tab_ref"]
         target = self.targets.get(token, scope)
         if target is None or target.browser != browser:

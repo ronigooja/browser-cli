@@ -258,8 +258,8 @@ async function frontOpen(state, data, expires) {
   if (Date.now() >= expires) return { status: "timeout" };
   if (candidates.length > 1) return { status: "tab_ambiguous", tabs: candidates };
   if (candidates.length === 1) {
-    const result = await tabOperation(state, { ref: candidates[0].ref, expected_url: target.href, kind: "activate" }, expires);
-    return result.status === "ok" ? { status: "ok", tab: result.tab, created: false } : result;
+    // Opening a URL is not consent to activate somebody's existing tab.
+    return { status: "ok", tab: candidates[0], created: false };
   }
   const windows = await chrome.windows.getAll({ populate: true });
   const eligible = windows.filter(normalWindow);

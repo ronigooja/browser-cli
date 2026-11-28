@@ -207,12 +207,13 @@ test("foreground open never confirms a redirected or uncertain created tab", asy
   assert.equal(browser.calls.create.length, 1);
 });
 
-test("foreground open reuses one exact existing tab and refuses ambiguity", async () => {
+test("foreground open returns an existing candidate without touching it and refuses ambiguity", async () => {
   const browser = production([{id: 1, url: "https://example.com/", title: "Example"}]);
   const result = await browser.request("front_open", {url: browser.url});
   assert.equal(result.status, "ok");
   assert.equal(result.created, false);
   assert.equal(browser.calls.create.length, 0);
+  assert.equal(browser.calls.execute.length, 0);
   const ambiguous = production([{id: 1, url: browser.url}, {id: 2, url: browser.url}]);
   assert.equal((await ambiguous.request("front_open", {url: browser.url})).status, "tab_ambiguous");
   assert.equal(ambiguous.calls.create.length, 0);
