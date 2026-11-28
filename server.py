@@ -59,7 +59,7 @@ TOOLS = [
     tool("cleanup_tab", "Close only a tab created by read_page, using the cleanup token after the browser task is finished. The browser may close the window if this was its only tab.", {
         "cleanup_token": token("The cleanup token returned by read_page or browser_tabs, not a candidate or resume token."),
     }, ["cleanup_token"], destructiveHint=True, openWorldHint=False),
-    tool("setup_extension", "Check the selected local browser extension. For Chrome, use prepare after explicit user approval, then install once with its grant and the sole profile or the profile the user selects. For an update_required result, obtain explicit approval to update and use update=true on prepare. Relay the full manual loading or reload instructions, then check. Safari production setup is manual; never install the development probe.", {
+    tool("setup_extension", "Check or manage the selected local extension. For Chrome setup, obtain explicit approval before prepare and use its install grant. For an update_required result, obtain explicit update approval and use update=true. Relay the manual loading or reload instructions, then check. For uninstall, identify the intended profile and obtain approval; request Chrome self-removal or relay Safari's instructions. Do not treat disconnect as removal. Use cleanup_uninstall only after the user confirms browser removal and approves moving its files to Trash.", {
         "browser": enum(BROWSERS),
         "action": enum(("check", "prepare", "install", "uninstall", "cleanup_uninstall")),
         "approved": {"type": "boolean", "description": "For prepare, uninstall, or cleanup_uninstall, only after explicit user approval."},

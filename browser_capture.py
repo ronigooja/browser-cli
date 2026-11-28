@@ -102,7 +102,7 @@ def crop_png(png, geometry):
                 result = cropped.read(MAX_IMAGE)
     except (OSError, subprocess.SubprocessError):
         raise CaptureError("capture_geometry_unavailable") from None
-    if len(b64encode(result)) + len(PREFIX) > MAX_IMAGE or png_size(result) != (w, h):
+    if 4 * ((len(result) + 2) // 3) + len(PREFIX) > MAX_IMAGE or png_size(result) != (w, h):
         raise CaptureError("capture_geometry_unavailable")
     return result
 

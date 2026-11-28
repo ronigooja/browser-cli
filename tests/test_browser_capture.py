@@ -1,5 +1,7 @@
+from base64 import b64decode, b64encode
 import struct
 import unittest
+from zlib import crc32
 
 from browser_capture import CaptureError, PREFIX, collect, pixel_box, png_size
 
@@ -9,11 +11,8 @@ PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9
 
 class CaptureTest(unittest.TestCase):
     def test_collects_ordered_chunks_across_frame_boundaries(self):
-        from base64 import b64decode, b64encode
-
         original = b64decode(PNG)
         # Add a valid ancillary chunk so this fixture is larger than one frame payload.
-        from zlib import crc32
         payload = b"tEXt" + b"Sample\x00" + b"x" * 96000
         png = original[:-12] + struct.pack(">I", len(payload) - 4) + payload + struct.pack(">I", crc32(payload)) + original[-12:]
         image = PREFIX + b64encode(png).decode()
