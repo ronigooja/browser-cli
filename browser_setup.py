@@ -16,6 +16,7 @@ QUALIFICATION_BLOCKERS = {
     "screen_capture_unavailable": "The host could not verify existing Screen Recording access.",
     "window_snapshot_unavailable": "The host could not reliably determine whether Safari has windows with the permissions it already has.",
     "accessibility_untrusted": "Quartz found Safari surfaces, but the host does not have existing Accessibility access to distinguish them from windows.",
+    "accessibility_query_failed": "Quartz found Safari surfaces, but the signed host could not read Safari’s Accessibility window list.",
     "safari_windows_present": "The window check found a Safari window.",
     "lease_expired": "The test request expired before it could be dispatched.",
     "permissions_unverified": "The extension could not verify the access and browser checks required for this test.",
@@ -37,13 +38,13 @@ class Setup:
     def call(self, args, scope):
         allowed = {"check": set(), "prepare": {"approved", "update"}, "install": {"grant", "profile"},
                    "uninstall": {"approved"}, "cleanup_uninstall": {"approved", "removal_confirmed"},
-                   "qualify_window": {"approved"}}
+                   "qualify_window": {"approved"}, "qualify_window_diagnose": set()}
         if not isinstance(args, dict) or args.get("browser") not in BROWSERS:
             raise ValueError("Choose safari or chrome for setup_extension.")
         browser, action = args["browser"], args.get("action")
         if not isinstance(action, str) or action not in allowed or args.keys() - allowed[action] - {"action", "browser"}:
             raise ValueError("Invalid action or arguments for setup_extension.")
-        if action == "qualify_window" and browser != "safari":
+        if action in ("qualify_window", "qualify_window_diagnose") and browser != "safari":
             raise ValueError("Zero-window qualification is only for Safari.")
         if browser == "safari" and action not in ("check", "uninstall", "cleanup_uninstall", "qualify_window") and (action == "install" or {"approved", "update"} & args.keys()):
             raise ValueError("Safari setup is manual; use check for production setup guidance.")
@@ -56,6 +57,8 @@ class Setup:
                 type(args.get(key, False)) is not bool for key in ("approved", "removal_confirmed")):
             raise ValueError("Approval and removal confirmation must be booleans.")
         try:
+            if action == "qualify_window_diagnose":
+                return self.diagnose_window()
             if action == "qualify_window":
                 return self.qualify_window(args.get("approved", False))
             if action == "cleanup_uninstall":
@@ -87,6 +90,17 @@ class Setup:
         message = ("Safari received a window creation request, but its outcome could not be verified."
                    if dispatched else "Could not establish whether Safari received a window creation request.")
         return result("qualification_unconfirmed", "safari", message + " Inspect Safari before another attempt; no retry was sent.", dispatched=dispatched)
+
+    def diagnose_window(self):
+        reply = self.service.request("safari", "qualify_window_diagnose")
+        status, reason = reply["status"], reply.get("reason")
+        if status == "qualification_ready":
+            return result(status, "safari", "Native preflight passed. No window was opened and no arm was consumed.", dispatched=False)
+        if status == "qualification_blocked" and isinstance(reason, str) and reason in QUALIFICATION_BLOCKERS:
+            return result(status, "safari", QUALIFICATION_BLOCKERS[reason], reason=reason, dispatched=False)
+        if status in ("extension_disconnected", "extension_required", "permission_required", "profile_required"):
+            return blocker("safari", reply)
+        return result("diagnostic_unavailable", "safari", "No verified native preflight result was returned.", dispatched=False)
 
     def uninstall(self, browser, approved):
         if not approved:

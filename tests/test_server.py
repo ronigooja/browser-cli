@@ -53,6 +53,8 @@ class Fake:
         if operation == "qualify_window":
             return {"status": getattr(self, "qualification_status", "candidate_observed"), "cleanup_token": "not-a-grant",
                     **getattr(self, "qualification_fields", {})}
+        if operation == "qualify_window_diagnose":
+            return {"status": "qualification_blocked", "reason": "accessibility_query_failed"}
         raise AssertionError(operation)
 
     def profiles(self):
@@ -332,6 +334,12 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(reply["status"], "qualification_unconfirmed")
         self.assertIsNone(reply["dispatched"])
         self.assertNotIn("reason", reply)
+
+    def test_safari_window_diagnostic_never_sends_qualification(self):
+        reply = self.setup("qualify_window_diagnose", browser="safari")
+        self.assertEqual(reply["reason"], "accessibility_query_failed")
+        self.assertIs(reply["dispatched"], False)
+        self.assertEqual([(op, data) for op, data, _ in self.safari.calls], [("qualify_window_diagnose", {})])
 
     def test_setup_consent_profile_connection(self):
         self.chrome.state = "extension_required"
