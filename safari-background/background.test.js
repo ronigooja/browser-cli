@@ -15,18 +15,20 @@ const viewportCrop = {x: 0, y: 0, width: 800, height: 600, viewport_width: 800, 
 
 async function harness({windows = [], grant = true, privateAccess = false, ignoreDocumentTarget = false,
   getAll, nativeMessage, checkPrivate, pageResult, captureImage, operationChangedDocument = false,
-  captureEvent, redirect} = {}) {
+  captureEvent, redirect, qualificationEvent, qualificationThrows = false} = {}) {
   let scripts = 0, creates = 0, closes = 0, focuses = 0, captures = 0;
+  const windowCreates = [];
   let frameId = documentId;
   let now = Date.now();
   const updates = [];
   const events = () => ({addListener(callback) { this.fire = callback; }});
-  const onRemoved = events(), onActivated = events(), onFocusChanged = events(), onCommitted = events();
+  const onRemoved = events(), onActivated = events(), onFocusChanged = events(), onCommitted = events(), onCreated = events();
   const onUpdated = events(), onReplaced = events(), onDetached = events(), onAttached = events();
   const profile = randomUUID();
   const window = () => windows[0];
   const browser = {
-    runtime: {onMessage: listener, sendNativeMessage: (_app, message) => nativeMessage(message)},
+    runtime: {id: "extension", getURL: name => `safari-extension://test/${name}`, onMessage: events(),
+      sendNativeMessage: (_app, message) => nativeMessage(message)},
     extension: {inIncognitoContext: false, isAllowedIncognitoAccess: checkPrivate || (async () => privateAccess)},
     permissions: {contains: async () => grant},
     storage: {local: {get: async () => ({enabledProfile: profile}), remove: async () => {}}},
@@ -60,7 +62,17 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
         if (captureEvent === "document") frameId = randomUUID();
         return captureImage;
       }},
-    windows: {getAll: getAll || (async () => windows), get: async () => window(), onFocusChanged,
+    windows: {getAll: getAll || (async () => windows), get: async () => window(), onFocusChanged, onCreated,
+      create: async properties => {
+        windowCreates.push(properties);
+        if (qualificationThrows) throw Error("reply lost");
+        const created = {id: 10, type: "normal", incognito: false, focused: false,
+          tabs: [{...existing, windowId: 10, url: qualificationEvent === "redirect" ? `${url}different` : properties.url}]};
+        windows = [created];
+        onCreated.fire(qualificationEvent === "other_window" ? {id: 11} : created);
+        if (qualificationEvent === "focus") onFocusChanged.fire(10);
+        return created;
+      },
       update: async () => { focuses++; windows = [{...window(), focused: true}]; onFocusChanged.fire(); }},
     webNavigation: {onBeforeNavigate: listener, onCommitted,
       getFrame: async ({tabId}) => ({url: window()?.tabs.find(tab => tab.id === tabId)?.url, documentId: frameId,
@@ -80,7 +92,7 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
     }},
   };
   const delays = [];
-  const context = vm.createContext({browser, crypto: {randomUUID}, URL, Date: {now: () => now},
+  const context = vm.createContext({browser, crypto: {randomUUID}, URL, Date: {now: () => now}, performance: {now: () => now},
     setTimeout(_callback, delay) { delays.push(delay); return 1; }, clearTimeout() {}});
   vm.runInContext(readFileSync(join(__dirname, "../extension/shared/read-page.js"), "utf8"), context);
   vm.runInContext('if (typeof agentBrowserPageOperation !== "function") { globalThis.agentBrowserPageOperation = function agentBrowserPageOperation() {}; }', context);
@@ -94,11 +106,83 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
     advance: ms => { now += ms; },
     changeProfile: () => vm.runInContext("configure(crypto.randomUUID())", context),
     disable: () => vm.runInContext('setup("disable")', context),
+    popup: (command, sender = {id: browser.runtime.id, url: browser.runtime.getURL("setup.html")}) =>
+      new Promise(resolve => { if (!browser.runtime.onMessage.fire(command, sender, resolve)) resolve(null); }),
     profile, instance: vm.runInContext("instance", context),
-    counters: () => ({scripts, creates, closes, focuses, captures}), updates};
+    counters: () => ({scripts, creates, closes, focuses, captures}), updates, windowCreates};
 }
 
 const windowWithTab = () => [{id: 7, type: "normal", incognito: false, focused: true, tabs: [{...existing}]}];
+
+async function qualificationHarness(options) {
+  const arm = randomUUID();
+  let attempts = 0, result, next;
+  const browser = await harness({...options, nativeMessage: async message => {
+    const profile = browser.profile, instance = browser.instance;
+    if (message.phase === "identify") return {status: "identified", profile};
+    if (message.phase === "arm_qualification") {
+      attempts++;
+      assert.equal(message.selectedProfile, profile);
+      return {status: "qualification_armed", profile, instance, arm};
+    }
+    if (message.phase === "pull") return next;
+    if (message.phase === "result") result = message.answer;
+  }});
+  return {...browser, attempts: () => attempts, request: async ({payload = {}, token = arm, profile = browser.profile,
+    instance = browser.instance} = {}) => {
+    result = undefined;
+    next = {status: "claimed", profile, instance, arm: token,
+      request: {v: 3, id: "c".repeat(32), operation: "qualify_window", payload, expires: Date.now() + 200000}};
+    await browser.poll();
+    return result && JSON.parse(JSON.stringify(result));
+  }};
+}
+
+test("qualification requires the exact bundled popup and grant, and yields only a one-shot fixture candidate", async () => {
+  const browser = await qualificationHarness();
+  assert.equal((await browser.request()).status, "unconfirmed");
+  assert.equal(await browser.popup("arm_qualification", {id: "extension", url: "https://example.com/"}), null);
+  assert.equal(browser.attempts(), 0);
+  assert.equal((await browser.popup("arm_qualification")).status, "qualification_armed");
+  assert.equal((await browser.call("qualify_window", {})).status, "unconfirmed");
+  assert.equal((await browser.request({payload: {url}})).status, "invalid_request");
+  assert.equal((await browser.request({token: randomUUID()})).status, "unconfirmed");
+  assert.equal(await browser.request({instance: randomUUID()}), undefined);
+  assert.equal(await browser.request({profile: randomUUID()}), undefined);
+  assert.equal(browser.windowCreates.length, 0);
+  assert.deepEqual(await browser.request(), {v: 3, id: "c".repeat(32), status: "candidate_observed"});
+  assert.deepEqual({...browser.windowCreates[0]}, {
+    url: "https://example.com/#agent-browser-zero-window", type: "normal", focused: false, incognito: false,
+  });
+  assert.equal((await browser.request()).status, "unconfirmed");
+  assert.equal(browser.windowCreates.length, 1);
+});
+
+test("qualification fails closed for any existing window, stale arm, or selection change", async () => {
+  for (const mode of ["private window", "expired", "selection changed"]) {
+    const browser = await qualificationHarness(mode === "private window" ? {windows: [{id: 7, incognito: true}]} : {});
+    assert.equal((await browser.popup("arm_qualification")).status, "qualification_armed");
+    if (mode === "expired") browser.advance(120000);
+    if (mode === "selection changed") browser.changeProfile();
+    const reply = await browser.request();
+    assert.equal(reply?.status, mode === "selection changed" ? undefined : "unconfirmed");
+    assert.equal(browser.windowCreates.length, 0);
+  }
+});
+
+test("qualification never retries or exposes a reference when create, focus or placement evidence is ambiguous", async () => {
+  for (const options of [{qualificationThrows: true}, {qualificationEvent: "focus"},
+    {qualificationEvent: "other_window"}, {qualificationEvent: "redirect"}]) {
+    const browser = await qualificationHarness(options);
+    await browser.popup("arm_qualification");
+    for (let i = 0; i < 2; ++i) {
+      assert.deepEqual(await browser.request(), {v: 3, id: "c".repeat(32), status: "unconfirmed"});
+    }
+    assert.equal(browser.windowCreates.length, 1);
+    assert.equal(browser.counters().creates, 0);
+    assert.equal(browser.counters().focuses, 0);
+  }
+});
 
 test("blocks absent broad grant and unverified private access", async () => {
   const missing = await harness({grant: false});

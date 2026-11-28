@@ -13,7 +13,8 @@ from uuid import UUID
 LIMIT = 65536
 VERSION = 3
 MAX_TIMEOUT = 300
-OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk"}
+OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk",
+              "qualify_window"}
 PAGE_MUTATIONS = ("click", "scroll", "fill", "select", "press", "submit")
 DEFAULT_BINARY = Path.home() / "Applications/AgentBrowserSafari.app/Contents/MacOS/AgentBrowserSafari"
 
@@ -40,6 +41,9 @@ def request(operation, payload, timeout):
     if (not isinstance(operation, str) or operation not in OPERATIONS or not isinstance(payload, dict)
             or type(timeout) not in (int, float) or not 0 < timeout <= MAX_TIMEOUT):
         return {"status": "invalid_request"}
+    qualification = operation == "qualify_window"
+    if qualification and payload:
+        return {"status": "invalid_request"}
     profile = os.environ.get("AGENT_BROWSER_SAFARI_PROFILE", "")
     try:
         profile = str(UUID(profile))
@@ -50,7 +54,7 @@ def request(operation, payload, timeout):
         return {"status": "extension_required"}
     message_id = secrets.token_hex(16)
     expires = math.ceil((time.time() + timeout) * 1000)
-    uncertain = ("open_unconfirmed" if operation == "open" else "cleanup_unconfirmed" if operation == "close"
+    uncertain = ("unconfirmed" if qualification else "open_unconfirmed" if operation == "open" else "cleanup_unconfirmed" if operation == "close"
                  else "action_unconfirmed" if operation in ("tab", "front_open") or (
                      operation == "page" and payload.get("kind") in PAGE_MUTATIONS) else None)
     try:
@@ -75,6 +79,9 @@ def request(operation, payload, timeout):
             return {"status": "disconnected", "update_required": True}
         if reply["v"] != VERSION:
             raise ValueError
+        if qualification:
+            candidate = set(reply) == {"v", "id", "status"} and reply["status"] == "candidate_observed"
+            return {"status": "candidate_observed" if candidate else "unconfirmed"}
         return {key: value for key, value in reply.items() if key not in ("v", "id")}
     except (FileNotFoundError, PermissionError):
         return {"status": "extension_required"}

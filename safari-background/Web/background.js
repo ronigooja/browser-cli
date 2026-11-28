@@ -7,6 +7,8 @@ const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const requestID = /^[\da-f]{32}$/;
 const limit = 65536;
 const version = 3;
+const qualificationURL = "https://example.com/#agent-browser-zero-window";
+const qualificationLifetime = 120000;
 const imageLimit = 12 * 1024 * 1024;
 const imageChunkSize = 48000;
 const imageLifetime = 60000;
@@ -30,6 +32,10 @@ let selectionEpoch = 0;
 let lastActivation = 0;
 let readPinQualified = false;
 let bufferedImage;
+let qualificationArm;
+let windowCreationEpoch = 0;
+let lastCreatedWindow;
+let positiveWindowFocusEpoch = 0;
 
 const native = (phase, extra = {}) => browser.runtime.sendNativeMessage(app, {v: version, phase, instance, ...extra});
 const expired = expires => Date.now() >= expires;
@@ -52,7 +58,7 @@ function validPayload(operation, data) {
   const ref = value => typeof value === "string" && value.length === 73 && value.split(".").every(part => uuid.test(part));
   const selector = value => typeof value === "string" && value.length > 0 && value.length <= 2000;
   const pinned = () => ref(data.ref) && !!httpURL(data.expected_url);
-  if (operation === "status" || operation === "list") return only();
+  if (operation === "status" || operation === "list" || operation === "qualify_window") return only();
   if (operation === "find" || operation === "open" || operation === "front_open") return only("url") && !!httpURL(data.url);
   if (operation === "tab") return pinned() && only("ref", "expected_url", "kind", "url") &&
     ["navigate", "activate", "close"].includes(data.kind) && (data.kind === "navigate" ? !!httpURL(data.url) : !("url" in data));
@@ -100,6 +106,7 @@ function forget(id) {
 const removed = browser.tabs?.onRemoved;
 const activated = browser.tabs?.onActivated;
 const windowFocusChanged = browser.windows?.onFocusChanged;
+const windowCreated = browser.windows?.onCreated;
 const beforeNavigate = browser.webNavigation?.onBeforeNavigate;
 const committed = browser.webNavigation?.onCommitted;
 removed?.addListener(id => {
@@ -112,7 +119,8 @@ activated?.addListener(({tabId}) => {
   const entry = tabs.get(tabId);
   if (entry) delete entry.ownership; // The user may have adopted this tab.
 });
-windowFocusChanged?.addListener(() => { lastActivation++; });
+windowFocusChanged?.addListener(id => { lastActivation++; if (id !== -1) positiveWindowFocusEpoch++; });
+windowCreated?.addListener(window => { windowCreationEpoch++; lastCreatedWindow = window?.id; });
 browser.tabs?.onReplaced?.addListener((_new, old) => forget(old));
 browser.tabs?.onDetached?.addListener(forget);
 browser.tabs?.onAttached?.addListener(forget);
@@ -583,16 +591,46 @@ async function frontOpen({url}, expires) {
   } catch (_) { return actionUnconfirmed; }
 }
 
+async function qualifyWindow(expires, armID) {
+  const arm = qualificationArm;
+  const unavailable = {status: "unconfirmed"};
+  if (!arm || arm.id !== armID) return unavailable;
+  qualificationArm = undefined; // No second attempt even if checking or dispatch throws.
+  const valid = () => arm.profile === enabledProfile && arm.selection === selectionEpoch &&
+    performance.now() < arm.ends && !expired(expires);
+  if (!valid() || !windowCreated?.addListener || !windowFocusChanged?.addListener || !browser.windows?.create) return unavailable;
+  try {
+    if (await setupStatus() !== "ok" || await originAllowed(qualificationURL) !== true || !valid()) return unavailable;
+    const focus = positiveWindowFocusEpoch, activation = lastActivation, creation = windowCreationEpoch;
+    // Use the raw snapshot: private, popup and unknown windows all disqualify a trial.
+    const before = await browser.windows.getAll({populate: false});
+    if (!Array.isArray(before) || before.length !== 0 || !valid() ||
+        lastActivation !== activation || windowCreationEpoch !== creation) return unavailable;
+    const created = await browser.windows.create({url: qualificationURL, type: "normal", focused: false, incognito: false});
+    const after = await browser.windows.getAll({populate: true});
+    const candidate = Array.isArray(after) && after.length === 1 ? after[0] : null;
+    const tab = Array.isArray(candidate?.tabs) && candidate.tabs.length === 1 ? candidate.tabs[0] : null;
+    // This is evidence of a candidate only, not a native profile-placement assertion.
+    if (await setupStatus() !== "ok" || !valid() || positiveWindowFocusEpoch !== focus || windowCreationEpoch !== creation + 1 ||
+        !normal(created) || created.focused !== false || !normal(candidate) || candidate.focused !== false ||
+        candidate.id !== created.id || lastCreatedWindow !== created.id || !regular(tab) || tab.windowId !== candidate.id ||
+        tab.url !== qualificationURL || (tab.pendingUrl !== undefined && tab.pendingUrl !== qualificationURL)) return unavailable;
+    return {status: "candidate_observed"};
+  } catch (_) { return unavailable; }
+}
+
 function uncertainStatus(operation, payload) {
+  if (operation === "qualify_window") return "unconfirmed";
   if (operation === "open") return "open_unconfirmed";
   if (operation === "close") return "cleanup_unconfirmed";
   if (operation === "tab" || operation === "front_open" || (operation === "page" && pageWrites.has(payload?.kind))) return "action_unconfirmed";
   return null;
 }
 
-async function execute(request) {
+async function execute(request, armID) {
   const {operation, payload, expires} = request;
   if (!validPayload(operation, payload) || !Number.isSafeInteger(expires)) return {status: "invalid_request"};
+  if (operation === "qualify_window") return qualifyWindow(expires, armID);
   if (expired(expires)) return {status: "timeout"};
   const selection = selectionEpoch;
   const status = await setupStatus();
@@ -643,7 +681,7 @@ async function poll(profile) {
       request?.v !== version || typeof request.id !== "string" || !requestID.test(request.id)) return;
   if (selection !== selectionEpoch) return;
   let result;
-  try { result = await execute(request); }
+  try { result = await execute(request, typeof grant.arm === "string" ? grant.arm.toLowerCase() : undefined); }
   catch (_) { result = {status: uncertainStatus(request.operation, request.payload) ?? "browser_error"}; }
   if (selection !== selectionEpoch) result = {status: uncertainStatus(request.operation, request.payload) ?? "disconnected"};
   await native("result", {selectedProfile: profile, id: request.id,
@@ -664,7 +702,7 @@ function schedule(delay = liveImage() ? imagePollInterval : interval) {
 function configure(profile) {
   const selected = typeof profile === "string" && uuid.test(profile) ? profile.toLowerCase() : undefined;
   if (enabledProfile !== selected) {
-    selectionEpoch++; readPinQualified = false; bufferedImage = undefined; refs.clear(); tabs.clear();
+    selectionEpoch++; readPinQualified = false; bufferedImage = undefined; qualificationArm = undefined; refs.clear(); tabs.clear();
   }
   enabledProfile = selected;
   if (!enabledProfile && timer !== undefined) { clearTimeout(timer); timer = undefined; }
@@ -683,6 +721,21 @@ async function setup(command) {
   const identity = await native("identify");
   if (identity?.status !== "identified" || !uuid.test(identity.profile)) return {status: identity?.status ?? "identity_unavailable"};
   const profile = identity.profile.toLowerCase();
+  if (command === "arm_qualification") {
+    if (enabledProfile !== profile) return {status: "qualification_not_enabled"};
+    const status = await permissionsStatus();
+    if (status !== "ok") return {status};
+    if (await originAllowed(qualificationURL) !== true) return {status: "site_access_required"};
+    const selection = selectionEpoch, ends = performance.now() + qualificationLifetime;
+    const result = await native("arm_qualification", {selectedProfile: profile});
+    if (result?.status !== "qualification_armed" || result.profile?.toLowerCase() !== profile ||
+        result.instance?.toLowerCase() !== instance || typeof result.arm !== "string" || !uuid.test(result.arm) ||
+        selection !== selectionEpoch || enabledProfile !== profile) {
+      return {status: result?.status === "qualification_already_armed" ? result.status : "setup_unavailable"};
+    }
+    qualificationArm = {profile, selection, ends, id: result.arm.toLowerCase()};
+    return {status: "qualification_armed", profile};
+  }
   if (command === "enable") {
     const status = await permissionsStatus();
     if (status !== "ok") return {status, profile};
@@ -696,7 +749,7 @@ async function setup(command) {
 let setupQueue = Promise.resolve();
 browser.runtime.onMessage.addListener((request, sender, respond) => {
   if (sender.id !== browser.runtime.id || sender.url !== browser.runtime.getURL("setup.html") ||
-      !["identify", "enable", "disable"].includes(request)) return false;
+      !["identify", "enable", "disable", "arm_qualification"].includes(request)) return false;
   setupQueue = setupQueue.then(() => setup(request)).then(respond, () => respond({status: "setup_unavailable"}));
   return true;
 });

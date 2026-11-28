@@ -40,6 +40,25 @@ class BridgeTest(unittest.TestCase):
                                  {"status": "disconnected", "update_required": True})
                 run.assert_called_once()
 
+    def test_qualification_accepts_only_empty_payload_and_returns_no_browser_data(self):
+        with patch.object(bridge.subprocess, "run") as run:
+            for payload in (None, {"url": "https://example.com/"}, {"arm": "true"}):
+                self.assertEqual(bridge.request("qualify_window", payload, 5), {"status": "invalid_request"})
+            run.assert_not_called()
+
+        for status, extras, expected in (("candidate_observed", {}, "candidate_observed"),
+                                          ("candidate_observed", {"ref": "unsafe"}, "unconfirmed"),
+                                          ("unconfirmed", {}, "unconfirmed"), ("ok", {}, "unconfirmed")):
+            def host(argv, **kwargs):
+                message = json.loads(kwargs["input"])
+                self.assertEqual((message["operation"], message["payload"]), ("qualify_window", {}))
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"v": 3, "id": message["id"],
+                                                                         "status": status, **extras}).encode())
+
+            with self.subTest(status=status, extras=extras), patch.object(bridge.subprocess, "run", side_effect=host) as run:
+                self.assertEqual(bridge.request("qualify_window", {}, 5), {"status": expected})
+                run.assert_called_once()
+
     def test_subprocess_timeout_distinguishes_reads_from_possible_writes(self):
         with patch.object(bridge.subprocess, "run", side_effect=subprocess.TimeoutExpired("ipc", 5)):
             for operation, payload, status in (("page", {"kind": "info"}, "timeout"),
@@ -48,6 +67,7 @@ class BridgeTest(unittest.TestCase):
                                                 ("front_open", {}, "action_unconfirmed"),
                                                 ("open", {}, "open_unconfirmed"),
                                                 ("close", {}, "cleanup_unconfirmed"),
+                                                ("qualify_window", {}, "unconfirmed"),
                                                 ("capture", {}, "timeout")):
                 with self.subTest(operation=operation, payload=payload):
                     self.assertEqual(bridge.request(operation, payload, 5), {"status": status})

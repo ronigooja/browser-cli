@@ -8,7 +8,8 @@ enum IPC {
     static let version: Int64 = 3
     static let limit = 65_536
     static let stateLimit = 262_144
-    static let operations: Set<String> = ["status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk"]
+    static let operations: Set<String> = ["status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk", "qualify_window"]
+    static let qualificationLifetime: Int64 = 120_000
     static let pageMutations: Set<String> = ["click", "scroll", "fill", "select", "press", "submit"]
     static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
@@ -22,6 +23,12 @@ enum IPC {
         let received: Int64
     }
 
+    struct QualificationArm: Codable {
+        let sender: Binding
+        let id: UUID
+        let expires: Int64
+    }
+
     struct Lease: Codable {
         let id: String
         let profile: UUID
@@ -30,6 +37,7 @@ enum IPC {
         let request: Data
         var claim: Binding?
         var result: Data?
+        var qualificationArmID: UUID? = nil
 
         mutating func take(_ sender: Binding, now: Int64) -> Bool {
             guard expires > now, profile == sender.profile, claim == nil,
@@ -46,6 +54,16 @@ enum IPC {
     struct State: Codable {
         var presence: Presence? = nil
         var lease: Lease? = nil
+        var qualificationArm: QualificationArm? = nil
+
+        mutating func takeQualification(for profile: UUID, now: Int64) -> QualificationArm? {
+            let arm = qualificationArm
+            qualificationArm = nil
+            guard let arm, arm.expires > now, arm.sender.profile == profile,
+                  let presence, presence.sender == arm.sender,
+                  presence.received <= now, presence.received >= now - 4000 else { return nil }
+            return arm
+        }
     }
 
     static func json(_ value: [String: Any]) throws -> Data {
@@ -120,7 +138,7 @@ enum IPC {
         var update = false
         let result = try body(&state, &update)
         if update {
-            if state.lease == nil && state.presence == nil {
+            if state.lease == nil && state.presence == nil && state.qualificationArm == nil {
                 if unlink(path.path) != 0 && errno != ENOENT { throw IPCError("mailbox_unavailable") }
             } else {
                 let bytes = try JSONEncoder().encode(state)
