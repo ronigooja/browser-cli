@@ -16,6 +16,11 @@ MAX_TIMEOUT = 300
 OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk",
               "qualify_window"}
 PAGE_MUTATIONS = ("click", "scroll", "fill", "select", "press", "submit")
+QUALIFICATION_BLOCK_REASONS = frozenset((
+    "arm_missing_or_invalid", "safari_not_running", "foreground_unverified", "screen_capture_unavailable",
+    "window_snapshot_unavailable", "accessibility_untrusted", "safari_windows_present", "lease_expired",
+    "permissions_unverified", "mailbox_unavailable",
+))
 DEFAULT_BINARY = Path.home() / "Applications/AgentBrowserSafari.app/Contents/MacOS/AgentBrowserSafari"
 
 
@@ -81,6 +86,9 @@ def request(operation, payload, timeout):
             raise ValueError
         if qualification:
             candidate = set(reply) == {"v", "id", "status"} and reply["status"] == "candidate_observed"
+            if (set(reply) == {"v", "id", "status", "reason"} and reply["status"] == "qualification_blocked"
+                    and isinstance(reply["reason"], str) and reply["reason"] in QUALIFICATION_BLOCK_REASONS):
+                return {"status": "qualification_blocked", "reason": reply["reason"]}
             return {"status": "candidate_observed" if candidate else "unconfirmed"}
         return {key: value for key, value in reply.items() if key not in ("v", "id")}
     except (FileNotFoundError, PermissionError):

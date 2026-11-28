@@ -46,9 +46,18 @@ class BridgeTest(unittest.TestCase):
                 self.assertEqual(bridge.request("qualify_window", payload, 5), {"status": "invalid_request"})
             run.assert_not_called()
 
-        for status, extras, expected in (("candidate_observed", {}, "candidate_observed"),
-                                          ("candidate_observed", {"ref": "unsafe"}, "unconfirmed"),
-                                          ("unconfirmed", {}, "unconfirmed"), ("ok", {}, "unconfirmed")):
+        blocked = "qualification_blocked"
+        cases = [("candidate_observed", {}, {"status": "candidate_observed"}),
+                 ("candidate_observed", {"ref": "unsafe"}, {"status": "unconfirmed"}),
+                 ("unconfirmed", {}, {"status": "unconfirmed"}), ("ok", {}, {"status": "unconfirmed"}),
+                 (blocked, {}, {"status": "unconfirmed"}),
+                 (blocked, {"reason": "other"}, {"status": "unconfirmed"}),
+                 (blocked, {"reason": ["lease_expired"]}, {"status": "unconfirmed"}),
+                 (blocked, {"reason": "lease_expired", "ref": "unsafe"}, {"status": "unconfirmed"}),
+                 (blocked, {"reason": "lease_expired", "id": "0" * 32}, {"status": "unconfirmed"})]
+        cases.extend((blocked, {"reason": reason}, {"status": blocked, "reason": reason})
+                     for reason in bridge.QUALIFICATION_BLOCK_REASONS)
+        for status, extras, expected in cases:
             def host(argv, **kwargs):
                 message = json.loads(kwargs["input"])
                 self.assertEqual((message["operation"], message["payload"]), ("qualify_window", {}))
@@ -56,7 +65,7 @@ class BridgeTest(unittest.TestCase):
                                                                          "status": status, **extras}).encode())
 
             with self.subTest(status=status, extras=extras), patch.object(bridge.subprocess, "run", side_effect=host) as run:
-                self.assertEqual(bridge.request("qualify_window", {}, 5), {"status": expected})
+                self.assertEqual(bridge.request("qualify_window", {}, 5), expected)
                 run.assert_called_once()
 
     def test_subprocess_timeout_distinguishes_reads_from_possible_writes(self):

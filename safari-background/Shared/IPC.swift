@@ -13,6 +13,46 @@ enum IPC {
     static let pageMutations: Set<String> = ["click", "scroll", "fill", "select", "press", "submit"]
     static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
+    enum QualificationBlock: String {
+        case armMissingOrInvalid = "arm_missing_or_invalid"
+        case safariNotRunning = "safari_not_running"
+        case foregroundUnverified = "foreground_unverified"
+        case screenCaptureUnavailable = "screen_capture_unavailable"
+        case windowSnapshotUnavailable = "window_snapshot_unavailable"
+        case accessibilityUntrusted = "accessibility_untrusted"
+        case safariWindowsPresent = "safari_windows_present"
+        case leaseExpired = "lease_expired"
+        case permissionsUnverified = "permissions_unverified"
+        case mailboxUnavailable = "mailbox_unavailable"
+
+        func response(id: String) -> [String: Any] {
+            ["v": IPC.version, "id": id, "status": "qualification_blocked", "reason": rawValue]
+        }
+
+        // Only these refusals can be attested by the browser-authenticated extension.
+        var allowedFromExtension: Bool {
+            switch self {
+            case .armMissingOrInvalid, .foregroundUnverified, .windowSnapshotUnavailable,
+                 .safariWindowsPresent, .leaseExpired, .permissionsUnverified: return true
+            default: return false
+            }
+        }
+    }
+
+    static func qualificationAnswer(_ answer: [String: Any], id: String) -> [String: Any] {
+        if integer(answer["v"]) == version, answer["id"] as? String == id {
+            let status = answer["status"] as? String
+            if Set(answer.keys) == ["v", "id", "status"], status == "candidate_observed" {
+                return ["v": version, "id": id, "status": "candidate_observed"]
+            }
+            if Set(answer.keys) == ["v", "id", "status", "reason"], status == "qualification_blocked",
+               let raw = answer["reason"] as? String, let reason = QualificationBlock(rawValue: raw), reason.allowedFromExtension {
+                return reason.response(id: id)
+            }
+        }
+        return ["v": version, "id": id, "status": "unconfirmed"]
+    }
+
     struct Binding: Codable, Equatable {
         let profile: UUID
         let instance: UUID

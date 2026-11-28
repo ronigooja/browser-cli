@@ -45,7 +45,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                         "arm": arm.id.uuidString]
             }
             if phase == "pull" {
-                if let lease = state.lease, lease.expires <= now { state.lease = nil; update = true }
+                // Retain an expired qualification claim until the host can tell whether it was dispatched.
+                if let lease = state.lease, lease.qualificationArmID == nil, lease.expires <= now { state.lease = nil; update = true }
                 if let arm = state.qualificationArm, arm.expires <= now { state.qualificationArm = nil; update = true }
                 // Only the browser-verified profile chooses a directory. No message can select a profile.
                 state.presence = IPC.Presence(sender: sender, received: now)
@@ -62,8 +63,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                   let answer = message["answer"] as? [String: Any], IPC.integer(answer["v"]) == IPC.version,
                   answer["id"] as? String == id, answer["status"] is String else { throw IPCError("result_rejected") }
             if lease.qualificationArmID != nil {
-                let candidate = Set(answer.keys) == ["v", "id", "status"] && answer["status"] as? String == "candidate_observed"
-                lease.result = try IPC.json(["v": IPC.version, "id": id, "status": candidate ? "candidate_observed" : "unconfirmed"])
+                lease.result = try IPC.json(IPC.qualificationAnswer(answer, id: id))
             } else {
                 lease.result = try IPC.json(answer)
             }

@@ -594,24 +594,41 @@ async function frontOpen({url}, expires) {
 async function qualifyWindow(expires, armID) {
   const arm = qualificationArm;
   const unavailable = {status: "unconfirmed"};
-  if (!arm || arm.id !== armID) return unavailable;
+  const blocked = reason => ({status: "qualification_blocked", reason});
+  if (typeof armID !== "string" || armID.length !== 36 || !uuid.test(armID)) return unavailable;
+  if (!arm || arm.id !== armID) return blocked("arm_missing_or_invalid");
   qualificationArm = undefined; // No second attempt even if checking or dispatch throws.
-  const valid = () => arm.profile === enabledProfile && arm.selection === selectionEpoch &&
-    performance.now() < arm.ends && !expired(expires);
-  if (!valid() || !windowCreated?.addListener || !windowFocusChanged?.addListener || !browser.windows?.create) return unavailable;
+  const armBlock = () => expired(expires) ? "lease_expired" : arm.profile !== enabledProfile ||
+    arm.selection !== selectionEpoch || performance.now() >= arm.ends ? "arm_missing_or_invalid" : null;
+  let reason = armBlock();
+  if (reason) return blocked(reason);
+  if (!windowCreated?.addListener || !windowFocusChanged?.addListener || typeof browser.windows?.create !== "function") {
+    return blocked("window_snapshot_unavailable");
+  }
   try {
-    if (await setupStatus() !== "ok" || await originAllowed(qualificationURL) !== true || !valid()) return unavailable;
-    const focus = positiveWindowFocusEpoch, activation = lastActivation, creation = windowCreationEpoch;
-    // Use the raw snapshot: private, popup and unknown windows all disqualify a trial.
-    const before = await browser.windows.getAll({populate: false});
-    if (!Array.isArray(before) || before.length !== 0 || !valid() ||
-        lastActivation !== activation || windowCreationEpoch !== creation) return unavailable;
+    if (await setupStatus() !== "ok" || await originAllowed(qualificationURL) !== true) return blocked("permissions_unverified");
+  } catch (_) { return blocked("permissions_unverified"); }
+  reason = armBlock();
+  if (reason) return blocked(reason);
+  const focus = positiveWindowFocusEpoch, activation = lastActivation, creation = windowCreationEpoch;
+  // Use the raw snapshot: private, popup and unknown windows all disqualify a trial.
+  let before;
+  try { before = await browser.windows.getAll({populate: false}); }
+  catch (_) { return blocked("window_snapshot_unavailable"); }
+  reason = armBlock();
+  if (reason) return blocked(reason);
+  if (!Array.isArray(before)) return blocked("window_snapshot_unavailable");
+  if (before.length !== 0 || windowCreationEpoch !== creation) return blocked("safari_windows_present");
+  if (lastActivation !== activation) return blocked("foreground_unverified");
+
+  // After invoking create, even a rejection does not prove that Safari did nothing.
+  try {
     const created = await browser.windows.create({url: qualificationURL, type: "normal", focused: false, incognito: false});
     const after = await browser.windows.getAll({populate: true});
     const candidate = Array.isArray(after) && after.length === 1 ? after[0] : null;
     const tab = Array.isArray(candidate?.tabs) && candidate.tabs.length === 1 ? candidate.tabs[0] : null;
     // This is evidence of a candidate only, not a native profile-placement assertion.
-    if (await setupStatus() !== "ok" || !valid() || positiveWindowFocusEpoch !== focus || windowCreationEpoch !== creation + 1 ||
+    if (await setupStatus() !== "ok" || armBlock() || positiveWindowFocusEpoch !== focus || windowCreationEpoch !== creation + 1 ||
         !normal(created) || created.focused !== false || !normal(candidate) || candidate.focused !== false ||
         candidate.id !== created.id || lastCreatedWindow !== created.id || !regular(tab) || tab.windowId !== candidate.id ||
         tab.url !== qualificationURL || (tab.pendingUrl !== undefined && tab.pendingUrl !== qualificationURL)) return unavailable;
@@ -677,13 +694,21 @@ async function poll(profile) {
   if (profile !== enabledProfile) return;
   const grant = await native("pull", {selectedProfile: profile});
   const request = grant?.request;
-  if (grant?.status !== "claimed" || grant.profile?.toLowerCase() !== profile || grant.instance?.toLowerCase() !== instance ||
+  if (grant?.status !== "claimed" || typeof grant.profile !== "string" || grant.profile.toLowerCase() !== profile ||
+      typeof grant.instance !== "string" || grant.instance.toLowerCase() !== instance ||
       request?.v !== version || typeof request.id !== "string" || !requestID.test(request.id)) return;
+  const exact = (value, keys) => Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+  if (request.operation === "qualify_window" &&
+      (!exact(grant, ["status", "profile", "instance", "request", "arm"]) || typeof grant.arm !== "string" ||
+       grant.arm.length !== 36 || !uuid.test(grant.arm) || request.id.length !== 32 ||
+       !exact(request, ["v", "id", "operation", "payload", "expires"]))) return;
   if (selection !== selectionEpoch) return;
   let result;
   try { result = await execute(request, typeof grant.arm === "string" ? grant.arm.toLowerCase() : undefined); }
   catch (_) { result = {status: uncertainStatus(request.operation, request.payload) ?? "browser_error"}; }
-  if (selection !== selectionEpoch) result = {status: uncertainStatus(request.operation, request.payload) ?? "disconnected"};
+  if (selection !== selectionEpoch && !(request.operation === "qualify_window" && result.status === "qualification_blocked")) {
+    result = {status: uncertainStatus(request.operation, request.payload) ?? "disconnected"};
+  }
   await native("result", {selectedProfile: profile, id: request.id,
     answer: bound({v: version, id: request.id, ...result}, request.operation)});
 }

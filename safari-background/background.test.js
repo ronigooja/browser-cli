@@ -15,7 +15,7 @@ const viewportCrop = {x: 0, y: 0, width: 800, height: 600, viewport_width: 800, 
 
 async function harness({windows = [], grant = true, privateAccess = false, ignoreDocumentTarget = false,
   getAll, nativeMessage, checkPrivate, pageResult, captureImage, operationChangedDocument = false,
-  captureEvent, redirect, qualificationEvent, qualificationThrows = false} = {}) {
+  captureEvent, redirect, qualificationEvent, qualificationThrows = false, checkGrant} = {}) {
   let scripts = 0, creates = 0, closes = 0, focuses = 0, captures = 0;
   const windowCreates = [];
   let frameId = documentId;
@@ -30,7 +30,7 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
     runtime: {id: "extension", getURL: name => `safari-extension://test/${name}`, onMessage: events(),
       sendNativeMessage: (_app, message) => nativeMessage(message)},
     extension: {inIncognitoContext: false, isAllowedIncognitoAccess: checkPrivate || (async () => privateAccess)},
-    permissions: {contains: async () => grant},
+    permissions: {contains: checkGrant || (async () => grant)},
     storage: {local: {get: async () => ({enabledProfile: profile}), remove: async () => {}}},
     tabs: {onRemoved, onActivated, onUpdated, onReplaced, onDetached, onAttached,
       get: async id => window()?.tabs.find(tab => tab.id === id),
@@ -101,6 +101,7 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
   const execute = vm.runInContext("execute", context);
   return {call: (operation, payload) => execute({operation, payload, expires: now + 10000}),
     poll: () => vm.runInContext("poll(enabledProfile)", context),
+    fireFocus: id => onFocusChanged.fire(id),
     bound: (result, operation) => vm.runInContext("bound", context)({v: 3, id: "a".repeat(32), ...result}, operation),
     nextPollDelay: () => { vm.runInContext("timer = undefined; schedule()", context); return delays.at(-1); },
     advance: ms => { now += ms; },
@@ -129,32 +130,38 @@ async function qualificationHarness(options) {
     if (message.phase === "result") result = message.answer;
   }});
   return {...browser, attempts: () => attempts, request: async ({payload = {}, token = arm, profile = browser.profile,
-    instance = browser.instance} = {}) => {
+    instance = browser.instance, expires = Date.now() + 200000, grantExtras, requestExtras} = {}) => {
     result = undefined;
-    next = {status: "claimed", profile, instance, arm: token,
-      request: {v: 3, id: "c".repeat(32), operation: "qualify_window", payload, expires: Date.now() + 200000}};
+    next = {status: "claimed", profile, instance, arm: token, ...grantExtras,
+      request: {v: 3, id: "c".repeat(32), operation: "qualify_window", payload, expires, ...requestExtras}};
     await browser.poll();
     return result && JSON.parse(JSON.stringify(result));
   }};
 }
 
+const qualificationReply = (status, reason) => ({v: 3, id: "c".repeat(32), status, ...(reason ? {reason} : {})});
+const qualificationBlock = reason => qualificationReply("qualification_blocked", reason);
+
 test("qualification requires the exact bundled popup and grant, and yields only a one-shot fixture candidate", async () => {
   const browser = await qualificationHarness();
-  assert.equal((await browser.request()).status, "unconfirmed");
+  assert.deepEqual(await browser.request(), qualificationBlock("arm_missing_or_invalid"));
   assert.equal(await browser.popup("arm_qualification", {id: "extension", url: "https://example.com/"}), null);
   assert.equal(browser.attempts(), 0);
   assert.equal((await browser.popup("arm_qualification")).status, "qualification_armed");
   assert.equal((await browser.call("qualify_window", {})).status, "unconfirmed");
   assert.equal((await browser.request({payload: {url}})).status, "invalid_request");
-  assert.equal((await browser.request({token: randomUUID()})).status, "unconfirmed");
+  assert.deepEqual(await browser.request({token: randomUUID()}), qualificationBlock("arm_missing_or_invalid"));
+  assert.equal(await browser.request({token: "fake"}), undefined);
+  assert.equal(await browser.request({grantExtras: {reason: "safari_windows_present"}}), undefined);
+  assert.equal(await browser.request({requestExtras: {reason: "safari_windows_present"}}), undefined);
   assert.equal(await browser.request({instance: randomUUID()}), undefined);
   assert.equal(await browser.request({profile: randomUUID()}), undefined);
   assert.equal(browser.windowCreates.length, 0);
-  assert.deepEqual(await browser.request(), {v: 3, id: "c".repeat(32), status: "candidate_observed"});
+  assert.deepEqual(await browser.request(), qualificationReply("candidate_observed"));
   assert.deepEqual({...browser.windowCreates[0]}, {
     url: "https://example.com/#agent-browser-zero-window", type: "normal", focused: false, incognito: false,
   });
-  assert.equal((await browser.request()).status, "unconfirmed");
+  assert.deepEqual(await browser.request(), qualificationBlock("arm_missing_or_invalid"));
   assert.equal(browser.windowCreates.length, 1);
 });
 
@@ -165,7 +172,39 @@ test("qualification fails closed for any existing window, stale arm, or selectio
     if (mode === "expired") browser.advance(120000);
     if (mode === "selection changed") browser.changeProfile();
     const reply = await browser.request();
-    assert.equal(reply?.status, mode === "selection changed" ? undefined : "unconfirmed");
+    assert.deepEqual(reply, mode === "selection changed" ? undefined :
+      qualificationBlock(mode === "expired" ? "arm_missing_or_invalid" : "safari_windows_present"));
+    assert.equal(browser.windowCreates.length, 0);
+  }
+});
+
+test("qualification reports failures before create without reusing the arm", async () => {
+  let grant = true;
+  for (const [options, request, reason] of [
+    [{}, {expires: Date.now() - 1000}, "lease_expired"],
+    [{checkGrant: async () => grant}, {}, "permissions_unverified"],
+    [{getAll: async () => null}, {}, "window_snapshot_unavailable"],
+    [{getAll: async () => { throw Error("snapshot lost"); }}, {}, "window_snapshot_unavailable"],
+  ]) {
+    grant = true;
+    const browser = await qualificationHarness(options);
+    assert.equal((await browser.popup("arm_qualification")).status, "qualification_armed");
+    grant = false;
+    assert.deepEqual(await browser.request(request), qualificationBlock(reason));
+    assert.deepEqual(await browser.request(), qualificationBlock("arm_missing_or_invalid"));
+    assert.equal(browser.windowCreates.length, 0);
+  }
+});
+
+test("qualification rechecks the lease and focus after an asynchronous window snapshot", async () => {
+  for (const reason of ["lease_expired", "foreground_unverified"]) {
+    const browser = await qualificationHarness({getAll: async () => {
+      if (reason === "lease_expired") browser.advance(5000);
+      else browser.fireFocus(7);
+      return [];
+    }});
+    assert.equal((await browser.popup("arm_qualification")).status, "qualification_armed");
+    assert.deepEqual(await browser.request({expires: Date.now() + 4000}), qualificationBlock(reason));
     assert.equal(browser.windowCreates.length, 0);
   }
 });
@@ -175,9 +214,8 @@ test("qualification never retries or exposes a reference when create, focus or p
     {qualificationEvent: "other_window"}, {qualificationEvent: "redirect"}]) {
     const browser = await qualificationHarness(options);
     await browser.popup("arm_qualification");
-    for (let i = 0; i < 2; ++i) {
-      assert.deepEqual(await browser.request(), {v: 3, id: "c".repeat(32), status: "unconfirmed"});
-    }
+    assert.deepEqual(await browser.request(), qualificationReply("unconfirmed"));
+    assert.deepEqual(await browser.request(), qualificationBlock("arm_missing_or_invalid"));
     assert.equal(browser.windowCreates.length, 1);
     assert.equal(browser.counters().creates, 0);
     assert.equal(browser.counters().focuses, 0);

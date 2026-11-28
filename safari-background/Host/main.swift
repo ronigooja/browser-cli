@@ -1,10 +1,12 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Darwin
 import Foundation
 
 func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     func response(_ status: String) -> [String: Any] { ["v": IPC.version, "id": id, "status": status] }
+    func blocked(_ reason: IPC.QualificationBlock) -> [String: Any] { reason.response(id: id) }
     guard IPC.integer(request["v"]) == IPC.version else { return response("protocol_mismatch") }
     guard Set(request.keys) == ["v", "id", "profile", "operation", "payload", "expires"],
           IPC.id(request["id"]) != nil, let operation = request["operation"] as? String, IPC.operations.contains(operation),
@@ -13,7 +15,7 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     let now = IPC.now
     let qualification = operation == "qualify_window"
     guard !qualification || payload.isEmpty else { return response("invalid_request") }
-    guard expires > now else { return response(qualification ? "unconfirmed" : "timeout") }
+    guard expires > now else { return qualification ? blocked(.leaseExpired) : response("timeout") }
     guard expires <= now + 300_000 else { return response("invalid_request") }
     let remaining = expires - now
     let deadline = ProcessInfo.processInfo.systemUptime + Double(remaining) / 1000
@@ -30,11 +32,23 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     if browser == nil && !qualification {
         return response(operation == "close" ? "cleanup_instance_changed" : "disconnected")
     }
-    let root = try IPC.root(profile)
-    // Only one qualification host may be active across all named profiles.
-    let qualificationLock = qualification ? try IPC.lock(root.deletingLastPathComponent(), "qualify.lock") : nil
+    let root: URL
+    let qualificationLock: Int32?
+    do {
+        root = try IPC.root(profile)
+        // Only one qualification host may be active across all named profiles.
+        qualificationLock = qualification ? try IPC.lock(root.deletingLastPathComponent(), "qualify.lock") : nil
+    } catch {
+        if qualification { return blocked(.mailboxUnavailable) }
+        throw error
+    }
     defer { if let qualificationLock { close(qualificationLock) } }
-    let host = try IPC.lock(root, "host.lock")
+    let host: Int32
+    do { host = try IPC.lock(root, "host.lock") }
+    catch {
+        if qualification { return blocked(.mailboxUnavailable) }
+        throw error
+    }
     defer { close(host) }
 
     let workspace = NSWorkspace.shared
@@ -57,17 +71,21 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
         return response("action_unavailable")
     }
 
-    func qualificationStillBackground() -> Bool {
-        guard let browser, !browser.isTerminated, browser.isFinishedLaunching,
-              let frontPID, frontPID > 0, frontPID != safariPID, safariPID > 0, !focus.observed else { return false }
-        return workspace.frontmostApplication?.processIdentifier == frontPID
+    func qualificationBackgroundBlock() -> IPC.QualificationBlock? {
+        guard let browser, !browser.isTerminated, browser.isFinishedLaunching, safariPID > 0 else { return .safariNotRunning }
+        guard let frontPID, frontPID > 0, frontPID != safariPID, !focus.observed,
+              workspace.frontmostApplication?.processIdentifier == frontPID else { return .foregroundUnverified }
+        return nil
     }
 
     func checkedResult(_ data: Data) throws -> [String: Any] {
         let result = try IPC.object(data)
         if qualification {
-            return response(result["status"] as? String == "candidate_observed" && qualificationStillBackground()
-                            ? "candidate_observed" : "unconfirmed")
+            let answer = IPC.qualificationAnswer(result, id: id)
+            if answer["status"] as? String == "candidate_observed", qualificationBackgroundBlock() != nil {
+                return response(uncertain)
+            }
+            return answer
         }
         if capture && result["status"] as? String == "ok" &&
             (focus.observed || workspace.frontmostApplication?.processIdentifier != safariPID) {
@@ -91,6 +109,7 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     browserRequest.removeValue(forKey: "profile")
     let bytes = try IPC.json(browserRequest)
     var published = false
+    var prepared = false
     var publishedExpiry = expires
     func live() -> Bool { ProcessInfo.processInfo.systemUptime < deadline && IPC.now < publishedExpiry }
     func clearLease() {
@@ -103,14 +122,28 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
             } catch { Thread.sleep(forTimeInterval: 0.005) }
         }
     }
-    defer { if published { clearLease() } }
+    defer { if published || prepared { clearLease() } }
+
+    func stopQualification(_ reason: IPC.QualificationBlock) -> [String: Any] {
+        // A snapshot of an unclaimed lease is insufficient: revoke it under the same lock used to claim it.
+        do {
+            return try IPC.access(root) { state, update in
+                guard let lease = state.lease, lease.id == id else { return response(uncertain) }
+                if let result = lease.result { return try checkedResult(result) }
+                guard lease.claim == nil else { return response(uncertain) }
+                state.lease = nil
+                update = true
+                return blocked(reason)
+            }
+        } catch { return response(uncertain) }
+    }
 
     while live() {
         do {
-            let early: String? = try IPC.access(root) { state, update in
-                guard live() else { return qualification ? uncertain : "timeout" }
+            let early: [String: Any]? = try IPC.access(root) { state, update in
+                guard live() else { return qualification ? blocked(.leaseExpired) : response("timeout") }
                 if capture && (focus.observed || workspace.frontmostApplication?.processIdentifier != safariPID) {
-                    return "target_changed"
+                    return response("target_changed")
                 }
                 // PID/process discovery is not identity. A write additionally requires a fresh
                 // Safari-authenticated heartbeat for the exact process-local instance nonce.
@@ -120,9 +153,14 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
                 if qualification {
                     // Consume before checking the external preconditions or publishing a lease.
                     update = state.qualificationArm != nil
-                    guard let arm = state.takeQualification(for: profile, now: IPC.now),
-                          qualificationStillBackground(), let frontPID, qualificationNoWindows(pid: safariPID, frontPID: frontPID),
-                          qualificationStillBackground(), live(), IPC.now < arm.expires else { return uncertain }
+                    let consumed = state.takeQualification(for: profile, now: IPC.now)
+                    if let reason = qualificationBackgroundBlock() { return blocked(reason) }
+                    guard let arm = consumed else { return blocked(.armMissingOrInvalid) }
+                    guard let frontPID else { return blocked(.foregroundUnverified) }
+                    let windowBlock = qualificationWindowBlock(pid: safariPID, frontPID: frontPID)
+                    if let reason = qualificationBackgroundBlock() { return blocked(reason) }
+                    guard live(), IPC.now < arm.expires else { return blocked(.leaseExpired) }
+                    if let windowBlock { return blocked(windowBlock) }
                     instance = arm.sender.instance
                     armID = arm.id
                     // Bound the gap between the native snapshot and the extension's observation.
@@ -135,65 +173,92 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
                     armID = nil
                     leaseExpiry = expires
                 }
-                if mutation && instance == nil { return operation == "close" ? "cleanup_instance_changed" : "disconnected" }
+                if mutation && instance == nil { return response(operation == "close" ? "cleanup_instance_changed" : "disconnected") }
                 if mutation, let instance, ["close", "tab", "page"].contains(operation) {
                     let ref = payload["ref"] as? String ?? ""
                     guard ref.lowercased().hasPrefix(instance.uuidString.lowercased() + ".") else {
-                        return operation == "close" ? "cleanup_instance_changed" : "target_changed"
+                        return response(operation == "close" ? "cleanup_instance_changed" : "target_changed")
                     }
                 }
                 if qualification { browserRequest["expires"] = leaseExpiry }
                 state.lease = IPC.Lease(id: id, profile: profile, instance: mutation ? instance : nil,
                                         expires: leaseExpiry, request: qualification ? try IPC.json(browserRequest) : bytes,
                                         claim: nil, result: nil, qualificationArmID: armID)
+                prepared = qualification
                 publishedExpiry = leaseExpiry
                 update = true
                 return nil
             }
-            if let early { return response(early) }
+            if let early { return early }
             published = true
             break
         } catch let error as IPCError where error.status == "busy" {
             Thread.sleep(forTimeInterval: 0.01)
+        } catch {
+            if qualification { return prepared ? response(uncertain) : blocked(.mailboxUnavailable) }
+            throw error
         }
     }
-    guard published else { return response(qualification ? uncertain : "timeout") }
+    guard published else { return qualification ? blocked(.leaseExpired) : response("timeout") }
 
     var claimed = false
     repeat {
-        if qualification && !qualificationStillBackground() { return response(uncertain) }
+        if qualification, let reason = qualificationBackgroundBlock() { return stopQualification(reason) }
         do {
             let lease = try IPC.access(root) { state, _ in state.lease }
             guard let lease, lease.id == id else { return response(mutation ? uncertain : "disconnected") }
             claimed = lease.claim != nil
             if let result = lease.result { return try checkedResult(result) }
         } catch let error as IPCError where error.status == "busy" {
-            if !live() { return response(mutation ? uncertain : "timeout") }
+            if !live() {
+                if qualification { break }
+                return response(mutation ? uncertain : "timeout")
+            }
         } catch {
             return response(mutation ? uncertain : "disconnected")
         }
         if !live() { break }
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
     } while true
-    return response(qualification || (claimed && mutation) ? uncertain : operation == "status" ? "disconnected" : "timeout")
+    if qualification { return stopQualification(.leaseExpired) }
+    return response(claimed && mutation ? uncertain : operation == "status" ? "disconnected" : "timeout")
 }
 
-// Independent snapshot of all WindowServer surfaces, including off-screen ones.
-// Do not filter on name, layer, minimization or profile. Ambiguity fails closed.
-// Preflight never asks for screen-recording access; do not request access here.
-func qualificationNoWindows(pid: pid_t, frontPID: pid_t) -> Bool {
-    guard CGPreflightScreenCaptureAccess(),
-          let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+// Quartz must establish positive console/foreground evidence independently of AX.
+// Do not filter on name, layer, minimization or profile; no permission requests.
+func qualificationWindowBlock(pid: pid_t, frontPID: pid_t) -> IPC.QualificationBlock? {
+    guard CGPreflightScreenCaptureAccess() else { return .screenCaptureUnavailable }
+    guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
           session["kCGSSessionOnConsoleKey"] as? Bool == true,
-          IPC.integer(session["kCGSSessionUserIDKey"]) == Int64(getuid()),
-          let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]],
-          !windows.isEmpty else { return false }
-    var frontObserved = false
-    for window in windows {
-        guard let owner = IPC.integer(window[kCGWindowOwnerPID as String]), owner > 0, owner != Int64(pid) else { return false }
-        if owner == Int64(frontPID) { frontObserved = true }
+          IPC.integer(session["kCGSSessionUserIDKey"]) == Int64(getuid()) else { return .foregroundUnverified }
+    let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]]
+    return qualificationSurfaceBlock(windows, pid: pid, frontPID: frontPID) {
+        // Owned surfaces alone do not establish that Safari has a real window. Resolve
+        // only that case, using existing AX trust and a read-only app-wide AXWindows query.
+        guard AXIsProcessTrusted() else { return .accessibilityUntrusted }
+        let app = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard AXUIElementSetMessagingTimeout(app, 0.5) == .success,
+              AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == CFArrayGetTypeID(), let windows = value as? [Any] else {
+            return .windowSnapshotUnavailable
+        }
+        return windows.isEmpty ? nil : .safariWindowsPresent
     }
-    return frontObserved
+}
+
+func qualificationSurfaceBlock(_ windows: [[String: Any]]?, pid: pid_t, frontPID: pid_t,
+                               resolveSafari: () -> IPC.QualificationBlock?) -> IPC.QualificationBlock? {
+    guard let windows, !windows.isEmpty else { return .windowSnapshotUnavailable }
+    var frontObserved = false
+    var safariObserved = false
+    for window in windows {
+        guard let owner = IPC.integer(window[kCGWindowOwnerPID as String]), owner > 0 else { return .windowSnapshotUnavailable }
+        if owner == Int64(frontPID) { frontObserved = true }
+        if owner == Int64(pid) { safariObserved = true }
+    }
+    guard frontObserved else { return .foregroundUnverified }
+    return safariObserved ? resolveSafari() : nil
 }
 
 final class FocusEvidence: @unchecked Sendable {
@@ -209,6 +274,31 @@ func verifyGate() -> Bool {
     let wrongProfile = IPC.Binding(profile: UUID(), instance: instance)
     let wrongInstance = IPC.Binding(profile: profile, instance: UUID())
     let id = String(repeating: "a", count: 32)
+    let owner = kCGWindowOwnerPID as String
+    let front = [owner: 10], safari = [owner: 20]
+    func surface(_ windows: [[String: Any]]?, ax: IPC.QualificationBlock? = nil) -> (IPC.QualificationBlock?, Bool) {
+        var queried = false
+        let result = qualificationSurfaceBlock(windows, pid: 20, frontPID: 10) { queried = true; return ax }
+        return (result, queried)
+    }
+    let cases: [([[String: Any]]?, IPC.QualificationBlock?, IPC.QualificationBlock?, Bool)] = [
+        (nil, nil, .windowSnapshotUnavailable, false), ([], nil, .windowSnapshotUnavailable, false),
+        ([safari], nil, .foregroundUnverified, false), ([front, [:]], nil, .windowSnapshotUnavailable, false),
+        ([front], .accessibilityUntrusted, nil, false), ([front, safari], nil, nil, true),
+        ([front, safari], .accessibilityUntrusted, .accessibilityUntrusted, true),
+        ([front, safari], .windowSnapshotUnavailable, .windowSnapshotUnavailable, true),
+        ([front, safari], .safariWindowsPresent, .safariWindowsPresent, true),
+    ]
+    for (windows, ax, expected, queried) in cases {
+        guard surface(windows, ax: ax) == (expected, queried) else { return false }
+    }
+    let refusal = IPC.QualificationBlock.safariWindowsPresent.response(id: id)
+    let unexpected = refusal.merging(["ref": "unsafe"]) { first, _ in first }
+    let nativeOnly = IPC.QualificationBlock.accessibilityUntrusted.response(id: id)
+    guard IPC.qualificationAnswer(refusal, id: id)["reason"] as? String == "safari_windows_present",
+          IPC.qualificationAnswer(unexpected, id: id)["status"] as? String == "unconfirmed",
+          IPC.qualificationAnswer(nativeOnly, id: id)["status"] as? String == "unconfirmed",
+          IPC.qualificationAnswer(refusal, id: "wrong")["status"] as? String == "unconfirmed" else { return false }
     // A slash-only base64 chunk must not expand beyond the native message limit.
     let chunk = String(repeating: "/", count: 48_000)
     guard let frame = try? IPC.json(["v": IPC.version, "id": id, "status": "ok", "data": chunk, "next_offset": chunk.count]),
