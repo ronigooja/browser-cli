@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from browser_operations import BrowserOperations
 from browser_service import BrowserService
@@ -130,5 +131,10 @@ class BrowserOperationTest(unittest.TestCase):
         result, image = self.ops.capture(dict(safari, tab_ref=ref), self.scope)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(image, {"type": "image", "mimeType": "image/png", "data": data})
+        self.other.replies["capture"]["crop"] = dict(x=0, y=0, width=1, height=1, viewport_width=1, viewport_height=1)
+        with patch("browser_operations.crop_png", side_effect=lambda png, geometry: png) as crop:
+            self.assertEqual(self.ops.capture(dict(safari, tab_ref=ref, selector="article"), self.scope)[0]["status"], "ok")
+            self.assertEqual(self.other.calls[-1][1]["selector"], "article")
+            self.assertEqual(crop.call_args.args[1], self.other.replies["capture"]["crop"])
         self.other.replies["capture"]["final_url"] = NEXT
         self.assertEqual(self.ops.capture(dict(safari, tab_ref=ref), self.scope)[0]["status"], "target_changed")
