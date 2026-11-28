@@ -15,10 +15,11 @@ QUALIFICATION_BLOCKERS = {
     "foreground_unverified": "A stable foreground app other than Safari could not be verified.",
     "screen_capture_unavailable": "The host could not verify existing Screen Recording access.",
     "window_snapshot_unavailable": "The host could not reliably determine whether Safari has windows with the permissions it already has.",
+    "accessibility_untrusted": "Quartz found Safari surfaces, but the host does not have existing Accessibility access to distinguish them from windows.",
     "safari_windows_present": "The window check found a Safari window.",
     "lease_expired": "The test request expired before it could be dispatched.",
-    "window_seen_before_operation": "The Safari extension still sees at least one window.",
-    "extension_precondition_failed": "The extension could not verify the profile, access, or window-event checks required for this test.",
+    "permissions_unverified": "The extension could not verify the access and browser checks required for this test.",
+    "mailbox_unavailable": "The native host could not publish the test request to the extension mailbox.",
 }
 
 
