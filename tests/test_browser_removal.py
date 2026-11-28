@@ -62,6 +62,16 @@ class RemovalTests(unittest.TestCase):
         self.assertTrue(self.install.exists())
         self.assertTrue(result["errors"])
 
+    def test_profile_registration_vetoes_cleanup(self):
+        profile = self.registration.parent.parent / "Default"
+        profile.mkdir()
+        identifier = removal._origin().split("/")[2]
+        (profile / "Preferences").write_text(json.dumps({"extensions": {"settings": {identifier: {"path": "extension"}}}}))
+        outcome = removal.cleanup("chrome")
+        self.assertFalse(outcome["moved"])
+        self.assertTrue(self.install.exists())
+        self.assertTrue(self.registration.exists())
+
     def test_unsafe_trash_retains_both(self):
         (self.home / ".Trash").chmod(0o755)
         result = removal.cleanup("chrome")

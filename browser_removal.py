@@ -80,6 +80,26 @@ def _validate_registration(path, install, home):
         raise ValueError("Unrecognized native host registration")
 
 
+def _check_chrome_profiles(chrome, home):
+    """Reject positive evidence of remaining registration; absence proves nothing."""
+    try:
+        _check_path(chrome, home)
+    except FileNotFoundError:
+        return
+    identifier = _origin().split("/")[2]
+    for folder in chrome.iterdir():
+        for name in ("Preferences", "Secure Preferences"):
+            preferences = folder / name
+            if not os.path.lexists(preferences):
+                continue
+            _check_path(preferences, home)
+            if not preferences.is_file() or preferences.stat().st_size > 32 * 1024 * 1024:
+                raise ValueError("Cannot validate Chrome profile preferences")
+            settings = json.loads(preferences.read_text()).get("extensions", {}).get("settings", {})
+            if not isinstance(settings, dict) or settings.get(identifier):
+                raise ValueError("Chrome still records Agent Browser in a profile; check removal before cleanup")
+
+
 def _trash(home):
     trash = home / ".Trash"
     _check_path(trash, home)
@@ -106,7 +126,13 @@ def cleanup(browser):
         return result
     home = Path.home()
     install = home / "Library/Application Support/agent-browser/chrome-background"
-    registration = home / "Library/Application Support/Google/Chrome/NativeMessagingHosts" / (HOST + ".json")
+    chrome = home / "Library/Application Support/Google/Chrome"
+    registration = chrome / "NativeMessagingHosts" / (HOST + ".json")
+    try:
+        _check_chrome_profiles(chrome, home)
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
+        result["errors"].append(str(error))
+        return result
     candidates = []
     for path, validate in ((install, lambda: _validate_install(install, home)),
                            (registration, lambda: _validate_registration(registration, install, home))):
