@@ -13,7 +13,7 @@ function setup() {
     querySelectorAll() { return []; }, querySelector() { return null; },
     click() { this.clicked = true; },
   };
-  const body = {...node, tagName:'BODY', innerText:'Hello world'};
+  const body = {...node, tagName:'BODY', innerText:'Hello world', childNodes:[]};
   const document = {
     title:'Page', body, readyState:'complete',
     querySelector() { return null; },
@@ -24,12 +24,12 @@ function setup() {
     getComputedStyle:() => ({visibility:'visible',display:'block',opacity:'1'})};
   context.window = context; context.top = context;
   const op = vm.runInNewContext(`(${agentBrowserPageOperation.toString()})`, context);
-  return {node, document, run: o => op({expectedUrl:'https://example.com/', ...o})};
+  return {node, document, context, body, run: o => op({expectedURL:'https://example.com/', ...o})};
 }
 
 test('serialized operation gates before actions', () => {
   const p = setup();
-  assert.equal(p.run({kind:'click', selector:'#go', expectedUrl:'https://wrong/'}).status, 'target_changed');
+  assert.equal(p.run({kind:'click', selector:'#go', expectedURL:'https://wrong/'}).status, 'target_changed');
   p.document.title = 'Attention Required';
   assert.equal(p.run({kind:'click', selector:'#go'}).status, 'verification_required');
   assert.equal(p.node.clicked, undefined);
@@ -51,4 +51,35 @@ test('wait, invalid selectors and implicit submit are constrained', () => {
   assert.equal(p.run({kind:'click', selector:'['}).status, 'invalid_selector');
   p.node.submit = true;
   assert.equal(p.run({kind:'click', selector:'#go'}).status, 'action_unavailable');
+});
+
+test('clean HTML never serializes attributes, hidden children or scripts', () => {
+  const p = setup();
+  const child = (tagName, value) => ({...p.node, nodeType:1, tagName, childNodes:[{nodeType:3, nodeValue:value}]});
+  p.body.childNodes = [child('P', '<b>&'), child('SCRIPT', 'secret'), child('INPUT','secret'),
+    {...child('P','secret'), getBoundingClientRect:() => ({width:0,height:0})}];
+  assert.equal(p.run({kind:'html'}).html, '<p>&lt;b&gt;&amp;</p>');
+  assert.equal(p.run({kind:'html', raw:true}).status, 'action_unavailable');
+});
+
+test('link pagination advances independently of text length', () => {
+  const p = setup();
+  p.body.querySelectorAll = () => Array.from({length:28}, (_, i) => ({...p.node, href:`https://example.com/${i}`}));
+  const first = p.run({kind:'extract'});
+  assert.equal(first.links.length,25);
+  assert.equal(first.next_offset,25);
+  const second = p.run({kind:'extract', offset:first.next_offset});
+  assert.equal(second.links[0].url,'https://example.com/25');
+  assert.equal(second.links.length,3);
+  assert.equal(second.next_offset,null);
+});
+
+test('scroll dispatches only the requested movement and does not act on verification', () => {
+  const p = setup();
+  const coordinates = [];
+  p.context.scrollBy = (x,y) => coordinates.push([x,y]);
+  assert.equal(p.run({kind:'scroll', direction:'by', pixels:-100}).status, 'ok');
+  p.document.title = 'Attention Required';
+  assert.equal(p.run({kind:'scroll', direction:'by', pixels:100}).status, 'verification_required');
+  assert.deepEqual(coordinates, [[0,-100]]);
 });
