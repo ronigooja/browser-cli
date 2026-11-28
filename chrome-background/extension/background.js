@@ -212,20 +212,24 @@ async function tabOperation(state, data, expires) {
   const expected = httpURL(data.expected_url).href;
   const entry = state.tab(data.ref);
   const navigation = entry?.navigation;
-  const guard = await guardedRead(state, { ref: data.ref, expected_url: expected }, expires);
+  const beforeFrame = entry && await topDocument(entry.id);
+  const guard = await guardedPage(state, { ref: data.ref, expected_url: expected, kind: "info" }, expires);
   if (guard.status !== "ok") return guard;
   const tab = await currentTab(state, entry);
   const mismatch = boundary(tab, expected);
   if (mismatch) return mismatch;
   const frame = await topDocument(entry.id);
-  if (!activeDocument(frame, expected) || entry.navigation !== navigation || Date.now() >= expires) return changed();
+  if (!activeDocument(beforeFrame, expected) || !activeDocument(frame, expected) ||
+      frame.documentId !== beforeFrame.documentId || !state.active() || state.tab(data.ref) !== entry ||
+      entry.navigation !== navigation || Date.now() >= expires) return changed();
   try {
     delete entry.ownership;
     if (data.kind === "navigate") {
       await chrome.tabs.update(entry.id, { url: httpURL(data.url).href });
       const after = await currentTab(state, entry);
       const url = observedURL(after);
-      if (!after || url?.href !== httpURL(data.url).href || Date.now() >= expires) return { status: "action_unconfirmed" };
+      if (!after || Date.now() >= expires) return { status: "action_unconfirmed" };
+      if (url?.href !== httpURL(data.url).href) return { status: "ok" };
       return { status: "ok", tab: state.describe(after, url) };
     }
     if (data.kind === "activate") {

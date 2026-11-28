@@ -115,3 +115,19 @@ class BrowserOperationTest(unittest.TestCase):
         ref = self.target()
         self.backend.replies["page"] = {"status": "disconnected", "update_required": True}
         self.assertTrue(self.page("snapshot", ref)["update_required"])
+
+    def test_capture_is_bound_and_returns_an_image_not_a_data_url(self):
+        ref = self.target()
+        result, image = self.ops.capture(dict(browser="chrome", tab_ref=ref), self.scope)
+        self.assertEqual(result["status"], "capture_unavailable")
+        self.assertIsNone(image)
+        safari = dict(browser="safari")
+        candidate = self.ops.tabs(dict(safari, action="list"), self.scope)["tabs"][0]["candidate_token"]
+        ref = self.ops.tabs(dict(safari, action="confirm", approved=True, candidate_token=candidate), self.scope)["tab_ref"]
+        data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9ZkAAAAASUVORK5CYII="
+        self.other.replies["capture"] = {"status": "ok", "final_url": URL, "image": "data:image/png;base64," + data}
+        result, image = self.ops.capture(dict(safari, tab_ref=ref), self.scope)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(image, {"type": "image", "mimeType": "image/png", "data": data})
+        self.other.replies["capture"]["final_url"] = NEXT
+        self.assertEqual(self.ops.capture(dict(safari, tab_ref=ref), self.scope)[0]["status"], "target_changed")

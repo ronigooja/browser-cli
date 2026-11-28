@@ -1,5 +1,6 @@
 """Session-scoped controls for the authorized browser profile."""
 
+from base64 import b64decode
 from dataclasses import dataclass
 
 from browser_policy import BROWSERS, clipped, result, token_valid, url_key, url_mismatch
@@ -21,6 +22,7 @@ PAGE_ERRORS = {**PAGE_MESSAGES,
     "action_unavailable": "The requested action is not available for the selected element or page.",
     "action_unconfirmed": "The browser could not confirm the action. Inspect the intended tab before retrying.",
     "target_changed": "The confirmed tab or document changed. Select and confirm the intended tab again.",
+    "capture_unavailable": "Viewport capture is available only in Safari on the already-active tab of its focused window. No tab was activated.",
 }
 
 
@@ -183,6 +185,33 @@ class BrowserOperations:
                 return result("ok", browser, "Navigation requested. List tabs again to confirm its destination.")
             return result("ok", browser, **tab.candidate(), **self.issue(Target(browser, tab), scope))
         return result("ok", browser)
+
+    def capture(self, args, scope):
+        if not isinstance(args, dict) or args.get("browser") not in BROWSERS:
+            raise ValueError("Choose Safari or Chrome.")
+        self.validate(args, ("browser", "tab_ref"), (), ("tab_ref",))
+        browser = args["browser"]
+        target = self.targets.get(args["tab_ref"], scope)
+        if target is None or target.browser != browser:
+            return self.fail(browser, "target_changed"), None
+        if browser != "safari":
+            return self.fail(browser, "capture_unavailable"), None
+        reply = self.service.request(browser, "capture", {"ref": target.tab.ref, "expected_url": target.tab.url})
+        if reply["status"] != "ok":
+            return self.failed_reply(browser, reply), None
+        if reply.get("final_url") != target.tab.url:
+            return self.fail(browser, "target_changed"), None
+        image = reply.get("image")
+        prefix = "data:image/png;base64,"
+        if not isinstance(image, str) or not image.startswith(prefix) or len(image) > 65000:
+            return self.fail(browser, "read_unavailable"), None
+        data = image[len(prefix):]
+        try:
+            if not b64decode(data, validate=True).startswith(b"\x89PNG\r\n\x1a\n"):
+                return self.fail(browser, "read_unavailable"), None
+        except ValueError:
+            return self.fail(browser, "read_unavailable"), None
+        return result("ok", browser, final_url=target.tab.url), {"type": "image", "mimeType": "image/png", "data": data}
 
     def page(self, args, scope):
         if (not isinstance(args, dict) or not isinstance(args.get("action"), str)

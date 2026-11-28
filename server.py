@@ -86,6 +86,9 @@ TOOLS = [
         "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 8000},
         "approved": {"type": "boolean", "description": "True only after the user explicitly approves the form submission."},
     }, ["browser", "action", "tab_ref"], openWorldHint=True),
+    tool("capture_tab", "Capture a PNG viewport from a confirmed Safari tab only if it is already active in its focused window. Never activates or changes tabs. It may reject images over the transport limit.", {
+        "browser": enum(BROWSERS), "tab_ref": token("From browser_tabs in this session."),
+    }, ["browser", "tab_ref"], readOnlyHint=True, destructiveHint=False, openWorldHint=True),
 ]
 
 
@@ -134,6 +137,7 @@ class Server:
             if owner is not None and (not isinstance(owner, str) or not 0 < len(owner) <= 256):
                 return error(request_id, -32602, "Invalid OpenCode session ID")
             scope = (self.connection_scope, owner)
+            image = None
             try:
                 if name == "read_page":
                     page = self.service.read(args, scope)
@@ -145,11 +149,15 @@ class Server:
                     page = self.operations.tabs(args, scope)
                 elif name == "browser_page":
                     page = self.operations.page(args, scope)
+                elif name == "capture_tab":
+                    page, image = self.operations.capture(args, scope)
                 else:
                     return error(request_id, -32602, "Unknown tool")
             except ValueError as exc:
                 return error(request_id, -32602, str(exc))
             value = {"content": [{"type": "text", "text": json.dumps(page, ensure_ascii=False, separators=(",", ":"))}]}
+            if image is not None:
+                value["content"].append(image)
             if self.protocol >= "2025-06-18":
                 value["structuredContent"] = page
         else:
