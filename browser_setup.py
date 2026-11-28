@@ -58,7 +58,7 @@ class Setup:
             return result("consent_required", browser, "Ask before uninstalling Agent Browser. Identify the intended browser profile first.")
         if browser == "safari":
             return result("manual_uninstall_required", browser,
-                          "In Safari > Settings > Extensions, select Agent Browser and click Uninstall. No local files or browser settings were changed.")
+                          "In Safari > Settings > Extensions, select Agent Browser and click Uninstall. Check every named profile where it was enabled. If the default companion remains, confirm removal and approve cleanup_uninstall. No local files or settings were changed.")
         reply = self.service.request(browser, "uninstall")
         status = reply["status"]
         if status in ("ok", "uninstall_requested", "uninstall_unverified", "uninstall_unconfirmed", "action_unconfirmed", "timeout", "browser_error"):
