@@ -8,7 +8,7 @@ const vm = require("node:vm");
 const script = fs.readFileSync(path.join(__dirname, "../chrome-background/extension/background.js"), "utf8");
 const shared = fs.readFileSync(path.join(__dirname, "../extension/shared/read-page.js"), "utf8");
 const noop = { addListener() {} };
-const protocol = 2;
+const protocol = 3;
 
 function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
   const url = "https://example.com/";
@@ -102,7 +102,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
     },
     scripting: {
       executeScript: async ({ func, ...options }) => {
-        assert.equal(func, context.readPage);
+        assert.ok(func === context.readPage || func === context.agentBrowserPageOperation);
         calls.execute.push(JSON.parse(JSON.stringify(options)));
         const documentId = frame.documentId;
         duringInjection();
@@ -113,6 +113,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
   context = vm.createContext({ chrome, URL, crypto: webcrypto, importScripts(name) {
     assert.equal(name, "read-page.js");
     vm.runInContext(shared, context);
+    vm.runInContext("function agentBrowserPageOperation() {}", context);
   } });
   vm.runInContext(script, context);
   return {
@@ -146,6 +147,28 @@ test("setup and page operations refuse missing all-site access without opening a
   assert.deepEqual(browser.calls.create, []);
   browser.setAllSites(true);
   assert.equal((await browser.request("status")).status, "ok");
+});
+
+test("list is bounded and validates regular tab metadata", async () => {
+  const browser = production(Array.from({length: 35}, (_, id) => ({id: id + 1, url: `https://example.com/${id}`, title: `Tab ${id}`})));
+  const result = await browser.request("list");
+  assert.equal(result.status, "ok");
+  assert.equal(result.tabs.length, 32);
+  assert.equal(result.truncated, true);
+  assert.equal(result.tabs[0].window_id, 1);
+  assert.equal(result.tabs[0].active, true);
+  assert.equal((await browser.request("list", {extra: true})).status, "invalid_request");
+});
+
+test("page pins its document and does not confirm a changed action", async () => {
+  const browser = production([{id: 1, url: "https://example.com/", title: "Example"}]);
+  const list = await browser.request("list");
+  const payload = {ref: list.tabs[0].ref, expected_url: browser.url, kind: "snapshot"};
+  assert.equal((await browser.request("page", payload)).status, "ok");
+  assert.deepEqual(browser.calls.execute[0].target.documentIds, ["document-one"]);
+  browser.duringInjection(() => browser.frame({documentId: "document-two"}));
+  assert.equal((await browser.request("page", payload)).status, "action_unconfirmed");
+  assert.equal((await browser.request("page", {...payload, script: "alert(1)"})).status, "invalid_request");
 });
 
 test("find returns same origin and path candidates with generation-scoped references and excludes private tabs", async () => {

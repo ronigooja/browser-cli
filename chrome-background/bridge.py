@@ -25,8 +25,8 @@ HOST = "com.agent_browser.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-background"
 LIMIT = 65536
-PROTOCOL = 2
-OPERATIONS = {"status", "find", "open", "read", "close"}
+PROTOCOL = 3
+OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab"}
 WAKE_WAIT = 2
 WAKE_POLL = 0.05
 
@@ -93,6 +93,7 @@ def native_request(message):
 def response_too_large(request):
     operation = request.get("operation")
     status = ("open_unconfirmed" if operation == "open" else
+              "action_unconfirmed" if operation in ("page", "tab") else
               "cleanup_unconfirmed" if operation == "close" else "response_too_large")
     return {"v": PROTOCOL, "id": request.get("id"), "status": status}
 
@@ -240,7 +241,7 @@ def request(operation, payload, timeout):
             if type(reply.get("v")) is not int or reply["v"] != PROTOCOL or reply.get("id") != message_id:
                 # A v1 host rejects the request itself; a v1 worker may instead
                 # reject it behind a newer host. Neither needs a replay or probe.
-                old_host_or_worker = (type(reply.get("v")) is int and reply["v"] == 1
+                old_host_or_worker = (type(reply.get("v")) is int and reply["v"] in (1, 2)
                                       and reply.get("id") == message_id
                                       and reply.get("status") in ("invalid_request", "protocol_mismatch"))
                 if old_host_or_worker or ("v" not in reply and "error" in reply):
@@ -261,6 +262,8 @@ def request(operation, payload, timeout):
             return {"status": "cleanup_unconfirmed"}
         if operation == "open" and dispatched:
             return {"status": "open_unconfirmed"}
+        if operation in ("page", "tab") and dispatched:
+            return {"status": "action_unconfirmed"}
         if operation != "status" and isinstance(error, TimeoutError):
             return {"status": "timeout"}
         return {"status": "disconnected"}

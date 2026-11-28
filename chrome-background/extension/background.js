@@ -2,7 +2,7 @@ importScripts("read-page.js");
 
 const host = "com.agent_browser.background";
 const reconnect = "reconnect-native-host";
-const version = 2;
+const version = 3;
 const frameLimit = 65536;
 let port;
 
@@ -155,6 +155,93 @@ async function guardedRead(state, data, expires) {
   return { ...probe, final_url: expected };
 }
 
+async function listTabs(state, expires) {
+  const tabs = await chrome.tabs.query({ windowType: "normal" });
+  const result = [];
+  let truncated = false;
+  for (const tab of tabs) {
+    const url = httpURL(tab.url);
+    if (!regular(tab) || !url || tab.pendingUrl !== undefined || typeof tab.title !== "string" ||
+        typeof tab.active !== "boolean" || !Number.isSafeInteger(tab.windowId) || tab.windowId < 0) continue;
+    const window = await chrome.windows.get(tab.windowId).catch(() => null);
+    if (!normalWindow(window) || window.id !== tab.windowId) continue;
+    if (result.length === 32 || tab.title.length > 500 || url.href.length > 4096) { truncated = true; continue; }
+    const item = { ...state.describe(tab, url), active: tab.active, window_id: tab.windowId };
+    if (JSON.stringify([...result, item]).replace(/[<>&\x7f-\uffff]/g, "\\u0000").length > 60000) { truncated = true; continue; }
+    result.push(item);
+  }
+  if (!state.active()) return { status: "disconnected" };
+  if (Date.now() >= expires) return { status: "timeout" };
+  return { status: "ok", tabs: result, ...(truncated ? { truncated: true } : {}) };
+}
+
+async function guardedPage(state, data, expires) {
+  const expected = httpURL(data.expected_url).href;
+  const entry = state.tab(data.ref);
+  const navigation = entry?.navigation;
+  const mismatch = boundary(await currentTab(state, entry), expected);
+  if (mismatch) return mismatch;
+  const frame = await topDocument(entry.id);
+  if (!activeDocument(frame, expected)) return { status: "read_unavailable", final_url: expected };
+  if (!state.active() || state.tab(data.ref) !== entry || entry.navigation !== navigation) return changed();
+  if (Date.now() >= expires) return { status: "timeout" };
+  if (typeof agentBrowserPageOperation !== "function") return { status: "read_unavailable", final_url: expected };
+  const { ref, expected_url, ...options } = data;
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({ target: { tabId: entry.id, documentIds: [frame.documentId] },
+      world: "ISOLATED", func: agentBrowserPageOperation, args: [{ ...options, expectedURL: expected }] });
+  } catch (_) { return { status: "action_unconfirmed" }; }
+  const postMismatch = boundary(await currentTab(state, entry), expected);
+  const postFrame = await topDocument(entry.id);
+  if (postMismatch || !state.active() || state.tab(ref) !== entry || entry.navigation !== navigation ||
+      !activeDocument(postFrame, expected) || postFrame.documentId !== frame.documentId || Date.now() >= expires ||
+      results?.length !== 1 || results[0].frameId !== 0 || results[0].documentId !== frame.documentId) {
+    return { status: "action_unconfirmed" };
+  }
+  const result = results[0].result;
+  if (!result || typeof result !== "object" || Array.isArray(result) || typeof result.status !== "string" ||
+      (result.final_url !== undefined && result.final_url !== expected)) return { status: "action_unconfirmed" };
+  return { ...result, final_url: expected };
+}
+
+async function tabOperation(state, data, expires) {
+  const expected = httpURL(data.expected_url).href;
+  const entry = state.tab(data.ref);
+  const navigation = entry?.navigation;
+  const guard = await guardedRead(state, { ref: data.ref, expected_url: expected }, expires);
+  if (guard.status !== "ok") return guard;
+  const tab = await currentTab(state, entry);
+  const mismatch = boundary(tab, expected);
+  if (mismatch) return mismatch;
+  const frame = await topDocument(entry.id);
+  if (!activeDocument(frame, expected) || entry.navigation !== navigation || Date.now() >= expires) return changed();
+  try {
+    delete entry.ownership;
+    if (data.kind === "navigate") {
+      await chrome.tabs.update(entry.id, { url: httpURL(data.url).href });
+      const after = await currentTab(state, entry);
+      const url = observedURL(after);
+      if (!after || url?.href !== httpURL(data.url).href || Date.now() >= expires) return { status: "action_unconfirmed" };
+      return { status: "ok", tab: state.describe(after, url) };
+    }
+    if (data.kind === "activate") {
+      await chrome.tabs.update(entry.id, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+      const after = await currentTab(state, entry);
+      const postFrame = await topDocument(entry.id);
+      const window = await chrome.windows.get(tab.windowId).catch(() => null);
+      if (boundary(after, expected) || !after.active || !window?.focused || !activeDocument(postFrame, expected) ||
+          postFrame.documentId !== frame.documentId || entry.navigation !== navigation || Date.now() >= expires) return { status: "action_unconfirmed" };
+      return { status: "ok", tab: state.describe(after, httpURL(after.url)) };
+    }
+    await chrome.tabs.remove(entry.id);
+    if (!state.active() || Date.now() >= expires) return { status: "action_unconfirmed" };
+    state.forget(entry.id);
+    return { status: "ok" };
+  } catch (_) { return { status: "action_unconfirmed" }; }
+}
+
 async function findOrOpen(state, operation, data, expires) {
   const target = httpURL(data.url);
   const tabs = await chrome.tabs.query({ windowType: "normal" });
@@ -288,6 +375,14 @@ function validPayload(operation, data) {
   const only = (...keys) => Object.keys(data).every(key => keys.includes(key));
   const validToken = value => typeof value === "string" && token.test(value);
   if (operation === "status") return only();
+  if (operation === "list") return only();
+  if (operation === "page") return only("ref", "expected_url", "kind", "selector", "elementRef", "text", "key", "value", "direction", "pixels", "condition", "offset", "raw") &&
+    validToken(data.ref) && !!httpURL(data.expected_url) && typeof data.kind === "string" && data.kind.length > 0 && data.kind.length <= 64 &&
+    ["selector", "elementRef", "text", "key", "value", "direction", "condition"].every(key => !(key in data) || (typeof data[key] === "string" && data[key].length <= 10000)) &&
+    ["pixels", "offset"].every(key => !(key in data) || Number.isSafeInteger(data[key])) &&
+    (!("raw" in data) || typeof data.raw === "boolean");
+  if (operation === "tab") return only("ref", "expected_url", "kind", "url") && validToken(data.ref) && !!httpURL(data.expected_url) &&
+    ["navigate", "activate", "close"].includes(data.kind) && (data.kind === "navigate" ? !!httpURL(data.url) : !("url" in data));
   if (operation === "find" || operation === "open") return only("url") && !!httpURL(data.url);
   if (operation === "close") return only("ref", "ownership") && validToken(data.ref) && validToken(data.ownership);
   return operation === "read" && only("ref", "expected_url", "selector", "wait_for_selector", "include_links") &&
@@ -304,25 +399,29 @@ async function operation(state, { operation, payload, expires }) {
     return { status: "permission_required" };
   }
   if (operation === "status") return { status: "ok" };
+  if (operation === "list") return listTabs(state, expires);
+  if (operation === "page") return guardedPage(state, payload, expires);
+  if (operation === "tab") return tabOperation(state, payload, expires);
   if (operation === "read") return guardedRead(state, payload, expires);
   if (operation === "close") return closeOwned(state, payload, expires);
   return findOrOpen(state, operation, payload, expires);
 }
 
-function withinBudget(response) {
+function withinBudget(response, operation) {
   // The host re-encodes as ASCII JSON. Budget six bytes per non-ASCII UTF-16
   // unit (including either half of an emoji), and include HTML-sensitive escapes
   // that the browser's native serializer may add. JSON.stringify already escapes controls.
   const size = () => JSON.stringify(response).replace(/[<>&\x7f-\uffff]/g, "\\u0000").length;
   if (size() <= frameLimit) return response;
-  if (response.status === "ok" && typeof response.text === "string") {
+  if (operation === "read" && response.status === "ok" && typeof response.text === "string") {
     response.truncated = true;
     while (response.links?.length && size() > frameLimit) response.links.pop();
     while (response.text.length && size() > frameLimit) response.text = response.text.slice(0, Math.floor(response.text.length * 0.75));
     if (response.text && size() <= frameLimit) return response;
   }
   const { v, id } = response;
-  return { v, id, status: response.created ? "open_unconfirmed" : "response_too_large" };
+  return { v, id, status: response.created ? "open_unconfirmed" :
+    ["page", "tab"].includes(operation) ? "action_unconfirmed" : "response_too_large" };
 }
 
 let forgetTab = () => {};
@@ -361,9 +460,10 @@ function connect() {
     try {
       result = request?.v === version ? await operation(state, request) : { status: "protocol_mismatch" };
     } catch (_) {
-      result = { status: request?.operation === "close" ? "cleanup_unconfirmed" : "browser_error" };
+      result = { status: request?.operation === "close" ? "cleanup_unconfirmed" :
+        ["page", "tab"].includes(request?.operation) ? "action_unconfirmed" : "browser_error" };
     }
-    response = withinBudget({ v: version, id, ...result });
+    response = withinBudget({ v: version, id, ...result }, request?.operation);
     if (port === connection) connection.postMessage(response);
   });
   connection.onDisconnect.addListener(() => {
