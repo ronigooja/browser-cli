@@ -252,6 +252,12 @@ async function guardedPage(state, data, expires) {
   return { ...result, final_url: expected };
 }
 
+async function captureAccess() {
+  if ((await chrome.storage.local.get("captureEnabled")).captureEnabled !== true) return { status: "capture_disabled", message: "Turn on screenshot access in the Agent Browser popup." };
+  if (!await chrome.permissions.contains(captureGrant)) return capturePermissionRequired();
+  return null;
+}
+
 function capturePermissionRequired() {
   return { status: "capture_permission_required", message: "In the intended Chrome profile, click the Agent Browser toolbar button, then turn on screenshot access in its popup. It covers all sites with one switch; no per-site grant is needed." };
 }
@@ -276,7 +282,7 @@ async function guardedCapture(state, data, expires) {
   let windowId;
   // A switch away and back invalidates the capture even if both snapshots match.
   const stop = state.observeCapture((kind, id, tabId) => {
-    if (kind === "focus" || kind === "permission" || (kind === "window_removed" && id === windowId) ||
+    if (kind === "focus" || kind === "permission" || kind === "capture_disabled" || (kind === "window_removed" && id === windowId) ||
         (kind === "activation" && (windowId === undefined || id === windowId)) || tabId === entry.id) invalidated = true;
   });
   const stale = () => invalidated || !state.active() || state.tab(data.ref) !== entry || entry.navigation !== navigation;
@@ -325,7 +331,8 @@ async function guardedCapture(state, data, expires) {
   }
   try {
     if (!await chrome.permissions.contains({ origins: ["http://*/*", "https://*/*"] })) return { status: "permission_required" };
-    if (!await chrome.permissions.contains(captureGrant)) return capturePermissionRequired();
+    const access = await captureAccess();
+    if (access) return access;
     const preflight = await pinned();
     if (preflight) return preflight;
     const before = await geometry();
@@ -343,6 +350,10 @@ async function guardedCapture(state, data, expires) {
     if (after.status !== "ok") return after;
     const postflight = await pinned();
     if (postflight) return postflight;
+    const finalAccess = await captureAccess();
+    if (finalAccess) return finalAccess;
+    if (stale()) return changed();
+    if (expired()) return { status: "timeout" };
     if (JSON.stringify(before.crop) !== JSON.stringify(after.crop)) return unavailable;
     if (typeof image === "string" && image.length > captureImageLimit) return { status: "response_too_large" };
     if (typeof image !== "string" || !image.startsWith(pngPrefix) ||
@@ -620,7 +631,11 @@ async function operation(state, { operation, payload, expires }) {
   }
   if (uninstallDispatched) return { status: "disconnected" };
   if (operation === "capture") return guardedCapture(state, payload, expires);
-  if (operation === "capture_chunk") return state.active() ? state.chunk(payload) : { status: "capture_transfer_unavailable" };
+  if (operation === "capture_chunk") {
+    const access = await captureAccess();
+    if (access) { state.clearImage(); return access; }
+    return state.active() ? state.chunk(payload) : { status: "capture_transfer_unavailable" };
+  }
   if (operation !== "close" && !await chrome.permissions.contains({ origins: ["http://*/*", "https://*/*"] })) {
     return { status: "permission_required" };
   }
@@ -721,6 +736,12 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.captureEnabled && changes.captureEnabled.newValue !== true) {
+    observeEvent("capture_disabled");
+    clearCaptureImage();
+  }
+});
 chrome.permissions.onRemoved?.addListener(() => {
   observeEvent("permission");
   clearCaptureImage();

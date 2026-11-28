@@ -15,13 +15,15 @@ function popup(initial = false) {
     checked: false, disabled: true, hidden: true, textContent: '',
     addEventListener(type, fn) { this[type] = fn; },
   }]));
+  let enabled = false;
+  const storage = { local: { get: async () => ({ captureEnabled: enabled }), set: async value => { enabled = value.captureEnabled; calls.push(["set", enabled]); } }, onChanged: { addListener() {} } };
   const permissions = {
-    contains: async grant => { calls.push(['contains', JSON.stringify(grant)]); return granted; },
+    contains: async grant => { calls.push(['contains', JSON.stringify(grant)]); return grant.origins[0] === "<all_urls>" ? granted : true; },
     request: grant => { calls.push(['request', JSON.stringify(grant)]); granted = true; return Promise.resolve(true); },
     remove: grant => { calls.push(['remove', JSON.stringify(grant)]); granted = false; return Promise.resolve(true); },
     onAdded: { addListener() {} }, onRemoved: { addListener() {} },
   };
-  vm.runInNewContext(script, { document: { getElementById: id => elements[id] }, chrome: { permissions } });
+  vm.runInNewContext(script, { document: { getElementById: id => elements[id] }, chrome: { permissions, storage } });
   return { elements, calls, permissions };
 }
 
@@ -39,7 +41,8 @@ test('popup toggles only optional all-URLs grant, retaining required host declar
   assert.equal(toggle.checked, true);
   toggle.checked = false;
   toggle.change();
-  assert.deepEqual(calls.at(-1), ['remove', '{"origins":["<all_urls>"]}']);
+  assert.deepEqual(calls.at(-1), ['set', false]);
+  assert.equal(calls.some(call => call[0] === 'remove'), false);
   await flush();
   assert.equal(toggle.checked, false);
 });
@@ -53,4 +56,11 @@ test('denied grant restores actual state and displays error', async () => {
   await flush();
   assert.equal(elements['capture-toggle'].checked, false);
   assert.equal(elements.error.hidden, false);
+});
+
+test('existing grant defaults off until explicitly enabled', async () => {
+  const { elements, calls } = popup(true);
+  await flush();
+  assert.equal(elements['capture-toggle'].checked, false);
+  assert.equal(calls.some(call => call[0] === 'request'), false);
 });

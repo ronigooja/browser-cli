@@ -26,6 +26,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
   let failClose = false;
   let allSites = true;
   let captureAllowed = false;
+  let captureEnabled = true;
   let image = png;
   let clock = Date.now();
   let duringCapture = () => {};
@@ -59,6 +60,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
       captureAllowed = true;
       return true;
     } },
+    storage: { local: { get: async () => ({ captureEnabled }) }, onChanged: listener("storageChanged") },
     tabs: {
       query: async options => { assert.equal(options.windowType, "normal"); return [...tabs.values()].map(tab => ({ ...tab })); },
       get: async id => {
@@ -167,6 +169,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
     duringInjection(fn) { duringInjection = fn; },
     duringCapture(fn) { duringCapture = fn; },
     captureAllowed(next = true) { captureAllowed = next; },
+    captureEnabled(next) { captureEnabled = next; events.storageChanged({ captureEnabled: { newValue: next } }, "local"); },
     image(next) { image = next; },
     advance(ms) {
       clock += ms;
@@ -302,7 +305,7 @@ test("large screenshots stream in ordered, bounded chunks and cannot be replayed
   const revoked = (await browser.request("capture", capture)).image_ref;
   browser.captureAllowed(false);
   browser.events.permissionsRemoved();
-  assert.equal((await browser.request("capture_chunk", { image_ref: revoked, offset: 0 })).status, "capture_transfer_unavailable");
+  assert.equal((await browser.request("capture_chunk", { image_ref: revoked, offset: 0 })).status, "capture_permission_required");
   browser.captureAllowed();
   const disconnected = (await browser.request("capture", capture)).image_ref;
   browser.reconnect();
@@ -562,7 +565,7 @@ test("close reports success once and never closes a replacement tab", async () =
 });
 
 test("read pins the shared isolated function to the observed main document", async () => {
-  const browser = production([{ id: 1 }]);
+  const browser = production([{ id: 1, title: "Example" }]);
   const { tabs: [tab] } = await browser.request("find", { url: browser.url });
   const args = { ref: tab.ref, expected_url: browser.url, selector: "main", wait_for_selector: "#ready", include_links: true };
   assert.equal((await browser.request("read", args)).text, "Visible text");
@@ -578,7 +581,7 @@ test("read pins the shared isolated function to the observed main document", asy
 });
 
 test("read does not inject into a private, changed, or pending target or accept arbitrary code", async () => {
-  const browser = production([{ id: 1 }]);
+  const browser = production([{ id: 1, title: "Example" }]);
   const { tabs: [tab] } = await browser.request("find", { url: browser.url });
   const args = { ref: tab.ref, expected_url: browser.url };
   assert.equal((await browser.request("read", { ...args, code: "document.cookie" })).status, "invalid_request");
@@ -592,7 +595,7 @@ test("read does not inject into a private, changed, or pending target or accept 
 });
 
 test("read remains framed with worst-case JSON escapes rather than dropping the connection", async () => {
-  const browser = production([{ id: 1 }]);
+  const browser = production([{ id: 1, title: "Example" }]);
   const { tabs: [tab] } = await browser.request("find", { url: browser.url });
   const args = { ref: tab.ref, expected_url: browser.url };
   for (const char of ["\u0000", "界", "<", "😄"]) {
@@ -615,4 +618,23 @@ test("unversioned and prior-version writes are rejected without browser activity
   }
   assert.deepEqual(browser.calls.create, []);
   assert.deepEqual(browser.calls.remove, []);
+});
+
+ test("capture preference disables captures and invalidates bytes without affecting reads", async () => {
+  const browser = production([{ id: 1, title: "Example" }]);
+  browser.captureAllowed();
+  const capture = await captureTab(browser);
+  browser.captureEnabled(false);
+  assert.equal((await browser.request("capture", capture)).status, "capture_disabled");
+  assert.equal((await browser.request("read", capture)).status, "ok");
+  browser.captureEnabled(true);
+  browser.duringCapture(() => { browser.captureEnabled(false); browser.captureEnabled(true); });
+  assert.notEqual((await browser.request("capture", capture)).status, "ok");
+  browser.duringCapture(() => {});
+  browser.image(png.slice(0, -1) + "a".repeat(100001));
+  const { image_ref } = await browser.request("capture", capture);
+  browser.captureEnabled(false);
+  assert.equal((await browser.request("capture_chunk", { image_ref, offset: 0 })).status, "capture_disabled");
+  browser.captureEnabled(true);
+  assert.equal((await browser.request("capture_chunk", { image_ref, offset: 0 })).status, "capture_transfer_unavailable");
 });
