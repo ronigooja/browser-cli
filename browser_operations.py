@@ -210,6 +210,8 @@ class BrowserOperations:
             return self.failed_reply(browser, reply), None
         if reply.get("final_url") != target.tab.url:
             return self.fail(browser, "target_changed"), None
+        if "selector" in args and "crop" not in reply:
+            return self.fail(browser, "capture_geometry_unavailable"), None
         try:
             png = collect(reply, request, self.service.clock)
             if "selector" in args:
