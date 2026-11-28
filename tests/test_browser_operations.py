@@ -110,3 +110,8 @@ class BrowserOperationTest(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertNotIn("tab_ref", result)
         self.assertEqual(self.page("info", ref)["status"], "target_changed")
+
+    def test_update_requirement_is_preserved_for_page_operations(self):
+        ref = self.target()
+        self.backend.replies["page"] = {"status": "disconnected", "update_required": True}
+        self.assertTrue(self.page("snapshot", ref)["update_required"])

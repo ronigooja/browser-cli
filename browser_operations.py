@@ -37,11 +37,16 @@ class BrowserOperations:
         self.targets = Capabilities(service.clock, 1800, 256)
 
     def fail(self, browser, status, *, write=False):
-        if write and status in ("timeout", "browser_error", "read_unavailable", "response_too_large", "open_unconfirmed"):
+        if write and status in ("timeout", "browser_error", "response_too_large", "open_unconfirmed"):
             status = "action_unconfirmed"
         if status in PAGE_ERRORS:
             return result(status, browser, PAGE_ERRORS[status])
         return blocker(browser, {"status": status})
+
+    def failed_reply(self, browser, reply, *, write=False):
+        if reply["status"] == "extension_disconnected" and reply.get("update_required") is True:
+            return blocker(browser, reply)
+        return self.fail(browser, reply["status"], write=write)
 
     @staticmethod
     def validate(args, common, fields, required):
@@ -135,7 +140,7 @@ class BrowserOperations:
             if reply["status"] == "tab_ambiguous":
                 return result("tab_ambiguous", browser, "List the tabs and ask which one is intended.")
             if reply["status"] != "ok":
-                return self.fail(browser, reply["status"], write=True)
+                return self.failed_reply(browser, reply, write=True)
             try:
                 tab = Tab.from_reply(reply.get("tab"))
             except ValueError:
@@ -152,6 +157,8 @@ class BrowserOperations:
             if url_mismatch(tab.url, url_key(url), "exact"):
                 return result("target_changed", browser, PAGE_ERRORS["target_changed"], **fields)
             fields.update(self.issue(Target(browser, tab), scope, candidate=not created))
+            if created and action == "open_background" and "cleanup_token" not in fields:
+                fields["cleanup_note"] = "The tab cannot be safely identified for automated cleanup; leave it open."
             return result("ok", browser, **fields)
         token = args["tab_ref"]
         target = self.targets.get(token, scope)
@@ -162,7 +169,7 @@ class BrowserOperations:
         if action in ("navigate", "close"):
             self.targets.discard(token)
         if reply["status"] != "ok":
-            return self.fail(browser, reply["status"], write=True)
+            return self.failed_reply(browser, reply, write=True)
         if action == "navigate":
             # Explicit navigation never carries authorization across an unexpected redirect.
             try:
@@ -170,7 +177,7 @@ class BrowserOperations:
             except ValueError:
                 return result("ok", browser, "Navigation requested. List tabs again to select its destination.")
             if (tab.ref != target.tab.ref or url_mismatch(tab.url, url_key(args["url"]), "exact")
-                    or url_key(tab.url)[:3] != url_key(target.tab.url)[:3]):
+                    or url_key(args["url"])[:3] != url_key(target.tab.url)[:3]):
                 return result("ok", browser, "Navigation requested. List tabs again to confirm its destination.")
             return result("ok", browser, **tab.candidate(), **self.issue(Target(browser, tab), scope))
         return result("ok", browser)
@@ -217,7 +224,7 @@ class BrowserOperations:
                               **{key: reply[key] for key in fields if key in reply})
             remaining = deadline - self.service.clock()
             if action != "wait" or status not in ("content_not_ready", "page_loading") or remaining <= 0:
-                return self.fail(browser, status, write=action in PAGE_WRITES)
+                return self.failed_reply(browser, reply, write=action in PAGE_WRITES)
             self.service.sleep(min(0.25, remaining))
             remaining = deadline - self.service.clock()
             if remaining <= 0:
