@@ -183,7 +183,9 @@ test("page pins its document and does not confirm a changed action", async () =>
   assert.equal((await browser.request("page", payload)).status, "ok");
   assert.deepEqual(browser.calls.execute[0].target.documentIds, ["document-one"]);
   browser.duringInjection(() => browser.frame({documentId: "document-two"}));
-  assert.equal((await browser.request("page", payload)).status, "action_unconfirmed");
+  assert.equal((await browser.request("page", payload)).status, "read_unavailable");
+  browser.duringInjection(() => browser.frame({documentId: "document-three"}));
+  assert.equal((await browser.request("page", {...payload, kind: "click", selector: "button"})).status, "action_unconfirmed");
   assert.equal((await browser.request("page", {...payload, script: "alert(1)"})).status, "invalid_request");
 });
 
