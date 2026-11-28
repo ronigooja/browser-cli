@@ -1,7 +1,9 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -87,6 +89,56 @@ class RemovalTests(unittest.TestCase):
         self.assertTrue(app.exists())
         self.assertTrue(result["errors"])
         self.assertEqual(result["moved"], [])
+
+    def make_safari(self):
+        app = self.home / "Applications/AgentBrowserSafari.app"
+        extension = app / "Contents/PlugIns/AgentBrowserSafariExtension.appex"
+        for bundle, identifier in ((app, removal.SAFARI_HOST), (extension, removal.SAFARI_EXTENSION)):
+            contents = bundle / "Contents"
+            contents.mkdir(parents=True, exist_ok=True)
+            (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier}))
+        return app, extension
+
+    def test_safari_trusted_team_moves_only_app(self):
+        app, extension = self.make_safari()
+        group = self.home / "Library/Group Containers/example"
+        group.mkdir(parents=True)
+        with patch.dict(os.environ, {"AGENT_BROWSER_SAFARI_TEAM_ID": "ABCDE12345"}, clear=True), patch.object(removal.subprocess, "run") as run:
+            result = removal.cleanup("safari")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["moved"]), 1)
+        self.assertFalse(app.exists())
+        self.assertTrue(group.exists())
+        self.assertEqual(run.call_count, 4)
+        for call, identifier in zip(run.call_args_list, (removal.SAFARI_HOST, removal.SAFARI_EXTENSION) * 2):
+            args = call.args[0]
+            self.assertIn("--strict", args)
+            self.assertIn("--deep", args)
+            self.assertIn(identifier, args[args.index("-R") + 1])
+            self.assertIn('"ABCDE12345"', args[args.index("-R") + 1])
+        os.rename(result["moved"][0]["to"], app)
+        self.assertTrue(extension.exists())
+
+    def test_safari_requires_pin_and_valid_signatures(self):
+        app, _ = self.make_safari()
+        for team in ("", 'bad" or true'):
+            with patch.dict(os.environ, {"AGENT_BROWSER_SAFARI_TEAM_ID": team}, clear=True), patch.object(removal.subprocess, "run") as run:
+                self.assertTrue(removal.cleanup("safari")["errors"])
+                run.assert_not_called()
+        with patch.dict(os.environ, {"AGENT_BROWSER_SAFARI_TEAM_ID": "ABCDE12345"}, clear=True), patch.object(removal.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "codesign")):
+            self.assertTrue(removal.cleanup("safari")["errors"])
+        self.assertTrue(app.exists())
+
+    def test_safari_wrong_identifier_and_symlink_rejected(self):
+        app, extension = self.make_safari()
+        plist = extension / "Contents/Info.plist"
+        plist.write_bytes(plistlib.dumps({"CFBundleIdentifier": "wrong"}))
+        with patch.dict(os.environ, {"AGENT_BROWSER_SAFARI_TEAM_ID": "ABCDE12345"}, clear=True), patch.object(removal.subprocess, "run"):
+            self.assertTrue(removal.cleanup("safari")["errors"])
+            plist.unlink()
+            plist.symlink_to(app / "Contents/Info.plist")
+            self.assertTrue(removal.cleanup("safari")["errors"])
+        self.assertTrue(app.exists())
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
 """Conservative, reversible cleanup after the caller confirms extension removal.
 
-Only exact current Chrome installation contents and registration are eligible.
-Safari app ownership cannot be established from its bundle identifier or an
-arbitrary valid signature, so this module never moves it. No profiles, app
+Only exact current Chrome installation contents and registration and a Safari
+app signed by an independently configured team are eligible. No profiles, app
 group data, settings, or browser directories are removed.
 """
 
@@ -11,12 +10,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
 import secrets
 import shlex
 import stat
+import subprocess
 
 
 HOST = "com.agent_browser.background"
+SAFARI_HOST = "com.ronigooja.agentbrowser.safaribackground"
+SAFARI_EXTENSION = SAFARI_HOST + ".extension"
 SOURCE = Path(__file__).resolve().parent
 
 
@@ -111,6 +115,47 @@ def _trash(home):
     return destination
 
 
+def _validate_safari(app, home, team):
+    """Validate both signed code identities, not just their self-reported plists."""
+    if not re.fullmatch(r"[A-Z0-9]{10}", team):
+        raise ValueError("Set AGENT_BROWSER_SAFARI_TEAM_ID to the independently trusted 10-character Apple team ID")
+    _check_path(app, home)
+    if not app.is_dir():
+        raise ValueError("Safari app is not a directory")
+    # Reject links and foreign-owned content throughout the bundle, including
+    # the extension, before invoking codesign on any executable content.
+    for root, dirs, files in os.walk(app, followlinks=False, onerror=lambda e: (_ for _ in ()).throw(e)):
+        for name in dirs + files:
+            _check_path(Path(root) / name, home)
+    extension = app / "Contents/PlugIns/AgentBrowserSafariExtension.appex"
+    for bundle, identifier in ((app, SAFARI_HOST), (extension, SAFARI_EXTENSION)):
+        _check_path(bundle, home)
+        with (bundle / "Contents/Info.plist").open("rb") as stream:
+            if plistlib.load(stream).get("CFBundleIdentifier") != identifier:
+                raise ValueError(f"Unexpected Safari bundle identifier: {bundle}")
+        requirement = f'anchor apple generic and identifier "{identifier}" and certificate leaf[subject.OU] = "{team}"'
+        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--all-architectures", "-R", requirement, str(bundle)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
+
+
+def _cleanup_safari(result, home):
+    if "AGENT_BROWSER_SAFARI_BINARY" in os.environ:
+        result["errors"].append("Safari app retained: custom binary override is configured")
+        return result
+    app = home / "Applications/AgentBrowserSafari.app"
+    team = os.environ.get("AGENT_BROWSER_SAFARI_TEAM_ID", "")
+    try:
+        _validate_safari(app, home, team)
+        destination = _trash(home)
+        _validate_safari(app, home, team)
+        target = destination / app.name
+        os.rename(app, target)
+        result["moved"].append({"from": str(app), "to": str(target)})
+    except (OSError, ValueError, TypeError, plistlib.InvalidFileException, subprocess.SubprocessError) as error:
+        result["errors"].append(f"Safari app retained: {error}")
+    return result
+
+
 def cleanup(browser):
     """Return moved paths and errors; caller must first obtain explicit consent.
 
@@ -119,8 +164,7 @@ def cleanup(browser):
     """
     result = {"browser": browser, "moved": [], "errors": []}
     if browser == "safari":
-        result["errors"].append("Safari app retained: a trusted signing identity cannot be independently established; custom binaries are never moved.")
-        return result
+        return _cleanup_safari(result, Path.home())
     if browser != "chrome":
         result["errors"].append("Unsupported browser")
         return result
