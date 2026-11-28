@@ -92,7 +92,16 @@ function agentBrowserPageOperation(options) {
     function safeUrl(value) {
       try { const u = new URL(value); return /^https?:$/.test(u.protocol) && !u.username && !u.password && u.href.length <= 2048; } catch (_) { return false; }
     }
-    if (kind === 'info') return result('ok', {title:clip(document.title,500)});
+    if (kind === 'info') return result('ok', {title:clip(document.title,500), ready_state:document.readyState, challenge:'none'});
+    function scroll(target) {
+      if (options.direction === 'top' || options.direction === 'bottom') {
+        const bottom = target === window ? document.scrollingElement?.scrollHeight : target.scrollHeight;
+        target.scrollTo({top:options.direction === 'top' ? 0 : bottom, behavior:'instant'});
+      } else if (options.direction === 'by' && Number.isInteger(options.pixels)) {
+        target.scrollBy(0,options.pixels);
+      } else return result('action_unavailable');
+      return result('ok');
+    }
     if (kind === 'snapshot') {
       const key = '__agentBrowserPageOperationRefs';
       let store = globalThis[key];
@@ -128,22 +137,49 @@ function agentBrowserPageOperation(options) {
       const root = found.nodes.find(visible);
       if (!root || root.matches('script,style,noscript')) return result('no_match');
       if (kind === 'html') {
-        // Never serialize hidden DOM, form values, scripts, or secrets.
-        return result('action_unavailable');
+        let budget = 9000, truncated = false;
+        const parts = [];
+        const escape = value => value.replace(/[&<>]/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+        const passiveTags = /^(?:a|article|aside|b|blockquote|br|caption|code|dd|div|dl|dt|em|figcaption|figure|footer|h[1-6]|header|hr|i|li|main|nav|ol|p|pre|section|small|span|strong|table|tbody|td|th|thead|tr|ul)$/;
+        function append(text) {
+          if (text.length > budget) { truncated = true; return false; }
+          parts.push(text); budget -= text.length; return true;
+        }
+        function walk(node, depth) {
+          if (depth > 50 || truncated) { truncated = true; return; }
+          const tag = node.tagName.toLowerCase();
+          if (!visible(node) || /^(?:script|style|noscript|template|iframe|textarea|input|select)$/.test(tag) || node.isContentEditable) return;
+          const end = passiveTags.test(tag) && tag !== 'br' && tag !== 'hr' ? `</${tag}>` : '';
+          if (budget < end.length) { truncated = true; return; }
+          budget -= end.length;
+          if (passiveTags.test(tag) && !append(`<${tag}>`)) return;
+          for (const child of node.childNodes) {
+            if (truncated) break;
+            if (child.nodeType === 1) walk(child,depth + 1);
+            if (child.nodeType === 3 && child.nodeValue) append(escape(child.nodeValue.slice(0,budget+1)));
+          }
+          parts.push(end);
+        }
+        if (options.raw === true) return result('action_unavailable');
+        walk(root,0);
+        return result('ok', {html:parts.join(''),truncated});
       }
       const text = root.innerText || '';
       const anchors = Array.from(root.querySelectorAll('a[href]'));
       if (root.matches('a[href]')) anchors.unshift(root);
-      const links = anchors.filter(a => visible(a) && safeUrl(a.href)).slice(offset,offset + 25).map(a => ({text:clip((a.innerText || '').trim(),200), url:a.href}));
-      return result('ok', {text:text.slice(offset,offset + 12000), links, next_offset:offset + 12000 < text.length ? offset + 12000 : null, truncated:text.length > offset + 12000});
+      const eligible = anchors.filter(a => visible(a) && safeUrl(a.href));
+      const links = [];
+      let budget = 6000;
+      for (const a of eligible.slice(offset,offset + 25)) {
+        const label = clip((a.innerText || '').trim(),200);
+        if (a.href.length + label.length > budget) break;
+        budget -= a.href.length + label.length;
+        links.push({text:label,url:a.href});
+      }
+      const next_offset = offset + links.length < eligible.length ? offset + links.length : null;
+      return result('ok', {text:offset === 0 ? text.slice(0,4000) : '', links, next_offset, truncated:next_offset !== null || text.length > 4000});
     }
-    if (kind === 'scroll' && !selector && !options.elementRef) {
-      const amount = Number.isFinite(options.pixels) ? Math.min(2000,Math.max(0,options.pixels)) : 600;
-      const directions = {up:[0,-amount],down:[0,amount],left:[-amount,0],right:[amount,0]};
-      if (!directions[options.direction]) return result('action_unavailable');
-      window.scrollBy(...directions[options.direction]);
-      return result('ok');
-    }
+    if (kind === 'scroll' && !selector && !options.elementRef) return scroll(window);
     let target;
     if (options.elementRef) {
       const store = globalThis.__agentBrowserPageOperationRefs;
@@ -154,7 +190,9 @@ function agentBrowserPageOperation(options) {
       if (found.error) return result('invalid_selector');
       target = found.nodes.find(visible);
       if (!target) return result('no_match');
-    } else return result('action_unavailable');
+    } else if (kind === 'press') target = document.activeElement;
+    else return result('action_unavailable');
+    if (!target) return result('action_unavailable');
     if (target.matches(':disabled,[aria-disabled="true"]')) return result('action_unavailable');
     if (kind === 'click') {
       // A click must not implicitly submit a form.
@@ -163,13 +201,16 @@ function agentBrowserPageOperation(options) {
       if (anchor && !safeUrl(anchor.href)) return result('action_unavailable');
       target.click();
     } else if (kind === 'fill') {
-      if (!target.matches('textarea,input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"]') || target.readOnly || typeof options.value !== 'string' || options.value.length > 10000) return result('action_unavailable');
-      target.value = options.value;
+      if (!target.matches('textarea,input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"]') || target.readOnly || typeof options.text !== 'string' || options.text.length > 4000) return result('action_unavailable');
+      target.value = options.text;
       target.dispatchEvent(new Event('input', {bubbles:true}));
       target.dispatchEvent(new Event('change', {bubbles:true}));
     } else if (kind === 'select') {
-      if (target.tagName !== 'SELECT' || typeof options.value !== 'string' || !Array.from(target.options).some(o => o.value === options.value && !o.disabled)) return result('action_unavailable');
-      target.value = options.value;
+      if (target.tagName !== 'SELECT' || typeof options.value !== 'string') return result('action_unavailable');
+      const choices = Array.from(target.options).filter(o => !o.matches(':disabled'));
+      const option = choices.find(o => o.value === options.value) || choices.find(o => o.label === options.value);
+      if (!option) return result('action_unavailable');
+      target.selectedIndex = option.index;
       target.dispatchEvent(new Event('input', {bubbles:true}));
       target.dispatchEvent(new Event('change', {bubbles:true}));
     } else if (kind === 'press') {
@@ -181,12 +222,8 @@ function agentBrowserPageOperation(options) {
       const form = target.tagName === 'FORM' ? target : target.form;
       if (!form || typeof form.requestSubmit !== 'function') return result('action_unavailable');
       form.requestSubmit();
-    } else if (kind === 'scroll') {
-      const amount = Number.isFinite(options.pixels) ? Math.min(2000,Math.max(0,options.pixels)) : 600;
-      const directions = {up:[0,-amount],down:[0,amount],left:[-amount,0],right:[amount,0]};
-      if (!directions[options.direction]) return result('action_unavailable');
-      target.scrollBy(...directions[options.direction]);
-    } else return result('action_unavailable');
+    } else if (kind === 'scroll') return scroll(target);
+    else return result('action_unavailable');
     return result('ok');
   }
   if (hasWaitSelector) {

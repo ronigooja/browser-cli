@@ -373,7 +373,7 @@ class ServerTest(unittest.TestCase):
         replies = [json.loads(line) for line in out.getvalue().splitlines()]
         self.assertEqual([reply["error"]["code"] for reply in replies[:3]], [-32700, -32700, -32000])
         self.assertEqual({tool["name"] for tool in replies[-1]["result"]["tools"]},
-                         {"read_page", "cleanup_tab", "setup_extension"})
+                         {"read_page", "cleanup_tab", "setup_extension", "browser_tabs", "browser_page"})
 
     def test_query_policy_preserves_key_value_multiplicity_and_fragment(self):
         expected = url_key(URL)
