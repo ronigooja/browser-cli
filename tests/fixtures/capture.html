@@ -3,7 +3,7 @@
 <title>Agent Browser capture fixture</title>
 <style>
   html, body { margin: 0; overflow: hidden; }
-  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  canvas { position: fixed; inset: 0; width: min(40vw, 480px); height: min(40vh, 360px); }
   #crop { position: fixed; left: -31.5px; top: 77.25px; width: 232px; height: 191.5px;
     background: linear-gradient(to bottom, #ff0000 50%, #0080ff 50%); }
 </style>
@@ -12,8 +12,8 @@
 <script>
   const canvas = document.querySelector('canvas');
   function render() {
-    canvas.width = Math.min(2000, Math.ceil(innerWidth * devicePixelRatio));
-    canvas.height = Math.min(1600, Math.ceil(innerHeight * devicePixelRatio));
+    canvas.width = Math.ceil(canvas.clientWidth * devicePixelRatio);
+    canvas.height = Math.ceil(canvas.clientHeight * devicePixelRatio);
     const ctx = canvas.getContext('2d', {alpha:false});
     const image = ctx.createImageData(canvas.width, canvas.height);
     let seed = 0x2c519713;
