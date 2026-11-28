@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Agent Browser capture fixture</title>
+<style>
+  html, body { margin: 0; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  #crop { position: fixed; left: -31.5px; top: 77.25px; width: 232px; height: 191.5px;
+    background: linear-gradient(to bottom, #ff0000 50%, #0080ff 50%); }
+</style>
+<canvas aria-hidden="true"></canvas>
+<div id="crop" aria-label="Partially visible crop fixture"></div>
+<script>
+  const canvas = document.querySelector('canvas');
+  function render() {
+    canvas.width = Math.min(2000, Math.ceil(innerWidth * devicePixelRatio));
+    canvas.height = Math.min(1600, Math.ceil(innerHeight * devicePixelRatio));
+    const ctx = canvas.getContext('2d', {alpha:false});
+    const image = ctx.createImageData(canvas.width, canvas.height);
+    let seed = 0x2c519713;
+    for (let i = 0; i < image.data.length; i += 4) {
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+      image.data[i] = seed & 255; image.data[i + 1] = seed >>> 8 & 255;
+      image.data[i + 2] = seed >>> 16 & 255; image.data[i + 3] = 255;
+    }
+    ctx.putImageData(image, 0, 0);
+    document.body.dataset.ready = 'true';
+  }
+  render();
+  addEventListener('resize', render);
+</script>

@@ -47,6 +47,9 @@ jobs:
           python3 - <<'PY'
           import struct
           import zlib
+          from pathlib import Path
+          import subprocess
+          from tempfile import TemporaryDirectory
           from browser_capture import crop_png, png_size
 
           def chunk(kind, data):
@@ -56,5 +59,27 @@ jobs:
           png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 2, 2, 8, 2, 0, 0, 0))
                  + chunk(b'IDAT', zlib.compress(b''.join(rows))) + chunk(b'IEND', b''))
           geometry = dict(x=1, y=0, width=1, height=2, viewport_width=2, viewport_height=2)
-          assert png_size(crop_png(png, geometry)) == (1, 2)
+          with TemporaryDirectory() as directory:
+              source = Path(directory) / 'crop.png'
+              source.write_bytes(crop_png(png, geometry))
+              assert png_size(source.read_bytes()) == (1, 2)
+              swift = r'''
+              import Foundation
+              import CoreGraphics
+              import ImageIO
+              let url = URL(fileURLWithPath: CommandLine.arguments[1]) as CFURL
+              let image = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(url, nil)!, 0, nil)!
+              var bytes = [UInt8](repeating: 0, count: 8)
+              bytes.withUnsafeMutableBytes { data in
+                  let ctx = CGContext(data: data.baseAddress!, width: 1, height: 2, bitsPerComponent: 8,
+                      bytesPerRow: 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+                  ctx.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 2))
+              }
+              precondition(bytes[1] >= 240 && bytes[5] >= 240 && bytes[2] <= 15 && bytes[6] <= 15)
+              precondition(abs(Int(bytes[0]) - Int(bytes[4])) >= 225)
+              '''
+              script = Path(directory) / 'verify.swift'
+              script.write_text(swift)
+              subprocess.run(['swift', str(script), str(source)], check=True)
           PY

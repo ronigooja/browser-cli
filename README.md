@@ -37,3 +37,5 @@ There are no arbitrary scripts, OS-level trusted input, raw HTML or cookie/stora
 ## Verification
 
 Run Python and Node.js tests on the Linux build host: `python3 -m unittest discover -s tests` and `node --test tests/*.test.js safari-background/background.test.js`. The manually triggered [Safari workflow](.github/workflows/safari-probe.yml) builds both unsigned Xcode targets and exercises the native gates. The [restricted Safari probe](safari-prototype/README.md) isolates push/pull transport experiments; CI cannot prove live foreground behavior, profile isolation, or Safari's website authorization UI.
+
+For signed production browser checks, see [live acceptance](tests/live-acceptance.md).
