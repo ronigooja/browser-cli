@@ -518,16 +518,46 @@ def chrome_has_no_windows(pid):
         size = count(windows)
         if size <= 0:  # No positive evidence that this is a working GUI session.
             return False
+        owns_surfaces = False
         for i in range(size):
             window = get_item(windows, i)
             owner = get_value(window, owner_pid) if window else None
             value = ctypes.c_int()
             if (not owner or type_id(owner) != number_type
-                    or not number_value(owner, 9, ctypes.byref(value)) or value.value == pid):  # kCFNumberIntType
+                    or not number_value(owner, 9, ctypes.byref(value))):  # kCFNumberIntType
                 return False
-        return True
+            owns_surfaces |= value.value == pid
+        # Chrome can keep non-window surfaces in Quartz after its last window closes.
+        return not owns_surfaces or chrome_ax_has_no_windows(pid, foundation)
     finally:
         release(windows)
+
+
+def chrome_ax_has_no_windows(pid, foundation):
+    """Resolve ambiguous Quartz surfaces only with an existing accessibility grant."""
+    ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices")
+    ptr = ctypes.c_void_p
+    if not native_function(ax, "AXIsProcessTrusted", ctypes.c_ubyte)():
+        return False
+    make_app = native_function(ax, "AXUIElementCreateApplication", ptr, ctypes.c_int)
+    timeout = native_function(ax, "AXUIElementSetMessagingTimeout", ctypes.c_int, ptr, ctypes.c_float)
+    copy = native_function(ax, "AXUIElementCopyAttributeValue", ctypes.c_int, ptr, ptr, ctypes.POINTER(ptr))
+    release = native_function(foundation, "CFRelease", None, ptr)
+    make_string = native_function(foundation, "CFStringCreateWithCString", ptr, ptr, ctypes.c_char_p, ctypes.c_uint32)
+    app = make_app(pid)
+    name = make_string(None, b"AXWindows", 0x08000100)
+    result = ptr()
+    try:
+        if not app or not name or timeout(app, 0.5) != 0 or copy(app, name, ctypes.byref(result)) != 0 or not result:
+            return False
+        type_id = native_function(foundation, "CFGetTypeID", ctypes.c_ulong, ptr)
+        array_type = native_function(foundation, "CFArrayGetTypeID", ctypes.c_ulong)
+        count = native_function(foundation, "CFArrayGetCount", ctypes.c_long, ptr)
+        return type_id(result) == array_type() and count(result) == 0
+    finally:
+        for value in (result, name, app):
+            if value:
+                release(value)
 
 
 def singleton_peer_pid(client):
