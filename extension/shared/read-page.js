@@ -118,7 +118,9 @@ function readPage(options) {
         const ref = Array.from(bytes, b => b.toString(16).padStart(2,'0')).join('');
         if (store.refs.size >= 500) store.refs.delete(store.refs.keys().next().value);
         store.refs.set(ref, node);
-        elements.push({ref, tag:clip(node.tagName.toLowerCase(),32), text:clip(node.getAttribute('aria-label') || node.innerText || '',200)});
+        const href = node.matches('a[href]') && safeUrl(node.href) ? node.href : null;
+        elements.push({ref, tag:clip(node.tagName.toLowerCase(),32), text:clip(node.getAttribute('aria-label') || node.innerText || '',200),
+          ...(href && href.length <= 200 ? {url:href} : {})});
       }
       return result('ok', {elements, next_offset:offset + elements.length < nodes.length ? offset + elements.length : null});
     }
@@ -198,7 +200,10 @@ function readPage(options) {
       // A click must not implicitly submit a form.
       if (target.closest('button:not([type]),button[type="submit"],input[type="submit"],input[type="image"]')) return result('action_unavailable');
       const anchor = target.closest('a[href]');
-      if (anchor && !safeUrl(anchor.href)) return result('action_unavailable');
+      if (anchor && (!safeUrl(anchor.href) || anchor.hasAttribute('download') ||
+          !['', '_self'].includes((anchor.target || document.querySelector('base[target]')?.target || '').toLowerCase()))) {
+        return result('action_unavailable');
+      }
       target.click();
     } else if (kind === 'fill') {
       if (!target.matches('textarea,input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"]') || target.readOnly || typeof options.text !== 'string' || options.text.length > 4000) return result('action_unavailable');

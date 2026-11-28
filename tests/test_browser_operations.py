@@ -101,3 +101,12 @@ class BrowserOperationTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.page(action, ref, **fields)
         self.assertEqual(len(self.backend.calls), before)
+
+    def test_cross_origin_navigation_requires_reconfirmation(self):
+        ref = self.target()
+        destination = "https://other.example/detail"
+        self.backend.replies["tab"] = {"status": "ok", "tab": dict(TAB, url=destination)}
+        result = self.tabs("navigate", url=destination, tab_ref=ref)
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn("tab_ref", result)
+        self.assertEqual(self.page("info", ref)["status"], "target_changed")

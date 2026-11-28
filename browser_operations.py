@@ -60,9 +60,8 @@ class BrowserOperations:
         for key, low, high in (("offset", 0, 10000), ("pixels", -10000, 10000), ("timeout_ms", 0, 30000)):
             if key in args and (type(args[key]) is not int or not low <= args[key] <= high):
                 raise ValueError(f"Invalid {key}.")
-        for key in ("approved",):
-            if key in args and type(args[key]) is not bool:
-                raise ValueError(f"Invalid {key}.")
+        if "approved" in args and type(args["approved"]) is not bool:
+            raise ValueError("Invalid approved.")
         if "url" in args:
             url_key(args["url"])
         if "selector" in args and "element_ref" in args:
@@ -170,7 +169,8 @@ class BrowserOperations:
                 tab = Tab.from_reply(reply.get("tab"))
             except ValueError:
                 return result("ok", browser, "Navigation requested. List tabs again to select its destination.")
-            if tab.ref != target.tab.ref or url_mismatch(tab.url, url_key(args["url"]), "exact"):
+            if (tab.ref != target.tab.ref or url_mismatch(tab.url, url_key(args["url"]), "exact")
+                    or url_key(tab.url)[:3] != url_key(target.tab.url)[:3]):
                 return result("ok", browser, "Navigation requested. List tabs again to confirm its destination.")
             return result("ok", browser, **tab.candidate(), **self.issue(Target(browser, tab), scope))
         return result("ok", browser)
