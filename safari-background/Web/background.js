@@ -6,6 +6,16 @@ const origins = ["http://*/*", "https://*/*"];
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const requestID = /^[\da-f]{32}$/;
 const limit = 65536;
+const version = 2;
+const refPlaceholder = "0".repeat(73);
+const pageFields = new Map([
+  ["info", []], ["html", ["selector", "raw"]], ["snapshot", ["selector", "offset"]], ["extract", ["selector", "offset"]],
+  ["wait", ["selector", "condition", "text"]], ["click", ["selector", "elementRef"]],
+  ["scroll", ["selector", "elementRef", "direction", "pixels"]], ["fill", ["selector", "elementRef", "text"]],
+  ["select", ["selector", "elementRef", "value"]], ["press", ["selector", "elementRef", "key"]],
+  ["submit", ["selector", "elementRef"]],
+]);
+const pageWrites = new Set(["click", "scroll", "fill", "select", "press", "submit"]);
 const refs = new Map(), tabs = new Map();
 const interval = 1000;
 let enabledProfile;
@@ -15,7 +25,7 @@ let selectionEpoch = 0;
 let lastActivation = 0;
 let readPinQualified = false;
 
-const native = (phase, extra = {}) => browser.runtime.sendNativeMessage(app, {v: 1, phase, instance, ...extra});
+const native = (phase, extra = {}) => browser.runtime.sendNativeMessage(app, {v: version, phase, instance, ...extra});
 const expired = expires => Date.now() >= expires;
 const isID = id => Number.isSafeInteger(id) && id >= 0;
 const regular = tab => tab?.incognito === false && isID(tab.id) && isID(tab.windowId);
@@ -35,8 +45,23 @@ function validPayload(operation, data) {
   const only = (...keys) => Object.keys(data).every(key => keys.includes(key));
   const ref = value => typeof value === "string" && value.length === 73 && value.split(".").every(part => uuid.test(part));
   const selector = value => typeof value === "string" && value.length > 0 && value.length <= 2000;
-  if (operation === "status") return only();
-  if (operation === "find" || operation === "open") return only("url") && !!httpURL(data.url);
+  const pinned = () => ref(data.ref) && !!httpURL(data.expected_url);
+  if (operation === "status" || operation === "list") return only();
+  if (operation === "find" || operation === "open" || operation === "front_open") return only("url") && !!httpURL(data.url);
+  if (operation === "tab") return pinned() && only("ref", "expected_url", "kind", "url") &&
+    ["navigate", "activate", "close"].includes(data.kind) && (data.kind === "navigate" ? !!httpURL(data.url) : !("url" in data));
+  if (operation === "capture") return pinned() && only("ref", "expected_url", "selector") &&
+    (!("selector" in data) || selector(data.selector));
+  if (operation === "page") {
+    const fields = pageFields.get(data.kind);
+    const sizes = {selector: 1000, elementRef: 256, text: 4000, key: 32, value: 1000, direction: 8, condition: 8};
+    return !!fields && pinned() && only("ref", "expected_url", "kind", ...fields) && !("selector" in data && "elementRef" in data) &&
+      Object.entries(sizes).every(([key, max]) => !(key in data) || (typeof data[key] === "string" &&
+        data[key].length <= max && !data[key].includes("\0") && (["text", "value"].includes(key) || !!data[key].trim()))) &&
+      (!("pixels" in data) || (Number.isSafeInteger(data.pixels) && Math.abs(data.pixels) <= 10000)) &&
+      (!("offset" in data) || (Number.isSafeInteger(data.offset) && data.offset >= 0 && data.offset <= 10000)) &&
+      (!("raw" in data) || typeof data.raw === "boolean");
+  }
   if (operation === "close") return only("ref", "ownership") && ref(data.ref) && typeof data.ownership === "string" && uuid.test(data.ownership);
   return operation === "read" && only("ref", "expected_url", "selector", "wait_for_selector", "include_links") &&
     ref(data.ref) && !!httpURL(data.expected_url) &&
@@ -68,7 +93,11 @@ const activated = browser.tabs?.onActivated;
 const windowFocusChanged = browser.windows?.onFocusChanged;
 const beforeNavigate = browser.webNavigation?.onBeforeNavigate;
 const committed = browser.webNavigation?.onCommitted;
-removed?.addListener(forget);
+removed?.addListener(id => {
+  const entry = tabs.get(id);
+  if (entry) entry.removed = true;
+  forget(id);
+});
 activated?.addListener(({tabId}) => {
   lastActivation++;
   const entry = tabs.get(tabId);
@@ -76,6 +105,8 @@ activated?.addListener(({tabId}) => {
 });
 windowFocusChanged?.addListener(() => { lastActivation++; });
 browser.tabs?.onReplaced?.addListener((_new, old) => forget(old));
+browser.tabs?.onDetached?.addListener(forget);
+browser.tabs?.onAttached?.addListener(forget);
 for (const name of ["onBeforeNavigate", "onCommitted", "onHistoryStateUpdated", "onReferenceFragmentUpdated"]) {
   browser.webNavigation?.[name]?.addListener(({tabId, frameId}) => {
     const entry = tabs.get(tabId);
@@ -87,6 +118,8 @@ browser.tabs?.onUpdated?.addListener((tabId, changes) => {
   if (entry && (changes.url !== undefined || changes.status === "loading")) entry.navigation++;
 });
 
+const titleOf = tab => typeof tab.title === "string" ? tab.title.slice(0, 500) : "";
+
 function describe(tab, url) {
   let entry = tabs.get(tab.id);
   if (entry && entry.window !== tab.windowId) { forget(tab.id); entry = undefined; }
@@ -96,7 +129,7 @@ function describe(tab, url) {
     tabs.set(tab.id, entry);
     refs.set(entry.ref, entry);
   }
-  return {ref: entry.ref, url: url.href, title: typeof tab.title === "string" ? tab.title.slice(0, 500) : ""};
+  return {ref: entry.ref, url: url.href, title: titleOf(tab)};
 }
 
 async function inventory() {
@@ -113,7 +146,8 @@ async function currentTab(entry) {
   // Check the known window and current tab in the same snapshot.
   const window = await browser.windows.get(entry.window, {populate: true}).catch(() => null);
   if (refs.get(entry.ref) !== entry || !normal(window) || window.id !== entry.window || !Array.isArray(window.tabs)) return null;
-  return window.tabs.find(tab => regular(tab) && tab.id === entry.id && tab.windowId === entry.window) ?? null;
+  const tab = window.tabs.find(tab => regular(tab) && tab.id === entry.id && tab.windowId === entry.window);
+  return tab ? {...tab, windowFocused: window.focused} : null;
 }
 
 const observed = tab => httpURL(tab?.pendingUrl ?? tab?.url);
@@ -141,10 +175,15 @@ function trustedDocument(frame, expected) {
 
 function noDataMarker() { return true; }
 
+function originAllowed(expected) {
+  const target = httpURL(expected);
+  return browser.permissions.contains({origins: [`${target.protocol}//${target.hostname}/*`]});
+}
+
 const readStatuses = new Set(["ok", "verification_required", "passive_challenge", "login_required", "page_loading",
   "content_not_ready", "invalid_wait_selector", "invalid_selector", "no_match", "no_content"]);
 
-async function read({ref, expected_url, selector, wait_for_selector, include_links}, expires) {
+async function pinDocument({ref, expected_url}, expires) {
   const selection = selectionEpoch;
   const expected = httpURL(expected_url).href;
   const unavailable = {status: "read_unavailable", final_url: expected};
@@ -157,8 +196,7 @@ async function read({ref, expected_url, selector, wait_for_selector, include_lin
   const frame = await topDocument(entry.id);
   if (frame?.url && frame.url !== expected) return changed(httpURL(frame.url));
   if (!trustedDocument(frame, expected)) return unavailable;
-  const target = httpURL(expected);
-  if (await browser.permissions.contains({origins: [`${target.protocol}//${target.hostname}/*`]}) !== true) return unavailable;
+  if (await originAllowed(expected) !== true) return unavailable;
   if (expired(expires)) return {status: "timeout"};
 
   // Qualify this background instance before its first extraction. Every extraction
@@ -175,23 +213,192 @@ async function read({ref, expected_url, selector, wait_for_selector, include_lin
     readPinQualified = true;
   }
   if (await setupStatus() !== "ok") return unavailable;
+  const current = await currentTab(entry);
+  const currentMismatch = boundary(current, expected);
+  if (currentMismatch) return currentMismatch;
   const pin = await topDocument(entry.id);
-  if (refs.get(ref) !== entry || entry.navigation !== navigation || !trustedDocument(pin, expected) ||
+  if (selection !== selectionEpoch || refs.get(ref) !== entry || entry.navigation !== navigation || !trustedDocument(pin, expected) ||
       pin.documentId !== frame.documentId) return changed();
   if (expired(expires)) return {status: "timeout"};
+  return {entry, tab: current, expected, frame, selection, navigation, expires, script};
+}
 
+const stillPinned = ({entry, selection, navigation, expires}) => selection === selectionEpoch &&
+  refs.get(entry.ref) === entry && entry.navigation === navigation && !expired(expires);
+
+async function checkPin(pin) {
+  const {entry, expected, frame, expires} = pin;
+  if (await setupStatus() !== "ok" || await originAllowed(expected) !== true || pin.selection !== selectionEpoch) {
+    return {status: "read_unavailable", final_url: expected};
+  }
+  const tab = await currentTab(entry);
+  const mismatch = boundary(tab, expected);
+  if (mismatch) return mismatch;
+  const post = await topDocument(entry.id);
+  if (expired(expires)) return {status: "timeout"};
+  if (!stillPinned(pin) || !trustedDocument(post, expected) ||
+      post.documentId !== frame.documentId) return changed(httpURL(post?.url));
+  return {tab};
+}
+
+function pinnedResult(results, frame) {
+  return Array.isArray(results) && results.length === 1 && results[0]?.documentId === frame.documentId &&
+    results[0].frameId === 0 ? results[0].result : null;
+}
+
+const pageStatuses = new Set([...readStatuses, "target_changed", "stale_element", "action_unavailable", "action_unconfirmed"]);
+const actionUnconfirmed = {status: "action_unconfirmed"};
+
+async function page(data, expires) {
+  const {ref, expected_url, ...options} = data;
+  const pin = await pinDocument(data, expires);
+  if (pin.status) return pin;
+  return runPage(pin, options);
+}
+
+async function runPage(pin, options) {
+  const {script, frame, expected, entry} = pin;
+  const unavailable = {status: "read_unavailable", final_url: expected};
+  if (typeof agentBrowserPageOperation !== "function") return unavailable;
+  if (!stillPinned(pin)) return changed();
+  const mutation = pageWrites.has(options.kind);
+  // An interaction might adopt a previously owned tab even when its outcome cannot be proved.
+  if (mutation) delete entry.ownership;
+  try {
+    const results = await script(frame.documentId, agentBrowserPageOperation, [{...options, expectedURL: expected}]);
+    const post = await checkPin(pin);
+    if (post.status) return mutation ? actionUnconfirmed : post;
+    const result = pinnedResult(results, frame);
+    if (!pageStatuses.has(result?.status)) return mutation ? actionUnconfirmed : unavailable;
+    if (result.status === "target_changed" || result.final_url !== expected) {
+      return mutation ? actionUnconfirmed : changed(httpURL(result.final_url));
+    }
+    return result;
+  } catch (_) { return mutation ? actionUnconfirmed : unavailable; }
+}
+
+const wireSize = value => JSON.stringify(value).replace(/[\/<>&\x7f-\uffff]/g, "\\u0000").length;
+
+async function listTabs(expires) {
+  const selection = selectionEpoch;
+  const windows = await inventory();
+  if (!windows) return {status: "window_snapshot_unavailable"};
+  if (await setupStatus() !== "ok" || selection !== selectionEpoch) return {status: "disconnected"};
+  if (expired(expires)) return {status: "timeout"};
+  const result = [], seen = new Set();
+  let truncated = false;
+  for (const window of windows) {
+    for (const tab of window.tabs) {
+      const url = httpURL(tab.url);
+      if (!regular(tab) || tab.windowId !== window.id || !url || tab.pendingUrl !== undefined ||
+          tab.status === "loading" || tab.discarded === true || typeof tab.active !== "boolean" || seen.has(tab.id)) continue;
+      seen.add(tab.id);
+      if (result.length === 32) { truncated = true; continue; }
+      const item = {ref: refPlaceholder, url: url.href, title: titleOf(tab), active: tab.active, window_id: window.id};
+      if (wireSize([...result, item]) > limit - 256) { truncated = true; continue; }
+      const description = describe(tab, url);
+      if (!description) { truncated = true; continue; }
+      item.ref = description.ref;
+      result.push(item);
+    }
+  }
+  return {status: "ok", tabs: result, ...(truncated ? {truncated: true} : {})};
+}
+
+async function tabOperation(data, expires) {
+  const pin = await pinDocument(data, expires);
+  if (pin.status) return pin;
+  const gate = await runPage(pin, {kind: "info"});
+  if (gate.status !== "ok") return gate;
+  const before = await checkPin(pin);
+  if (before.status) return before;
+  if (!stillPinned(pin)) return changed();
+  const {entry, expected} = pin;
+  const {kind} = data;
+  const activation = lastActivation;
+  if (kind === "navigate" && (!activated?.addListener || !windowFocusChanged?.addListener ||
+      typeof before.tab.active !== "boolean" || typeof before.tab.windowFocused !== "boolean")) return {status: "action_unavailable"};
+  delete entry.ownership;
+  try {
+    if (kind === "navigate") {
+      // The API has no compare-and-update. Keep the pin adjacent to a URL-only
+      // update, and do not request tab selection or foreground activation.
+      const target = httpURL(data.url).href;
+      await browser.tabs.update(entry.id, {url: target});
+      while (!expired(expires) && selectionEpoch === pin.selection && refs.get(entry.ref) === entry && lastActivation === activation) {
+        const tab = await currentTab(entry);
+        if (!tab || tab.active !== before.tab.active || tab.windowFocused !== before.tab.windowFocused ||
+            (observed(tab)?.href !== target && observed(tab)?.href !== expected)) return actionUnconfirmed;
+        if (!boundary(tab, target)) {
+          const destination = await pinDocument({ref: entry.ref, expected_url: target}, expires);
+          if (!destination.status && lastActivation === activation && stillPinned(destination) &&
+              (expected !== target || destination.frame.documentId !== pin.frame.documentId) &&
+              destination.tab.active === before.tab.active && destination.tab.windowFocused === before.tab.windowFocused) {
+            return {status: "ok", tab: describe(destination.tab, httpURL(target))};
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return actionUnconfirmed;
+    }
+    if (kind === "activate") {
+      await browser.tabs.update(entry.id, {active: true});
+      const selected = await checkPin(pin);
+      if (selected.tab?.active !== true || !stillPinned(pin)) return actionUnconfirmed;
+      await browser.windows.update(entry.window, {focused: true});
+      const after = await checkPin(pin);
+      if (after.tab?.windowFocused !== true || after.tab.active !== true || !stillPinned(pin)) return actionUnconfirmed;
+      return {status: "ok", tab: describe(after.tab, httpURL(expected))};
+    }
+    await browser.tabs.remove(entry.id);
+    if (pin.selection !== selectionEpoch || expired(expires) || entry.navigation !== pin.navigation) return actionUnconfirmed;
+    // A removal event provides positive evidence even if closing the last tab
+    // also closes the containing regular window.
+    if (!entry.removed) return actionUnconfirmed;
+    return {status: "ok"};
+  } catch (_) { return actionUnconfirmed; }
+}
+
+async function capture(data, expires) {
+  const {selector} = data;
+  if (selector !== undefined || !browser.tabs?.captureVisibleTab || !activated?.addListener ||
+      !windowFocusChanged?.addListener) return {status: "action_unavailable"};
+  const activation = lastActivation;
+  const pin = await pinDocument(data, expires);
+  if (pin.status) return pin;
+  const gate = await runPage(pin, {kind: "info"});
+  if (gate.status !== "ok") return gate;
+  const before = await checkPin(pin);
+  if (before.status) return before;
+  if (before.tab.active !== true || before.tab.windowFocused !== true || lastActivation !== activation ||
+      !stillPinned(pin)) return {status: "action_unavailable"};
+  try {
+    const image = await browser.tabs.captureVisibleTab(pin.entry.window, {format: "png"});
+    const after = await checkPin(pin);
+    if (after.status) return after;
+    if (after.tab.active !== true || after.tab.windowFocused !== true || lastActivation !== activation || !stillPinned(pin)) return changed();
+    const finalGate = await runPage(pin, {kind: "info"});
+    if (finalGate.status !== "ok") return finalGate;
+    if (lastActivation !== activation || !stillPinned(pin)) return changed();
+    if (typeof image !== "string") return {status: "read_unavailable"};
+    if (image.length > limit) return {status: "response_too_large"};
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) return {status: "read_unavailable"};
+    return {status: "ok", final_url: pin.expected, image};
+  } catch (_) { return {status: "read_unavailable"}; }
+}
+
+async function read(data, expires) {
+  const {selector, wait_for_selector, include_links} = data;
+  const pin = await pinDocument(data, expires);
+  if (pin.status) return pin;
+  const {script, frame, expected} = pin;
   const results = await script(frame.documentId, readPage, [{expectedURL: expected,
     ...(selector !== undefined ? {selector} : {}), ...(wait_for_selector !== undefined ? {waitForSelector: wait_for_selector} : {}),
     includeLinks: include_links === true}]).catch(() => null);
-  const postMismatch = boundary(await currentTab(entry), expected);
-  if (postMismatch) return postMismatch;
-  const post = await topDocument(entry.id);
-  if (refs.get(ref) !== entry || entry.navigation !== navigation || !trustedDocument(post, expected) ||
-      post.documentId !== frame.documentId) return changed(httpURL(post?.url));
-  if (expired(expires)) return {status: "timeout"};
-  if (await setupStatus() !== "ok" || refs.get(ref) !== entry || entry.navigation !== navigation || expired(expires)) return unavailable;
-  if (!Array.isArray(results) || results.length !== 1 || results[0].documentId !== frame.documentId || results[0].frameId !== 0) return unavailable;
-  const result = results[0].result;
+  const post = await checkPin(pin);
+  if (post.status) return post;
+  const result = pinnedResult(results, frame);
+  if (!result) return {status: "read_unavailable", final_url: expected};
   if (!readStatuses.has(result?.status) || (result.status === "ok" && result.final_url !== expected)) return changed();
   return {...result, final_url: expected};
 }
@@ -271,6 +478,41 @@ async function closeOwned({ref, ownership}, expires) {
   } catch (_) { return {status: "cleanup_unconfirmed"}; }
 }
 
+async function frontOpen({url}, expires) {
+  const selection = selectionEpoch;
+  const target = httpURL(url);
+  const windows = await inventory();
+  if (!windows) return {status: "window_snapshot_unavailable"};
+  if (!windows.length) return {status: "no_regular_window"};
+  const focused = windows.filter(window => window.focused === true);
+  const window = windows.length === 1 ? windows[0] : focused.length === 1 ? focused[0] : null;
+  if (!window || !browser.windows?.update || !removed?.addListener || tabs.size >= 256) return {status: "window_snapshot_unavailable"};
+  if (await setupStatus() !== "ok" || selection !== selectionEpoch) return {status: "disconnected"};
+  if (expired(expires)) return {status: "timeout"};
+  try {
+    const tab = await browser.tabs.create({windowId: window.id, active: true, url: target.href});
+    if (selection !== selectionEpoch || expired(expires) || !regular(tab) || tab.windowId !== window.id ||
+        tab.active !== true || window.tabs.some(previous => previous.id === tab.id) || tabs.has(tab.id)) return actionUnconfirmed;
+    const description = describe(tab, observed(tab) ?? target);
+    const entry = refs.get(description?.ref);
+    if (!entry) return actionUnconfirmed;
+    const created = await currentTab(entry);
+    if (selection !== selectionEpoch || expired(expires) || created?.active !== true || observed(created)?.href !== target.href) return actionUnconfirmed;
+    await browser.windows.update(window.id, {focused: true});
+    const after = await currentTab(entry);
+    if (await setupStatus() !== "ok" || selection !== selectionEpoch || refs.get(entry.ref) !== entry || expired(expires) ||
+        after?.active !== true || after.windowFocused !== true || observed(after)?.href !== target.href) return actionUnconfirmed;
+    return {status: "ok", tab: describe(after, target), created: true};
+  } catch (_) { return actionUnconfirmed; }
+}
+
+function uncertainStatus(operation, payload) {
+  if (operation === "open") return "open_unconfirmed";
+  if (operation === "close") return "cleanup_unconfirmed";
+  if (operation === "tab" || operation === "front_open" || (operation === "page" && pageWrites.has(payload?.kind))) return "action_unconfirmed";
+  return null;
+}
+
 async function execute(request) {
   const {operation, payload, expires} = request;
   if (!validPayload(operation, payload) || !Number.isSafeInteger(expires)) return {status: "invalid_request"};
@@ -281,13 +523,18 @@ async function execute(request) {
   if (status !== "ok") return {status};
   if (expired(expires)) return {status: "timeout"};
   if (operation === "status") return {status: "ok"};
+  if (operation === "list") return listTabs(expires);
+  if (operation === "page") return page(payload, expires);
+  if (operation === "tab") return tabOperation(payload, expires);
+  if (operation === "capture") return capture(payload, expires);
+  if (operation === "front_open") return frontOpen(payload, expires);
   if (operation === "read") return read(payload, expires);
   if (operation === "close") return closeOwned(payload, expires);
   return findOpen(operation, payload, expires);
 }
 
 function bound(answer, operation) {
-  const size = () => JSON.stringify(answer).replace(/[\/<>&\x7f-\uffff]/g, "\\u0000").length;
+  const size = () => wireSize(answer);
   if (size() <= limit) return answer;
   if (typeof answer.text === "string") {
     answer.truncated = true;
@@ -295,7 +542,8 @@ function bound(answer, operation) {
     while (answer.text.length && size() > limit) answer.text = answer.text.slice(0, Math.floor(answer.text.length * 0.75));
     if (answer.text && size() <= limit) return answer;
   }
-  return {v: 1, id: answer.id, status: operation === "open" && answer.created ? "open_unconfirmed" : "response_too_large"};
+  return {v: version, id: answer.id, status: (operation === "open" || operation === "front_open") && answer.created ?
+    uncertainStatus(operation) : "response_too_large"};
 }
 
 async function poll(profile) {
@@ -305,15 +553,14 @@ async function poll(profile) {
   const grant = await native("pull", {selectedProfile: profile});
   const request = grant?.request;
   if (grant?.status !== "claimed" || grant.profile?.toLowerCase() !== profile || grant.instance?.toLowerCase() !== instance ||
-      request?.v !== 1 || typeof request.id !== "string" || !requestID.test(request.id)) return;
+      request?.v !== version || typeof request.id !== "string" || !requestID.test(request.id)) return;
   if (selection !== selectionEpoch) return;
   let result;
   try { result = await execute(request); }
-  catch (_) { result = {status: request.operation === "close" ? "cleanup_unconfirmed" : "browser_error"}; }
-  if (selection !== selectionEpoch) result = {status: request.operation === "open" ? "open_unconfirmed" :
-    request.operation === "close" ? "cleanup_unconfirmed" : "disconnected"};
+  catch (_) { result = {status: uncertainStatus(request.operation, request.payload) ?? "browser_error"}; }
+  if (selection !== selectionEpoch) result = {status: uncertainStatus(request.operation, request.payload) ?? "disconnected"};
   await native("result", {selectedProfile: profile, id: request.id,
-    answer: bound({v: 1, id: request.id, ...result}, request.operation)});
+    answer: bound({v: version, id: request.id, ...result}, request.operation)});
 }
 
 function schedule(delay = interval) {

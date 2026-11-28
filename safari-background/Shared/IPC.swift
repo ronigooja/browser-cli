@@ -5,9 +5,11 @@ import Foundation
 struct IPCError: Error { let status: String; init(_ status: String) { self.status = status } }
 
 enum IPC {
+    static let version: Int64 = 2
     static let limit = 65_536
     static let stateLimit = 262_144
-    static let operations: Set<String> = ["status", "find", "open", "read", "close"]
+    static let operations: Set<String> = ["status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture"]
+    static let pageMutations: Set<String> = ["click", "scroll", "fill", "select", "press", "submit"]
     static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
     struct Binding: Codable, Equatable {
@@ -76,7 +78,8 @@ enum IPC {
               let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) else {
             throw IPCError("app_group_unavailable")
         }
-        let parent = group.appendingPathComponent("agent-browser-ipc-v1", isDirectory: true)
+        // Do not accept a heartbeat or claim from an installed v1 extension.
+        let parent = group.appendingPathComponent("agent-browser-ipc-v\(version)", isDirectory: true)
         try privateDirectory(parent)
         let root = parent.appendingPathComponent(profile.uuidString, isDirectory: true)
         try privateDirectory(root)

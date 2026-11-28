@@ -3,18 +3,23 @@ import Darwin
 import Foundation
 
 func run(_ request: [String: Any], id: String) throws -> [String: Any] {
-    func response(_ status: String) -> [String: Any] { ["v": 1, "id": id, "status": status] }
-    guard IPC.integer(request["v"]) == 1, Set(request.keys) == ["v", "id", "profile", "operation", "payload", "expires"],
+    func response(_ status: String) -> [String: Any] { ["v": IPC.version, "id": id, "status": status] }
+    guard IPC.integer(request["v"]) == IPC.version else { return response("protocol_mismatch") }
+    guard Set(request.keys) == ["v", "id", "profile", "operation", "payload", "expires"],
           IPC.id(request["id"]) != nil, let operation = request["operation"] as? String, IPC.operations.contains(operation),
           let profileValue = request["profile"] as? String, let profile = UUID(uuidString: profileValue),
-          request["payload"] is [String: Any], let expires = IPC.integer(request["expires"]) else { return response("invalid_request") }
+          let payload = request["payload"] as? [String: Any], let expires = IPC.integer(request["expires"]) else { return response("invalid_request") }
     let now = IPC.now
     guard expires > now else { return response("timeout") }
     guard expires <= now + 300_000 else { return response("invalid_request") }
     let remaining = expires - now
     let deadline = ProcessInfo.processInfo.systemUptime + Double(remaining) / 1000
-    let mutation = operation == "open" || operation == "close"
-    let uncertain = operation == "open" ? "open_unconfirmed" : "cleanup_unconfirmed"
+    let kind = payload["kind"] as? String ?? ""
+    let mutation = operation == "open" || operation == "close" || operation == "tab" || operation == "front_open" ||
+        (operation == "page" && IPC.pageMutations.contains(kind))
+    let backgroundMutation = operation == "open" || operation == "close" || (operation == "tab" && kind == "navigate")
+    let foregroundMutation = operation == "front_open" || (operation == "tab" && kind == "activate")
+    let uncertain = operation == "open" ? "open_unconfirmed" : operation == "close" ? "cleanup_unconfirmed" : "action_unconfirmed"
     let safari = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari")
     guard safari.count == 1, let browser = safari.first, !browser.isTerminated, browser.isFinishedLaunching else {
         return response(operation == "close" ? "cleanup_instance_changed" : "disconnected")
@@ -27,7 +32,7 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     let initialFront = workspace.frontmostApplication?.bundleIdentifier
     let focus = FocusEvidence()
     var observer: NSObjectProtocol?
-    if mutation {
+    if backgroundMutation {
         observer = workspace.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil
         ) { note in
@@ -39,10 +44,15 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
 
     func checkedResult(_ data: Data) throws -> [String: Any] {
         let result = try IPC.object(data)
-        if mutation && (result["created"] as? Bool == true || result["status"] as? String == "closed") {
+        if foregroundMutation && result["status"] as? String == "ok" &&
+            workspace.frontmostApplication?.processIdentifier != browser.processIdentifier {
+            return response(uncertain)
+        }
+        if backgroundMutation && (result["created"] as? Bool == true || result["status"] as? String == "closed" ||
+            (operation == "tab" && result["status"] as? String == "ok")) {
             let front = workspace.frontmostApplication?.bundleIdentifier
             if focus.observed || (initialFront != "com.apple.Safari" && front == "com.apple.Safari") {
-                return ["v": 1, "id": id, "status": uncertain, "reason": "safari_activation_observed"]
+                return ["v": IPC.version, "id": id, "status": uncertain, "reason": "safari_activation_observed"]
             }
         }
         return result
@@ -76,9 +86,11 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
                         ? presence.sender.instance : nil
                 }
                 if mutation && instance == nil { return operation == "close" ? "cleanup_instance_changed" : "disconnected" }
-                if operation == "close", let instance {
-                    let ref = (browserRequest["payload"] as? [String: Any])?["ref"] as? String ?? ""
-                    guard ref.lowercased().hasPrefix(instance.uuidString.lowercased() + ".") else { return "cleanup_instance_changed" }
+                if mutation, let instance, ["close", "tab", "page"].contains(operation) {
+                    let ref = payload["ref"] as? String ?? ""
+                    guard ref.lowercased().hasPrefix(instance.uuidString.lowercased() + ".") else {
+                        return operation == "close" ? "cleanup_instance_changed" : "target_changed"
+                    }
                 }
                 state.lease = IPC.Lease(id: id, profile: profile, instance: mutation ? instance : nil,
                                         expires: expires, request: bytes, claim: nil, result: nil)
@@ -156,9 +168,9 @@ do {
     id = IPC.id(request["id"]) ?? ""
     result = try run(request, id: id)
 } catch let error as IPCError {
-    result = ["v": 1, "id": id, "status": error.status]
+    result = ["v": IPC.version, "id": id, "status": error.status]
 } catch {
-    result = ["v": 1, "id": id, "status": "disconnected"]
+    result = ["v": IPC.version, "id": id, "status": "disconnected"]
 }
 do {
     try FileHandle.standardOutput.write(contentsOf: IPC.json(result))

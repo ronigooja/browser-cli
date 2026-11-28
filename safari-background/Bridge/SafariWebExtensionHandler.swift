@@ -8,7 +8,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         do {
             guard let profileValue = details?[SFExtensionProfileKey] else { throw IPCError("safari_profile_missing") }
             guard let profile = profileValue as? UUID else { throw IPCError("safari_profile_not_uuid") }
-            guard let message = details?[SFExtensionMessageKey] as? [String: Any], IPC.integer(message["v"]) == 1,
+            guard let message = details?[SFExtensionMessageKey] as? [String: Any], IPC.integer(message["v"]) == IPC.version,
                   let nonce = message["instance"] as? String, let instance = UUID(uuidString: nonce),
                   let phase = message["phase"] as? String else { throw IPCError("invalid_request") }
             let sender = IPC.Binding(profile: profile, instance: instance)
@@ -45,7 +45,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                         "request": request]
             }
             guard var lease = state.lease, let id = IPC.id(message["id"]), lease.accepts(sender, id: id, now: now),
-                  let answer = message["answer"] as? [String: Any], IPC.integer(answer["v"]) == 1,
+                  let answer = message["answer"] as? [String: Any], IPC.integer(answer["v"]) == IPC.version,
                   answer["id"] as? String == id, answer["status"] is String else { throw IPCError("result_rejected") }
             lease.result = try IPC.json(answer)
             state.lease = lease
