@@ -146,7 +146,7 @@ class BackgroundTest(unittest.TestCase):
                 connect.assert_called_once()
                 client.sendall.assert_called_once()
 
-    def test_uninstall_marker_does_not_verify_removal_or_touch_local_files(self):
+    def test_old_uninstall_marker_does_not_verify_removal_or_touch_local_files(self):
         host = self.start_host()
         self.wait_for_hosts(1)
         with patch.object(bridge, "CHROME", Path.home() / "chrome"), \
@@ -160,6 +160,17 @@ class BackgroundTest(unittest.TestCase):
             self.assertEqual(response, {"status": "uninstall_unverified"})
             self.assertEqual([(req["operation"], req["payload"]) for req in observed], [("uninstall", {})])
             self.assertEqual([file.read_bytes() for file in files], original)
+
+    def test_uninstall_can_report_a_browser_rejection_without_replay(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        response, observed = self.production_round_trip(host, "uninstall", {},
+            lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], "status": "uninstall_rejected"})])
+        self.assertEqual(response, {"status": "uninstall_rejected"})
+        self.assertEqual([(req["operation"], req["payload"]) for req in observed], [("uninstall", {})])
+        response, _ = self.production_round_trip(host, "status", {},
+            lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], "status": "ok"})])
+        self.assertEqual(response, {"status": "ok"})
 
     def test_capture_chunk_fits_native_frame(self):
         host = self.start_host()

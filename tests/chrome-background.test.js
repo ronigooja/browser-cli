@@ -46,7 +46,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
     },
     management: { uninstallSelf: async options => {
       calls.uninstall.push({ options: { ...options }, reply });
-      hooks.uninstall?.();
+      await hooks.uninstall?.();
     } },
     action: { onClicked: listener("toolbarClick") },
     alarms: { onAlarm: listener("alarm"), create: () => {} },
@@ -311,21 +311,29 @@ test("large screenshots stream in ordered, bounded chunks and cannot be replayed
   assert.equal((await browser.request("capture", await captureTab(browser))).status, "response_too_large");
 });
 
-test("self-uninstall emits a dispatch marker before invoking the official API and does not retry", async () => {
+test("self-uninstall calls the official API once and does not claim persistent removal", async () => {
   const browser = production();
   browser.setAllSites(false);
   assert.equal((await browser.request("uninstall", { extra: true })).status, "invalid_request");
-  assert.equal((await browser.request("uninstall")).status, "uninstall_dispatched");
   assert.equal((await browser.request("uninstall")).status, "uninstall_unverified");
-  assert.deepEqual(browser.calls.uninstall, [{ options: { showConfirmDialog: false },
-    reply: { v: protocol, id: "request", status: "uninstall_dispatched" } }]);
+  assert.equal((await browser.request("uninstall")).status, "uninstall_unverified");
+  assert.deepEqual(browser.calls.uninstall, [{ options: { showConfirmDialog: false }, reply: undefined }]);
 });
 
 test("browser rejection of self-uninstall leaves the connection usable", async () => {
   const browser = production();
   browser.hooks.uninstall = () => { throw new Error("blocked"); };
-  assert.equal((await browser.request("uninstall")).status, "uninstall_dispatched");
+  assert.equal((await browser.request("uninstall")).status, "uninstall_rejected");
   assert.equal((await browser.request("status")).status, "ok");
+  assert.equal(browser.calls.uninstall.length, 1);
+});
+
+test("native disconnect during self-uninstall cannot produce a result or retry the write", async () => {
+  const browser = production();
+  browser.hooks.uninstall = () => browser.reconnect();
+  const reply = await browser.raw({ v: protocol, id: "uninstall", operation: "uninstall", payload: {},
+    expires: Date.now() + 1000 });
+  assert.equal(reply, undefined);
   assert.equal(browser.calls.uninstall.length, 1);
 });
 

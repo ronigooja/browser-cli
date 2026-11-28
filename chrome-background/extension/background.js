@@ -607,7 +607,16 @@ async function operation(state, { operation, payload, expires }) {
     if (!state.active() || typeof chrome.management?.uninstallSelf !== "function") return { status: "uninstall_unavailable" };
     uninstallDispatched = true;
     state.clearImage();
-    return { status: "uninstall_dispatched" };
+    try {
+      await chrome.management.uninstallSelf({ showConfirmDialog: false });
+      // Chromium unloads the caller before replying to a successful uninstall.
+      // Do not depend on this worker surviving as proof of persistent removal.
+      return { status: "uninstall_unverified" };
+    } catch (_) {
+      uninstallDispatched = false;
+      if (!state.active()) chrome.alarms.create(reconnect, { delayInMinutes: 0.5 });
+      return { status: "uninstall_rejected" };
+    }
   }
   if (uninstallDispatched) return { status: "disconnected" };
   if (operation === "capture") return guardedCapture(state, payload, expires);
@@ -681,7 +690,6 @@ function connect() {
   observeEvent = state.notify;
   clearCaptureImage = state.clearImage;
   connection.onMessage.addListener(async request => {
-    let response;
     const id = typeof request?.id === "string" && request.id.length <= 36 ? request.id : "";
     let result;
     try {
@@ -690,22 +698,8 @@ function connect() {
       result = { status: request?.operation === "close" ? "cleanup_unconfirmed" : request?.operation === "front_open" ? "open_unconfirmed" :
         ["page", "tab"].includes(request?.operation) ? "action_unconfirmed" : "browser_error" };
     }
-    response = withinBudget({ v: version, id, ...result }, request?.operation, request?.payload?.kind);
-    try {
-      if (port === connection) connection.postMessage(response);
-    } finally {
-      if (result.status === "uninstall_dispatched") {
-        // The official self-uninstall can terminate the worker and host before
-        // anything else can be reported. A sent marker is not proof of removal.
-        try { await chrome.management.uninstallSelf({ showConfirmDialog: false }); }
-        catch (_) {
-          // A browser rejection must not strand ordinary read operations.
-          // The same request is never replayed by the native client.
-          uninstallDispatched = false;
-          if (port !== connection) chrome.alarms.create(reconnect, { delayInMinutes: 0.5 });
-        }
-      }
-    }
+    const response = withinBudget({ v: version, id, ...result }, request?.operation, request?.payload?.kind);
+    if (port === connection) connection.postMessage(response);
   });
   connection.onDisconnect.addListener(() => {
     // Reading lastError suppresses the warning when the host isn't installed yet.
