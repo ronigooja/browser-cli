@@ -378,7 +378,8 @@ def wake_profile():
     manifest = host_manifest()
     local_state = CHROME / "Local State"
     files = (local_state, manifest, host, launcher, extension / "manifest.json",
-             extension / "background.js", extension / "read-page.js")
+             extension / "background.js", extension / "read-page.js", extension / "popup.html",
+             extension / "popup.css", extension / "popup.js")
     if (any(path.is_symlink() for path in (CHROME, manifest.parent, INSTALL.parent, INSTALL, extension, *files))
             or not all(path.is_file() for path in files)):
         return None
@@ -390,6 +391,9 @@ def wake_profile():
         return None
     for name, bundled in (("manifest.json", source / "extension/manifest.json"),
                           ("background.js", source / "extension/background.js"),
+                          ("popup.html", source / "extension/popup.html"),
+                          ("popup.css", source / "extension/popup.css"),
+                          ("popup.js", source / "extension/popup.js"),
                           ("read-page.js", source.parent / "extension/shared/read-page.js")):
         if (extension / name).read_bytes() != bundled.read_bytes():
             return None
@@ -709,10 +713,10 @@ def install(selected=None, *, open_settings=False, timeout=None):
     source = Path(__file__).resolve().parent
     _, label = choose_profile(selected)
     extension = INSTALL / "extension"
-    files = {name: (source / "extension" / name).read_bytes() for name in ("manifest.json", "background.js")}
+    files = {name: (source / "extension" / name).read_bytes() for name in ("manifest.json", "background.js", "popup.html", "popup.css", "popup.js")}
     files["read-page.js"] = (source.parent / "extension/shared/read-page.js").read_bytes()
     extension.mkdir(parents=True, exist_ok=True)
-    for filename in ("read-page.js", "background.js", "manifest.json"):
+    for filename in ("read-page.js", "background.js", "popup.html", "popup.css", "popup.js", "manifest.json"):
         atomic_write(extension / filename, files[filename], 0o644)
     atomic_write(INSTALL / "bridge.py", (source / "bridge.py").read_bytes(), 0o644)
     launcher = INSTALL / "native-host"

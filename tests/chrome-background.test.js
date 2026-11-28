@@ -210,15 +210,15 @@ test("optional capture permission requires a toolbar gesture and never changes r
   const capture = await captureTab(browser);
   const missing = await browser.request("capture", capture);
   assert.equal(missing.status, "capture_permission_required");
-  assert.match(missing.message, /toolbar.*one-time/);
+  assert.match(missing.message, /toolbar.*popup/);
   assert.deepEqual(browser.calls.grant, []);
   assert.deepEqual(browser.calls.capture, []);
   assert.equal((await browser.request("status")).status, "ok");
   assert.equal((await browser.request("read", capture)).status, "ok");
-  browser.events.toolbarClick();
+  browser.captureAllowed();
   assert.deepEqual(await browser.request("capture", capture), { status: "ok", final_url: browser.url, image: png });
   assert.equal((await browser.request("capture", capture)).status, "ok");
-  assert.deepEqual(browser.calls.grant, ["<all_urls>"]);
+  assert.deepEqual(browser.calls.grant, []);
   assert.deepEqual(browser.calls.update, []);
 });
 

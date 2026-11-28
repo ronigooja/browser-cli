@@ -258,6 +258,13 @@ class BackgroundTest(unittest.TestCase):
     def test_wake_requires_unambiguous_enabled_regular_profile_and_current_registration(self):
         profile, prefs, settings, entry = self.stage_wake_setup()
         self.assertEqual(bridge.wake_profile(), profile.name)
+        for name in ("popup.html", "popup.css", "popup.js"):
+            with self.subTest(file=name):
+                target = bridge.INSTALL / "extension" / name
+                original = target.read_bytes()
+                target.write_bytes(b"modified")
+                self.assertIsNone(bridge.wake_profile())
+                target.write_bytes(original)
         for fields in ({"disable_reasons": [1]}, {"disable_reasons": 1}, {"state": 0}, {"blacklist_state": 1},
                        {"path": "/other/extension"}, {"location": 8}):
             with self.subTest(fields=fields):

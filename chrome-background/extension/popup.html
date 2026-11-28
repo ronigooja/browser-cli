@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Browser</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Agent Browser</h1>
+      <p class="subtitle">Screenshot access</p>
+    </header>
+    <section class="card">
+      <label class="switch-row" for="capture-toggle">
+        <span class="switch-text">
+          <span class="switch-title">Screenshots of all sites</span>
+          <span class="switch-state" id="state" role="status" aria-live="polite">Checking…</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" id="capture-toggle" disabled>
+          <span class="slider" aria-hidden="true"></span>
+        </span>
+      </label>
+      <p class="detail" id="detail">Reads of regular tabs work without this setting. Turn it on only if the agent needs screenshots.</p>
+    </section>
+    <p class="error" id="error" role="alert" hidden></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -48,13 +48,16 @@ def _validate_install(path, home):
         "bridge.py": SOURCE / "chrome-background/bridge.py",
         "extension/manifest.json": SOURCE / "chrome-background/extension/manifest.json",
         "extension/background.js": SOURCE / "chrome-background/extension/background.js",
+        "extension/popup.html": SOURCE / "chrome-background/extension/popup.html",
+        "extension/popup.css": SOURCE / "chrome-background/extension/popup.css",
+        "extension/popup.js": SOURCE / "chrome-background/extension/popup.js",
         "extension/read-page.js": SOURCE / "extension/shared/read-page.js",
     }
     if not path.is_dir() or {p.name for p in path.iterdir()} != {"bridge.py", "native-host", "extension"}:
         raise ValueError("Unexpected Chrome installation contents")
     extension = path / "extension"
     _check_path(extension, home)
-    if not extension.is_dir() or {p.name for p in extension.iterdir()} != {"manifest.json", "background.js", "read-page.js"}:
+    if not extension.is_dir() or {p.name for p in extension.iterdir()} != {"manifest.json", "background.js", "read-page.js", "popup.html", "popup.css", "popup.js"}:
         raise ValueError("Unexpected Chrome extension contents")
     for name, source in expected.items():
         target = path / name

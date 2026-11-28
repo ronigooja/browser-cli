@@ -253,7 +253,7 @@ async function guardedPage(state, data, expires) {
 }
 
 function capturePermissionRequired() {
-  return { status: "capture_permission_required", message: "In the intended Chrome profile, open the Extensions toolbar menu, click Agent Browser (or its pinned toolbar button), and approve the one-time permission. No per-site grant is needed." };
+  return { status: "capture_permission_required", message: "In the intended Chrome profile, click the Agent Browser toolbar button, then turn on screenshot access in its popup. It covers all sites with one switch; no per-site grant is needed." };
 }
 
 function captureCrop(crop) {
@@ -724,9 +724,5 @@ chrome.runtime.onInstalled.addListener(connect);
 chrome.permissions.onRemoved?.addListener(() => {
   observeEvent("permission");
   clearCaptureImage();
-});
-chrome.action.onClicked.addListener(() => {
-  // Call directly from the toolbar gesture; a native request never opens a prompt.
-  void chrome.permissions.request(captureGrant).catch(() => {});
 });
 connect();
