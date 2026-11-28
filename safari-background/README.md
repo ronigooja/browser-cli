@@ -36,7 +36,7 @@ For an explicitly approved update, replace the existing signed app with a build 
 
 ## Removal assistance
 
-Use Safari Settings → Extensions to check which signed Agent Browser extension is enabled and in which named profiles. If removal is desired, the user can disable background requests in the setup popup, turn off the extension for each enabled profile, remove the signed host app using Safari's instructions, and clear `AGENT_BROWSER_SAFARI_PROFILE` / `AGENT_BROWSER_SAFARI_BINARY` from their MCP environment as appropriate. A disconnected status cannot prove removal. The adapter does not disable extensions, delete apps or App Group data, or infer ownership of paths from process environment or profile UUIDs.
+Use Safari Settings → Extensions to uninstall Agent Browser and check every named profile where it was enabled. If Safari did not already remove the companion app, `setup_extension` with `action: "cleanup_uninstall"` can move the default app to Trash after the user confirms browser removal and approves cleanup. Before cleanup, set `AGENT_BROWSER_SAFARI_TEAM_ID` in the MCP environment to the Apple Team ID from the trusted signing/provisioning configuration for your build—not a value read from the app being removed. Cleanup checks the host and nested extension against that identity and does not touch App Group data, profile settings, or custom companion paths. Clear obsolete MCP environment entries after cleanup.
 
 ## Internal adapter contract
 

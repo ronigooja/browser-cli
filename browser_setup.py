@@ -72,11 +72,13 @@ class Setup:
 
     def cleanup_uninstall(self, browser, approved, confirmed):
         if not (approved and confirmed):
-            return result("consent_required", browser, "Ask the user to confirm they removed Agent Browser and approve moving its local files to Trash. For Chrome, check every profile that had the extension.")
-        if browser == "chrome":
-            reply = self.service.request(browser, "status")
-            if reply["status"] not in ("extension_disconnected", "extension_pending", "extension_required") or reply.get("update_required") is True:
-                return result("cleanup_refused", browser, "The current Chrome connection state does not permit cleanup. No files were moved.")
+            return result("consent_required", browser, "Ask the user to confirm they removed Agent Browser in every profile that had it and approve moving its local files to Trash.")
+        reply = self.service.request(browser, "status")
+        # This is a veto, not evidence of removal. Status can show a connected
+        # extension even when permission/profile gates refuse ordinary reads.
+        offline = {"extension_disconnected", "extension_pending", "extension_required"}
+        if reply["status"] not in offline or reply.get("update_required") is True:
+            return result("cleanup_refused", browser, "The current browser connection state does not permit cleanup. No files were moved.")
         outcome = cleanup_installation(browser)
         moved, errors = outcome["moved"], outcome["errors"]
         status = "cleanup_partial" if moved and errors else "cleanup_refused" if errors else "cleanup_complete"

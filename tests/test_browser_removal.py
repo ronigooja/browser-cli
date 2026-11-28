@@ -99,6 +99,11 @@ class RemovalTests(unittest.TestCase):
             (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier}))
         return app, extension
 
+    def test_safari_companion_already_removed_needs_no_signature(self):
+        with patch.dict(os.environ, {}, clear=True):
+            result = removal.cleanup("safari")
+        self.assertEqual(result, {"browser": "safari", "moved": [], "errors": []})
+
     def test_safari_trusted_team_moves_only_app(self):
         app, extension = self.make_safari()
         group = self.home / "Library/Group Containers/example"

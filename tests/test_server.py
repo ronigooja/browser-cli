@@ -287,6 +287,21 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(self.setup("cleanup_uninstall", approved=True, removal_confirmed=True)["status"], "cleanup_complete")
             cleanup.assert_called_once_with("chrome")
 
+    def test_safari_uninstall_cleanup_requires_removal_and_permitted_connection_state(self):
+        def request(**args):
+            return self.setup("cleanup_uninstall", browser="safari", **args)
+
+        with patch("browser_setup.cleanup_installation", return_value={"moved": [], "errors": []}) as cleanup:
+            self.assertEqual(request(approved=True)["status"], "consent_required")
+            self.assertEqual(self.safari.calls, [])
+            for status in ("ok", "site_access_required", "private_access_enabled_or_unverified", "profile_required", "timeout"):
+                self.safari.state = status
+                self.assertEqual(request(approved=True, removal_confirmed=True)["status"], "cleanup_refused")
+            cleanup.assert_not_called()
+            self.safari.state = "disconnected"
+            self.assertEqual(request(approved=True, removal_confirmed=True)["status"], "cleanup_complete")
+            cleanup.assert_called_once_with("safari")
+
     def test_setup_consent_profile_connection(self):
         self.chrome.state = "extension_required"
         self.chrome.profile_map["Profile 2"] = "Personal"

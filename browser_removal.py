@@ -124,7 +124,10 @@ def _validate_safari(app, home, team):
         raise ValueError("Safari app is not a directory")
     # Reject links and foreign-owned content throughout the bundle, including
     # the extension, before invoking codesign on any executable content.
-    for root, dirs, files in os.walk(app, followlinks=False, onerror=lambda e: (_ for _ in ()).throw(e)):
+    def fail(error):
+        raise error
+
+    for root, dirs, files in os.walk(app, followlinks=False, onerror=fail):
         for name in dirs + files:
             _check_path(Path(root) / name, home)
     extension = app / "Contents/PlugIns/AgentBrowserSafariExtension.appex"
@@ -145,6 +148,11 @@ def _cleanup_safari(result, home):
     app = home / "Applications/AgentBrowserSafari.app"
     team = os.environ.get("AGENT_BROWSER_SAFARI_TEAM_ID", "")
     try:
+        try:
+            _check_path(app, home)
+        except FileNotFoundError:
+            # Safari's uninstaller can already have removed the companion.
+            return result
         _validate_safari(app, home, team)
         destination = _trash(home)
         _validate_safari(app, home, team)
