@@ -36,10 +36,10 @@ class Setup:
         if action == "install" and (not token_valid(args.get("grant")) or (
                 "profile" in args and not profile_directory(args["profile"]))):
             raise ValueError("Use the grant and profile returned by prepare.")
+        if action == "uninstall" and type(args.get("approved", False)) is not bool:
+            raise ValueError("approved must be a boolean.")
         try:
             if action == "uninstall":
-                if type(args.get("approved", False)) is not bool:
-                    raise ValueError("approved must be a boolean.")
                 return self.uninstall(browser, args.get("approved", False))
             if action == "check" or browser == "safari":
                 return self.check(browser)

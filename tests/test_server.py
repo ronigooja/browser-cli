@@ -47,6 +47,8 @@ class Fake:
                 "status": "ok", "text": "Visible page text", "final_url": payload["expected_url"]}
         if operation == "close":
             return {"status": self.closed}
+        if operation == "uninstall":
+            return {"status": "uninstall_requested"}
         raise AssertionError(operation)
 
     def profiles(self):
@@ -262,6 +264,14 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(output["title"]), 500)
         self.assertEqual(len(output["links"]), 25)
         self.assertNotIn("private", output)
+
+    def test_uninstall_requires_consent_and_does_not_claim_disconnection_as_proof(self):
+        self.assertEqual(self.setup("uninstall")["status"], "consent_required")
+        self.assertEqual(self.chrome.calls, [])
+        self.assertEqual(self.setup("uninstall", approved=True)["status"], "uninstall_unconfirmed")
+        self.assertEqual([call[0] for call in self.chrome.calls], ["uninstall"])
+        self.assertEqual(self.setup("uninstall", browser="safari", approved=True)["status"], "manual_uninstall_required")
+        self.assertEqual(self.safari.calls, [])
 
     def test_setup_consent_profile_connection(self):
         self.chrome.state = "extension_required"
