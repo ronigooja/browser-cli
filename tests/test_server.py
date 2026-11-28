@@ -51,7 +51,8 @@ class Fake:
         if operation == "uninstall":
             return {"status": getattr(self, "uninstall_status", "uninstall_unverified")}
         if operation == "qualify_window":
-            return {"status": getattr(self, "qualification_status", "candidate_observed"), "cleanup_token": "not-a-grant"}
+            return {"status": getattr(self, "qualification_status", "candidate_observed"), "cleanup_token": "not-a-grant",
+                    **getattr(self, "qualification_fields", {})}
         raise AssertionError(operation)
 
     def profiles(self):
@@ -311,12 +312,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.safari.calls, [])
         candidate = self.setup("qualify_window", browser="safari", approved=True)
         self.assertEqual(candidate["status"], "candidate_observed")
+        self.assertIs(candidate["dispatched"], True)
         self.assertNotIn("cleanup_token", candidate)
         self.assertEqual([(op, data) for op, data, _ in self.safari.calls], [("qualify_window", {})])
         self.safari.qualification_status = "timeout"
         self.assertEqual(self.setup("qualify_window", browser="safari", approved=True)["status"], "qualification_unconfirmed")
         self.assertEqual(len(self.safari.calls), 2)
         self.assertEqual(self.chrome.calls, [])
+
+    def test_safari_qualification_reports_only_recognized_pre_dispatch_refusal(self):
+        self.safari.qualification_status = "qualification_blocked"
+        self.safari.qualification_fields = {"reason": "safari_windows_present"}
+        reply = self.setup("qualify_window", browser="safari", approved=True)
+        self.assertEqual(reply["status"], "qualification_blocked")
+        self.assertEqual(reply["reason"], "safari_windows_present")
+        self.assertIs(reply["dispatched"], False)
+        self.safari.qualification_fields["reason"] = "untrusted free-form text"
+        reply = self.setup("qualify_window", browser="safari", approved=True)
+        self.assertEqual(reply["status"], "qualification_unconfirmed")
+        self.assertIsNone(reply["dispatched"])
+        self.assertNotIn("reason", reply)
 
     def test_setup_consent_profile_connection(self):
         self.chrome.state = "extension_required"

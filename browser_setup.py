@@ -9,6 +9,17 @@ from browser_service import Capabilities, blocker
 
 GRANT_SECONDS = 300
 PROFILE_LIMIT = 50
+QUALIFICATION_BLOCKERS = {
+    "arm_missing_or_invalid": "The one-shot arm is missing, expired, or no longer matches the connected profile instance.",
+    "safari_not_running": "A single running, fully launched Safari process could not be verified.",
+    "foreground_unverified": "A stable foreground app other than Safari could not be verified.",
+    "screen_capture_unavailable": "The host could not verify existing Screen Recording access.",
+    "window_snapshot_unavailable": "The host could not reliably determine whether Safari has windows with the permissions it already has.",
+    "safari_windows_present": "The window check found a Safari window.",
+    "lease_expired": "The test request expired before it could be dispatched.",
+    "window_seen_before_operation": "The Safari extension still sees at least one window.",
+    "extension_precondition_failed": "The extension could not verify the profile, access, or window-event checks required for this test.",
+}
 
 
 def profile_directory(value):
@@ -64,12 +75,17 @@ class Setup:
         reply = self.service.request("safari", "qualify_window")
         status = reply["status"]
         if status == "candidate_observed":
-            return result(status, "safari", "The extension reported a candidate test window. Independently check its actual named profile and whether Safari ever gained focus. Do not retry or close it automatically.")
-        if status in ("qualification_not_armed", "not_armed", "window_seen_before_operation", "qualification_precondition_failed", "no_background_context"):
-            return result(status, "safari", "The qualification preconditions were not met. No test window creation was confirmed. Review the arm, zero-window state, and focus before making another separately approved attempt.")
+            return result(status, "safari", "The extension reported a candidate test window. Independently check its actual named profile and whether Safari ever gained focus. Do not retry or close it automatically.", dispatched=True)
+        if status == "qualification_blocked":
+            reason = reply.get("reason")
+            if isinstance(reason, str) and reason in QUALIFICATION_BLOCKERS:
+                return result(status, "safari", QUALIFICATION_BLOCKERS[reason] + " No test window request was sent.", reason=reason, dispatched=False)
         if status in ("extension_disconnected", "extension_required", "permission_required", "profile_required"):
             return blocker("safari", reply)
-        return result("qualification_unconfirmed", "safari", "Could not verify the test outcome. Check Safari before any further attempt; no retry was sent.")
+        dispatched = True if reply.get("dispatched") is True else None
+        message = ("Safari received a window creation request, but its outcome could not be verified."
+                   if dispatched else "Could not establish whether Safari received a window creation request.")
+        return result("qualification_unconfirmed", "safari", message + " Inspect Safari before another attempt; no retry was sent.", dispatched=dispatched)
 
     def uninstall(self, browser, approved):
         if not approved:
