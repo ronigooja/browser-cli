@@ -34,7 +34,7 @@ def collect(reply, request, clock):
             if remaining <= 0 or len(parts) >= 800:
                 raise CaptureError("capture_expired")
             chunk = request("capture_chunk", {"image_ref": ref, "offset": offset}, min(5, remaining))
-            if chunk["status"] != "ok":
+            if chunk.get("status") != "ok":
                 raise CaptureError("capture_expired")
             data, next_offset = chunk.get("data"), chunk.get("next_offset")
             if not isinstance(data, str) or not 0 < len(data) <= 48000 or not data.isascii():
