@@ -114,13 +114,27 @@ class RemovalTests(unittest.TestCase):
         self.assertEqual(len(result["moved"]), 1)
         self.assertFalse(app.exists())
         self.assertTrue(group.exists())
-        self.assertEqual(run.call_count, 4)
-        for call, identifier in zip(run.call_args_list, (removal.SAFARI_HOST, removal.SAFARI_EXTENSION) * 2):
-            args = call.args[0]
+        # Two validation passes, each: one deep strict app check plus one non-deep
+        # strict requirement check per bundle.
+        self.assertEqual(run.call_count, 6)
+        calls = [call.args[0] for call in run.call_args_list]
+        for args in calls:
             self.assertIn("--strict", args)
-            self.assertIn("--deep", args)
-            self.assertIn(identifier, args[args.index("-R") + 1])
-            self.assertIn('"ABCDE12345"', args[args.index("-R") + 1])
+        for index in (0, 3):
+            self.assertIn("--deep", calls[index])
+            self.assertEqual(calls[index][-1], str(app))
+            self.assertFalse(any(arg.startswith("-R") for arg in calls[index]))
+        for index, identifier in ((1, removal.SAFARI_HOST), (2, removal.SAFARI_EXTENSION),
+                                  (4, removal.SAFARI_HOST), (5, removal.SAFARI_EXTENSION)):
+            args = calls[index]
+            self.assertNotIn("--deep", args)
+            requirement_args = [arg for arg in args if arg.startswith("-R")]
+            self.assertEqual(len(requirement_args), 1)
+            requirement = requirement_args[0]
+            self.assertTrue(requirement.startswith("-R=anchor apple generic and identifier"))
+            self.assertIn(f'identifier "{identifier}"', requirement)
+            self.assertIn('"ABCDE12345"', requirement)
+            self.assertEqual(args[-1], str(app) if identifier == removal.SAFARI_HOST else str(extension))
         os.rename(result["moved"][0]["to"], app)
         self.assertTrue(extension.exists())
 

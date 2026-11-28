@@ -131,13 +131,21 @@ def _validate_safari(app, home, team):
         for name in dirs + files:
             _check_path(Path(root) / name, home)
     extension = app / "Contents/PlugIns/AgentBrowserSafariExtension.appex"
+    # The app's deep strict check covers the nested extension signature. Each
+    # bundle is then pinned by its own requirement, without --deep, so the host
+    # requirement never applies to the nested identity. codesign requires the
+    # inline requirement to be passed as -R=<requirement>.
+    strict = ["/usr/bin/codesign", "--verify", "--strict", "--all-architectures"]
     for bundle, identifier in ((app, SAFARI_HOST), (extension, SAFARI_EXTENSION)):
         _check_path(bundle, home)
         with (bundle / "Contents/Info.plist").open("rb") as stream:
             if plistlib.load(stream).get("CFBundleIdentifier") != identifier:
                 raise ValueError(f"Unexpected Safari bundle identifier: {bundle}")
+    subprocess.run([*strict, "--deep", str(app)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
+    for bundle, identifier in ((app, SAFARI_HOST), (extension, SAFARI_EXTENSION)):
         requirement = f'anchor apple generic and identifier "{identifier}" and certificate leaf[subject.OU] = "{team}"'
-        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--all-architectures", "-R", requirement, str(bundle)],
+        subprocess.run([*strict, "-R=" + requirement, str(bundle)],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
 
 
