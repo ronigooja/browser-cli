@@ -50,6 +50,8 @@ class Fake:
             return {"status": self.closed}
         if operation == "uninstall":
             return {"status": getattr(self, "uninstall_status", "uninstall_unverified")}
+        if operation == "qualify_window":
+            return {"status": getattr(self, "qualification_status", "candidate_observed"), "cleanup_token": "not-a-grant"}
         raise AssertionError(operation)
 
     def profiles(self):
@@ -303,6 +305,18 @@ class ServerTest(unittest.TestCase):
             self.safari.state = "disconnected"
             self.assertEqual(request(approved=True, removal_confirmed=True)["status"], "cleanup_complete")
             cleanup.assert_called_once_with("safari")
+
+    def test_safari_qualification_explicitly_approved_and_never_owns_the_fixture(self):
+        self.assertEqual(self.setup("qualify_window", browser="safari")["status"], "consent_required")
+        self.assertEqual(self.safari.calls, [])
+        candidate = self.setup("qualify_window", browser="safari", approved=True)
+        self.assertEqual(candidate["status"], "candidate_observed")
+        self.assertNotIn("cleanup_token", candidate)
+        self.assertEqual([(op, data) for op, data, _ in self.safari.calls], [("qualify_window", {})])
+        self.safari.qualification_status = "timeout"
+        self.assertEqual(self.setup("qualify_window", browser="safari", approved=True)["status"], "qualification_unconfirmed")
+        self.assertEqual(len(self.safari.calls), 2)
+        self.assertEqual(self.chrome.calls, [])
 
     def test_setup_consent_profile_connection(self):
         self.chrome.state = "extension_required"

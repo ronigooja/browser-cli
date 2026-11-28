@@ -62,8 +62,8 @@ TOOLS = [
     }, ["cleanup_token"], destructiveHint=True, openWorldHint=False),
     tool("setup_extension", "Check or manage the selected local extension. For Chrome setup, obtain explicit approval before prepare and use its install grant. For an update_required result, obtain explicit update approval and use update=true. Relay the manual loading or reload instructions, then check. For uninstall, identify the intended profile and obtain approval; request Chrome self-removal or relay Safari's instructions. Do not treat disconnect as removal. Use cleanup_uninstall only after the user confirms browser removal and approves moving its files to Trash.", {
         "browser": enum(BROWSERS),
-        "action": enum(("check", "prepare", "install", "uninstall", "cleanup_uninstall")),
-        "approved": {"type": "boolean", "description": "For prepare, uninstall, or cleanup_uninstall, only after explicit user approval."},
+        "action": enum(("check", "prepare", "install", "uninstall", "cleanup_uninstall", "qualify_window")),
+        "approved": {"type": "boolean", "description": "True only after explicit user approval of the requested action. qualify_window needs separate approval for one fixed Safari test window after arming the production extension in the intended named profile."},
         "removal_confirmed": {"type": "boolean", "description": "For cleanup_uninstall, true only after the user confirms in-browser removal from all profiles where loaded. A disconnect is not proof."},
         "update": {"type": "boolean", "description": "Chrome prepare only, after update_required and explicit approval to update the existing installation."},
         "grant": token("Single-use Chrome install grant returned by prepare."),

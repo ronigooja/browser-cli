@@ -24,23 +24,28 @@ class Setup:
 
     def call(self, args, scope):
         allowed = {"check": set(), "prepare": {"approved", "update"}, "install": {"grant", "profile"},
-                   "uninstall": {"approved"}, "cleanup_uninstall": {"approved", "removal_confirmed"}}
+                   "uninstall": {"approved"}, "cleanup_uninstall": {"approved", "removal_confirmed"},
+                   "qualify_window": {"approved"}}
         if not isinstance(args, dict) or args.get("browser") not in BROWSERS:
             raise ValueError("Choose safari or chrome for setup_extension.")
         browser, action = args["browser"], args.get("action")
         if not isinstance(action, str) or action not in allowed or args.keys() - allowed[action] - {"action", "browser"}:
-            raise ValueError("Choose check, prepare, install, uninstall, or cleanup_uninstall with the appropriate arguments.")
-        if browser == "safari" and action not in ("check", "uninstall", "cleanup_uninstall") and (action == "install" or {"approved", "update"} & args.keys()):
+            raise ValueError("Invalid action or arguments for setup_extension.")
+        if action == "qualify_window" and browser != "safari":
+            raise ValueError("Zero-window qualification is only for Safari.")
+        if browser == "safari" and action not in ("check", "uninstall", "cleanup_uninstall", "qualify_window") and (action == "install" or {"approved", "update"} & args.keys()):
             raise ValueError("Safari setup is manual; use check for production setup guidance.")
         if action == "prepare" and any(type(args.get(key, False)) is not bool for key in ("approved", "update")):
             raise ValueError("approved and update must be booleans.")
         if action == "install" and (not token_valid(args.get("grant")) or (
                 "profile" in args and not profile_directory(args["profile"]))):
             raise ValueError("Use the grant and profile returned by prepare.")
-        if action in ("uninstall", "cleanup_uninstall") and any(
+        if action in ("uninstall", "cleanup_uninstall", "qualify_window") and any(
                 type(args.get(key, False)) is not bool for key in ("approved", "removal_confirmed")):
             raise ValueError("Approval and removal confirmation must be booleans.")
         try:
+            if action == "qualify_window":
+                return self.qualify_window(args.get("approved", False))
             if action == "cleanup_uninstall":
                 return self.cleanup_uninstall(browser, args.get("approved", False), args.get("removal_confirmed", False))
             if action == "uninstall":
@@ -52,6 +57,19 @@ class Setup:
             return self.install(args["grant"], args.get("profile"), scope)
         except (OSError, EOFError, ValueError, TypeError, RuntimeError, KeyError, AttributeError):
             return result("setup_error", browser, "Setup could not finish. Check the connection before making any further changes.", next_action="check")
+
+    def qualify_window(self, approved):
+        if not approved:
+            return result("consent_required", "safari", "Obtain explicit permission for one Safari test window. Verify the intended named profile and explain that the test may activate Safari or use the wrong profile.")
+        reply = self.service.request("safari", "qualify_window")
+        status = reply["status"]
+        if status == "candidate_observed":
+            return result(status, "safari", "The extension reported a candidate test window. Independently check its actual named profile and whether Safari ever gained focus. Do not retry or close it automatically.")
+        if status in ("qualification_not_armed", "not_armed", "window_seen_before_operation", "qualification_precondition_failed", "no_background_context"):
+            return result(status, "safari", "The qualification preconditions were not met. No test window creation was confirmed. Review the arm, zero-window state, and focus before making another separately approved attempt.")
+        if status in ("extension_disconnected", "extension_required", "permission_required", "profile_required"):
+            return blocker("safari", reply)
+        return result("qualification_unconfirmed", "safari", "Could not verify the test outcome. Check Safari before any further attempt; no retry was sent.")
 
     def uninstall(self, browser, approved):
         if not approved:
