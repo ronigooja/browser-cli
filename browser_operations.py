@@ -24,6 +24,7 @@ PAGE_ERRORS = {**PAGE_MESSAGES,
     "target_changed": "The confirmed tab or document changed. Select and confirm the intended tab again.",
     "capture_unavailable": "Capture needs the target tab already active in its focused window. No tab was activated.",
     "capture_permission_required": "In the intended Chrome profile, open the Agent Browser popup and turn on Screenshot access. Approve Chrome's one-time prompt, then retry. Do not make per-site grants.",
+    "capture_disabled": "Screenshot access is off in the Agent Browser popup. Ordinary reads do not require it.",
     "capture_geometry_unavailable": "The element's visible rectangle could not be matched to the screenshot. No pixels were returned.",
     "capture_expired": "The screenshot transfer did not finish. No partial image was returned.",
 }
