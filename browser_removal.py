@@ -159,7 +159,9 @@ def _cleanup_safari(result, home):
         target = destination / app.name
         os.rename(app, target)
         result["moved"].append({"from": str(app), "to": str(target)})
-    except (OSError, ValueError, TypeError, plistlib.InvalidFileException, subprocess.SubprocessError) as error:
+    except subprocess.SubprocessError:
+        result["errors"].append("Safari app retained: Apple signature verification did not succeed for both bundles")
+    except (OSError, ValueError, TypeError, plistlib.InvalidFileException) as error:
         result["errors"].append(f"Safari app retained: {error}")
     return result
 
