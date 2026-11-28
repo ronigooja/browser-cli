@@ -484,6 +484,14 @@ async function frontOpen({url}, expires) {
   const windows = await inventory();
   if (!windows) return {status: "window_snapshot_unavailable"};
   if (!windows.length) return {status: "no_regular_window"};
+  const matching = windows.flatMap(window => window.tabs).filter(tab => observed(tab)?.href === target.href);
+  if (matching.length > 1) return {status: "tab_ambiguous"};
+  if (matching.length === 1) {
+    if (await setupStatus() !== "ok" || selection !== selectionEpoch) return {status: "disconnected"};
+    if (expired(expires)) return {status: "timeout"};
+    const tab = describe(matching[0], target);
+    return tab ? {status: "ok", tab, created: false} : {status: "window_snapshot_unavailable"};
+  }
   const focused = windows.filter(window => window.focused === true);
   const window = windows.length === 1 ? windows[0] : focused.length === 1 ? focused[0] : null;
   if (!window || !browser.windows?.update || !removed?.addListener || tabs.size >= 256) return {status: "window_snapshot_unavailable"};

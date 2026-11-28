@@ -54,6 +54,8 @@ def blocker(browser, reply):
                             else "chrome_transport_unavailable")
     if browser == "chrome" and status == "extension_disconnected" and reply.get("update_required") is True:
         return result(status, browser, "The Chrome extension needs an update. Use setup_extension to check and obtain explicit approval before staging the update, then have the user reload the extension.", update_required=True)
+    if browser == "safari" and status == "extension_disconnected" and reply.get("update_required") is True:
+        return result(status, browser, "The Safari companion and extension need an update. Replace them with the matching signed production bundle manually, then check the connection.", update_required=True)
     return result(status, browser, BLOCKERS[status], **fields)
 
 

@@ -68,6 +68,8 @@ class Setup:
         if browser == "chrome" and state == "permission_required":
             return result(state, browser, "Open the Agent Browser extension's Details and set Site access to On all sites once. Then check the connection again.",
                           next_action="check")
+        if browser == "safari" and reply.get("update_required") is True:
+            return dict(blocker(browser, reply), next_action="check")
         if browser == "safari" and state in ("extension_required", "extension_pending", "extension_disconnected", "permission_required", "profile_required"):
             return result(state, browser, "Use the production Safari extension, not the development probe.",
                           instructions=("Open the signed AgentBrowserSafari app once. In Safari > Settings > Extensions, enable Agent Browser "
