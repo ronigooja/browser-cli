@@ -242,6 +242,51 @@ async function tabOperation(state, data, expires) {
   } catch (_) { return { status: "action_unconfirmed" }; }
 }
 
+// Explicit foreground action only: never called as a background-open fallback.
+async function frontOpen(state, data, expires) {
+  const target = httpURL(data.url);
+  const candidates = [];
+  for (const tab of await chrome.tabs.query({ windowType: "normal" })) {
+    if (!regular(tab) || observedURL(tab)?.href !== target.href) continue;
+    const window = await chrome.windows.get(tab.windowId).catch(() => null);
+    if (normalWindow(window) && window.id === tab.windowId) candidates.push(state.describe(tab, target));
+  }
+  if (!state.active()) return { status: "disconnected" };
+  if (Date.now() >= expires) return { status: "timeout" };
+  if (candidates.length > 1) return { status: "tab_ambiguous", tabs: candidates };
+  if (candidates.length === 1) {
+    const result = await tabOperation(state, { ref: candidates[0].ref, expected_url: target.href, kind: "activate" }, expires);
+    return result.status === "ok" ? { status: "ok", tab: result.tab, created: false } : result;
+  }
+  const windows = await chrome.windows.getAll({ populate: true });
+  const eligible = windows.filter(normalWindow);
+  const focused = focusedWindow(windows);
+  const last = eligible.length > 1 ? await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null) : null;
+  const window = eligible.find(item => item.id === focused) ?? eligible.find(item => item.id === last?.id) ??
+    (eligible.length === 1 ? eligible[0] : null);
+  if (!window || !windowSelection(window) || focused === undefined) return { status: "window_snapshot_unavailable" };
+  if (!state.active()) return { status: "disconnected" };
+  if (Date.now() >= expires) return { status: "timeout" };
+  let dispatched = false;
+  const events = [];
+  const stop = state.observe((...event) => { if (events.length < 32) events.push(event); });
+  try {
+    dispatched = true;
+    const tab = await chrome.tabs.create({ windowId: window.id, url: target.href, active: true });
+    if (!regular(tab) || tab.windowId !== window.id || tab.active !== true || state.knows(tab.id) ||
+        window.tabs.some(item => item.id === tab.id) || observedURL(tab)?.href !== target.href) return { status: "open_unconfirmed" };
+    await chrome.windows.update(window.id, { focused: true });
+    const current = await chrome.tabs.get(tab.id).catch(() => null);
+    const actualWindow = await chrome.windows.get(window.id).catch(() => null);
+    if (!state.active() || Date.now() >= expires || !regular(current) || current.id !== tab.id ||
+        current.windowId !== window.id || current.active !== true || observedURL(current)?.href !== target.href ||
+        !normalWindow(actualWindow) || actualWindow.id !== window.id || actualWindow.focused !== true ||
+        events.length === 32 || events.some(([kind, , id]) => kind === "identity" && id === tab.id)) return { status: "open_unconfirmed" };
+    return { status: "ok", tab: state.describe(current, target), created: true };
+  } catch (_) { return { status: dispatched ? "open_unconfirmed" : "window_snapshot_unavailable" }; }
+  finally { stop(); }
+}
+
 async function findOrOpen(state, operation, data, expires) {
   const target = httpURL(data.url);
   const tabs = await chrome.tabs.query({ windowType: "normal" });
@@ -383,7 +428,7 @@ function validPayload(operation, data) {
     (!("raw" in data) || typeof data.raw === "boolean");
   if (operation === "tab") return only("ref", "expected_url", "kind", "url") && validToken(data.ref) && !!httpURL(data.expected_url) &&
     ["navigate", "activate", "close"].includes(data.kind) && (data.kind === "navigate" ? !!httpURL(data.url) : !("url" in data));
-  if (operation === "find" || operation === "open") return only("url") && !!httpURL(data.url);
+  if (operation === "find" || operation === "open" || operation === "front_open") return only("url") && !!httpURL(data.url);
   if (operation === "close") return only("ref", "ownership") && validToken(data.ref) && validToken(data.ownership);
   return operation === "read" && only("ref", "expected_url", "selector", "wait_for_selector", "include_links") &&
     validToken(data.ref) && !!httpURL(data.expected_url) &&
@@ -402,6 +447,7 @@ async function operation(state, { operation, payload, expires }) {
   if (operation === "list") return listTabs(state, expires);
   if (operation === "page") return guardedPage(state, payload, expires);
   if (operation === "tab") return tabOperation(state, payload, expires);
+  if (operation === "front_open") return frontOpen(state, payload, expires);
   if (operation === "read") return guardedRead(state, payload, expires);
   if (operation === "close") return closeOwned(state, payload, expires);
   return findOrOpen(state, operation, payload, expires);
@@ -420,7 +466,7 @@ function withinBudget(response, operation) {
     if (response.text && size() <= frameLimit) return response;
   }
   const { v, id } = response;
-  return { v, id, status: response.created ? "open_unconfirmed" :
+  return { v, id, status: response.created || operation === "front_open" ? "open_unconfirmed" :
     ["page", "tab"].includes(operation) ? "action_unconfirmed" : "response_too_large" };
 }
 
@@ -460,7 +506,7 @@ function connect() {
     try {
       result = request?.v === version ? await operation(state, request) : { status: "protocol_mismatch" };
     } catch (_) {
-      result = { status: request?.operation === "close" ? "cleanup_unconfirmed" :
+      result = { status: request?.operation === "close" ? "cleanup_unconfirmed" : request?.operation === "front_open" ? "open_unconfirmed" :
         ["page", "tab"].includes(request?.operation) ? "action_unconfirmed" : "browser_error" };
     }
     response = withinBudget({ v: version, id, ...result }, request?.operation);

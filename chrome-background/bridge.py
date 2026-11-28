@@ -26,7 +26,7 @@ CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-background"
 LIMIT = 65536
 PROTOCOL = 3
-OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab"}
+OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open"}
 WAKE_WAIT = 2
 WAKE_POLL = 0.05
 
@@ -92,7 +92,7 @@ def native_request(message):
 
 def response_too_large(request):
     operation = request.get("operation")
-    status = ("open_unconfirmed" if operation == "open" else
+    status = ("open_unconfirmed" if operation in ("open", "front_open") else
               "action_unconfirmed" if operation in ("page", "tab") else
               "cleanup_unconfirmed" if operation == "close" else "response_too_large")
     return {"v": PROTOCOL, "id": request.get("id"), "status": status}
@@ -260,7 +260,7 @@ def request(operation, payload, timeout):
     except (OSError, EOFError, ValueError, RecursionError) as error:
         if operation == "close":
             return {"status": "cleanup_unconfirmed"}
-        if operation == "open" and dispatched:
+        if operation in ("open", "front_open") and dispatched:
             return {"status": "open_unconfirmed"}
         if operation in ("page", "tab") and dispatched:
             return {"status": "action_unconfirmed"}

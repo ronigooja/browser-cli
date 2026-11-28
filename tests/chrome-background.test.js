@@ -52,12 +52,21 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
       },
       create: async options => {
         calls.create.push({ ...options });
+        if (options.active) for (const tab of tabs.values()) if (tab.windowId === options.windowId) tab.active = tab.highlighted = false;
         const tab = { id: 42, windowId: options.windowId, incognito: false, url: options.url,
           active: options.active, highlighted: options.active };
         tabs.set(tab.id, tab);
         const created = { ...tab };
         hooks.createTab?.();
         return created;
+      },
+      update: async (id, options) => {
+        const tab = tabs.get(id);
+        if (!tab) throw Error("gone");
+        if (options.active) for (const item of tabs.values()) if (item.windowId === tab.windowId) item.active = item.highlighted = false;
+        Object.assign(tab, options);
+        if (options.active) tab.highlighted = true;
+        return {...tab};
       },
       remove: async id => {
         calls.remove.push(id);
@@ -83,6 +92,13 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
         return result;
       },
       getLastFocused: async () => windows[0],
+      update: async (id, options) => {
+        const window = windows.find(item => item.id === id);
+        if (!window) throw Error("gone");
+        if (options.focused) for (const item of windows) item.focused = false;
+        Object.assign(window, options);
+        return {...window};
+      },
       create: async options => {
         calls.create.push({ ...options });
         const window = { id: 2, type: options.type, incognito: options.incognito, focused: options.focused };
@@ -169,6 +185,35 @@ test("page pins its document and does not confirm a changed action", async () =>
   browser.duringInjection(() => browser.frame({documentId: "document-two"}));
   assert.equal((await browser.request("page", payload)).status, "action_unconfirmed");
   assert.equal((await browser.request("page", {...payload, script: "alert(1)"})).status, "invalid_request");
+});
+
+test("explicit foreground open creates an active tab without cleanup ownership", async () => {
+  const browser = production();
+  const result = await browser.request("front_open", {url: browser.url});
+  assert.equal(result.status, "ok");
+  assert.equal(result.created, true);
+  assert.equal(result.tab.url, browser.url);
+  assert.equal(result.ownership, undefined);
+  assert.equal(browser.calls.create[0].active, true);
+  assert.equal((await browser.request("front_open", {url: browser.url, extra: true})).status, "invalid_request");
+});
+
+test("foreground open never confirms a redirected or uncertain created tab", async () => {
+  const browser = production();
+  browser.hooks.createTab = () => { browser.tabs.get(42).url = "https://elsewhere.test/"; };
+  assert.equal((await browser.request("front_open", {url: browser.url})).status, "open_unconfirmed");
+  assert.equal(browser.calls.create.length, 1);
+});
+
+test("foreground open reuses one exact existing tab and refuses ambiguity", async () => {
+  const browser = production([{id: 1, url: "https://example.com/", title: "Example"}]);
+  const result = await browser.request("front_open", {url: browser.url});
+  assert.equal(result.status, "ok");
+  assert.equal(result.created, false);
+  assert.equal(browser.calls.create.length, 0);
+  const ambiguous = production([{id: 1, url: browser.url}, {id: 2, url: browser.url}]);
+  assert.equal((await ambiguous.request("front_open", {url: browser.url})).status, "tab_ambiguous");
+  assert.equal(ambiguous.calls.create.length, 0);
 });
 
 test("find returns same origin and path candidates with generation-scoped references and excludes private tabs", async () => {
