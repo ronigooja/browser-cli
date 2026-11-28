@@ -61,9 +61,11 @@ class Setup:
                           "In Safari > Settings > Extensions, select Agent Browser and click Uninstall. No local files or browser settings were changed.")
         reply = self.service.request(browser, "uninstall")
         status = reply["status"]
-        if status in ("ok", "uninstall_requested", "uninstall_unconfirmed", "action_unconfirmed", "timeout", "browser_error"):
+        if status in ("ok", "uninstall_requested", "uninstall_unverified", "uninstall_unconfirmed", "action_unconfirmed", "timeout", "browser_error"):
             return result("uninstall_unconfirmed", browser,
                           "Chrome removal could not be verified. Check Agent Browser is gone from the intended profile at chrome://extensions/. Do not retry automatically. Native host files were retained.")
+        if status == "uninstall_unavailable":
+            return result(status, browser, "Chrome did not offer self-removal. Remove Agent Browser manually at chrome://extensions/ in the intended profile.")
         return blocker(browser, reply)
 
     def cleanup_uninstall(self, browser, approved, confirmed):

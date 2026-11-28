@@ -47,7 +47,9 @@ def collect(reply, request, clock):
             parts.append(data)
             offset = end
         image = "".join(parts)
-    if len(image) > MAX_IMAGE or not image.startswith(PREFIX):
+    if len(image) > MAX_IMAGE:
+        raise CaptureError("response_too_large")
+    if not image.startswith(PREFIX):
         raise CaptureError("read_unavailable")
     try:
         png = b64decode(image[len(PREFIX):], validate=True)

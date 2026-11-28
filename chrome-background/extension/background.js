@@ -344,7 +344,8 @@ async function guardedCapture(state, data, expires) {
     const postflight = await pinned();
     if (postflight) return postflight;
     if (JSON.stringify(before.crop) !== JSON.stringify(after.crop)) return unavailable;
-    if (typeof image !== "string" || image.length > captureImageLimit || !image.startsWith(pngPrefix) ||
+    if (typeof image === "string" && image.length > captureImageLimit) return { status: "response_too_large" };
+    if (typeof image !== "string" || !image.startsWith(pngPrefix) ||
         (image.length - pngPrefix.length) % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.slice(pngPrefix.length))) return unavailable;
     const result = { status: "ok", final_url: expected, ...(data.selector !== undefined ? { crop: before.crop } : {}) };
     // Leave room for transport fields and worst-case ASCII JSON URL expansion.

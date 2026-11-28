@@ -308,7 +308,7 @@ test("large screenshots stream in ordered, bounded chunks and cannot be replayed
   browser.reconnect();
   assert.equal((await browser.request("capture_chunk", { image_ref: disconnected, offset: 0 })).status, "capture_transfer_unavailable");
   browser.image(png + "a".repeat(12 * 1024 * 1024));
-  assert.equal((await browser.request("capture", await captureTab(browser))).status, "capture_unavailable");
+  assert.equal((await browser.request("capture", await captureTab(browser))).status, "response_too_large");
 });
 
 test("self-uninstall emits a dispatch marker before invoking the official API and does not retry", async () => {

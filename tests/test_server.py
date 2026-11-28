@@ -49,7 +49,7 @@ class Fake:
         if operation == "close":
             return {"status": self.closed}
         if operation == "uninstall":
-            return {"status": "uninstall_requested"}
+            return {"status": "uninstall_unverified"}
         raise AssertionError(operation)
 
     def profiles(self):
