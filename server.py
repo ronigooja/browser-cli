@@ -61,8 +61,8 @@ TOOLS = [
     }, ["cleanup_token"], destructiveHint=True, openWorldHint=False),
     tool("setup_extension", "Check the selected local browser extension. For Chrome, use prepare after explicit user approval, then install once with its grant and the sole profile or the profile the user selects. For an update_required result, obtain explicit approval to update and use update=true on prepare. Relay the full manual loading or reload instructions, then check. Safari production setup is manual; never install the development probe.", {
         "browser": enum(BROWSERS),
-        "action": enum(("check", "prepare", "install")),
-        "approved": {"type": "boolean", "description": "Chrome prepare only, after explicit user approval."},
+        "action": enum(("check", "prepare", "install", "uninstall")),
+        "approved": {"type": "boolean", "description": "For Chrome prepare or uninstall, only after explicit user approval."},
         "update": {"type": "boolean", "description": "Chrome prepare only, after update_required and explicit approval to update the existing installation."},
         "grant": token("Single-use Chrome install grant returned by prepare."),
         "profile": {"type": "string", "maxLength": 255, "description": "Chrome profile directory returned by prepare."},
@@ -86,8 +86,9 @@ TOOLS = [
         "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 8000},
         "approved": {"type": "boolean", "description": "True only after the user explicitly approves the form submission."},
     }, ["browser", "action", "tab_ref"], openWorldHint=True),
-    tool("capture_tab", "Capture a PNG viewport from a confirmed Safari tab only if it is already active in its focused window. Never activates or changes tabs. It may reject images over the transport limit.", {
+    tool("capture_tab", "Capture a PNG viewport or the visible portion of a CSS-selected element in Chrome or Safari. The confirmed tab must already be active in its focused window. This tool does not switch tabs or scroll. For Chrome, grant screenshot access once using the extension popup.", {
         "browser": enum(BROWSERS), "tab_ref": token("From browser_tabs in this session."),
+        "selector": {"type": "string", "maxLength": 1000},
     }, ["browser", "tab_ref"], readOnlyHint=True, destructiveHint=False, openWorldHint=True),
 ]
 

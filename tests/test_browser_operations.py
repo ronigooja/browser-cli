@@ -118,8 +118,9 @@ class BrowserOperationTest(unittest.TestCase):
 
     def test_capture_is_bound_and_returns_an_image_not_a_data_url(self):
         ref = self.target()
+        self.backend.replies["capture"] = {"status": "capture_permission_required"}
         result, image = self.ops.capture(dict(browser="chrome", tab_ref=ref), self.scope)
-        self.assertEqual(result["status"], "capture_unavailable")
+        self.assertEqual(result["status"], "capture_permission_required")
         self.assertIsNone(image)
         safari = dict(browser="safari")
         candidate = self.ops.tabs(dict(safari, action="list"), self.scope)["tabs"][0]["candidate_token"]

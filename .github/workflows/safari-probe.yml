@@ -41,3 +41,20 @@ jobs:
           cmp extension/shared/read-page.js "$bundle/read-page.js"
           test -f "$bundle/manifest.json"
           "$app/Contents/MacOS/AgentBrowserSafari" verify-gate
+      - name: Verify native PNG cropping
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import struct
+          import zlib
+          from browser_capture import crop_png, png_size
+
+          def chunk(kind, data):
+              return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+
+          rows = [bytes([0, 255, 0, 0, 0, 255, 0]), bytes([0, 0, 0, 255, 255, 255, 0])]
+          png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 2, 2, 8, 2, 0, 0, 0))
+                 + chunk(b'IDAT', zlib.compress(b''.join(rows))) + chunk(b'IEND', b''))
+          geometry = dict(x=1, y=0, width=1, height=2, viewport_width=2, viewport_height=2)
+          assert png_size(crop_png(png, geometry)) == (1, 2)
+          PY

@@ -1,8 +1,8 @@
 """Session-scoped controls for the authorized browser profile."""
 
-from base64 import b64decode
 from dataclasses import dataclass
 
+from browser_capture import CaptureError, collect, crop_png, image_content
 from browser_policy import BROWSERS, clipped, result, token_valid, url_key, url_mismatch
 from browser_service import (PAGE_MESSAGES, REQUEST_TIMEOUT, Capabilities, Owned, Tab,
                              blocker)
@@ -22,7 +22,10 @@ PAGE_ERRORS = {**PAGE_MESSAGES,
     "action_unavailable": "The requested action is not available for the selected element or page.",
     "action_unconfirmed": "The browser could not confirm the action. Inspect the intended tab before retrying.",
     "target_changed": "The confirmed tab or document changed. Select and confirm the intended tab again.",
-    "capture_unavailable": "Viewport capture is available only in Safari on the already-active tab of its focused window. No tab was activated.",
+    "capture_unavailable": "Capture needs the target tab already active in its focused window. No tab was activated.",
+    "capture_permission_required": "In the intended Chrome profile, open Agent Browser's toolbar popup and allow screenshot access to all sites once. Then retry capture. Do not make per-site grants.",
+    "capture_geometry_unavailable": "The element's visible rectangle could not be matched to the screenshot. No pixels were returned.",
+    "capture_expired": "The screenshot transfer did not finish. No partial image was returned.",
 }
 
 
@@ -189,29 +192,31 @@ class BrowserOperations:
     def capture(self, args, scope):
         if not isinstance(args, dict) or args.get("browser") not in BROWSERS:
             raise ValueError("Choose Safari or Chrome.")
-        self.validate(args, ("browser", "tab_ref"), (), ("tab_ref",))
+        self.validate(args, ("browser", "tab_ref"), ("selector",), ("tab_ref",))
         browser = args["browser"]
         target = self.targets.get(args["tab_ref"], scope)
         if target is None or target.browser != browser:
             return self.fail(browser, "target_changed"), None
-        if browser != "safari":
-            return self.fail(browser, "capture_unavailable"), None
-        reply = self.service.request(browser, "capture", {"ref": target.tab.ref, "expected_url": target.tab.url})
+        def request(operation, payload, timeout=REQUEST_TIMEOUT):
+            return self.service.request(browser, operation, payload, timeout)
+
+        payload = {"ref": target.tab.ref, "expected_url": target.tab.url}
+        if "selector" in args:
+            payload["selector"] = args["selector"]
+        reply = request("capture", payload)
         if reply["status"] != "ok":
+            if reply["status"] == "action_unavailable":
+                return self.fail(browser, "capture_unavailable"), None
             return self.failed_reply(browser, reply), None
         if reply.get("final_url") != target.tab.url:
             return self.fail(browser, "target_changed"), None
-        image = reply.get("image")
-        prefix = "data:image/png;base64,"
-        if not isinstance(image, str) or not image.startswith(prefix) or len(image) > 65000:
-            return self.fail(browser, "read_unavailable"), None
-        data = image[len(prefix):]
         try:
-            if not b64decode(data, validate=True).startswith(b"\x89PNG\r\n\x1a\n"):
-                return self.fail(browser, "read_unavailable"), None
-        except ValueError:
-            return self.fail(browser, "read_unavailable"), None
-        return result("ok", browser, final_url=target.tab.url), {"type": "image", "mimeType": "image/png", "data": data}
+            png = collect(reply, request, self.service.clock)
+            if "selector" in args:
+                png = crop_png(png, reply.get("crop"))
+        except CaptureError as exc:
+            return self.fail(browser, str(exc)), None
+        return result("ok", browser, final_url=target.tab.url), image_content(png)
 
     def page(self, args, scope):
         if (not isinstance(args, dict) or not isinstance(args.get("action"), str)

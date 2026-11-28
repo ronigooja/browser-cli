@@ -22,13 +22,14 @@ class Setup:
         self.staged_update = None
 
     def call(self, args, scope):
-        allowed = {"check": set(), "prepare": {"approved", "update"}, "install": {"grant", "profile"}}
+        allowed = {"check": set(), "prepare": {"approved", "update"}, "install": {"grant", "profile"},
+                   "uninstall": {"approved"}}
         if not isinstance(args, dict) or args.get("browser") not in BROWSERS:
             raise ValueError("Choose safari or chrome for setup_extension.")
         browser, action = args["browser"], args.get("action")
         if not isinstance(action, str) or action not in allowed or args.keys() - allowed[action] - {"action", "browser"}:
-            raise ValueError("Choose check, prepare, or install with the appropriate setup arguments.")
-        if browser == "safari" and (action == "install" or {"approved", "update"} & args.keys()):
+            raise ValueError("Choose check, prepare, install, or uninstall with the appropriate arguments.")
+        if browser == "safari" and action not in ("check", "uninstall") and (action == "install" or {"approved", "update"} & args.keys()):
             raise ValueError("Safari setup is manual; use check for production setup guidance.")
         if action == "prepare" and any(type(args.get(key, False)) is not bool for key in ("approved", "update")):
             raise ValueError("approved and update must be booleans.")
@@ -36,6 +37,10 @@ class Setup:
                 "profile" in args and not profile_directory(args["profile"]))):
             raise ValueError("Use the grant and profile returned by prepare.")
         try:
+            if action == "uninstall":
+                if type(args.get("approved", False)) is not bool:
+                    raise ValueError("approved must be a boolean.")
+                return self.uninstall(browser, args.get("approved", False))
             if action == "check" or browser == "safari":
                 return self.check(browser)
             if action == "prepare":
@@ -43,6 +48,19 @@ class Setup:
             return self.install(args["grant"], args.get("profile"), scope)
         except (OSError, EOFError, ValueError, TypeError, RuntimeError, KeyError, AttributeError):
             return result("setup_error", browser, "Setup could not finish. Check the connection before making any further changes.", next_action="check")
+
+    def uninstall(self, browser, approved):
+        if not approved:
+            return result("consent_required", browser, "Ask before uninstalling Agent Browser. Identify the intended browser profile first.")
+        if browser == "safari":
+            return result("manual_uninstall_required", browser,
+                          "In Safari > Settings > Extensions, select Agent Browser and click Uninstall. No local files or browser settings were changed.")
+        reply = self.service.request(browser, "uninstall")
+        status = reply["status"]
+        if status in ("ok", "uninstall_requested", "uninstall_unconfirmed", "action_unconfirmed", "timeout", "browser_error"):
+            return result("uninstall_unconfirmed", browser,
+                          "Chrome removal could not be verified. Check Agent Browser is gone from the intended profile at chrome://extensions/. Do not retry automatically. Native host files were retained.")
+        return blocker(browser, reply)
 
     def pending(self, backend, profile=None, update=False):
         instructions = backend.loading_instructions()
