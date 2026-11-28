@@ -11,6 +11,8 @@ from tempfile import TemporaryDirectory
 
 PREFIX = "data:image/png;base64,"
 MAX_IMAGE = 12 * 1024 * 1024
+CHUNK_LIMIT = 48000
+MIN_CHUNK = 16384
 
 
 class CaptureError(ValueError):
@@ -31,16 +33,16 @@ def collect(reply, request, clock):
         deadline = clock() + 60
         while offset < length:
             remaining = deadline - clock()
-            if remaining <= 0 or len(parts) >= 800:
+            if remaining <= 0 or len(parts) >= ceil(MAX_IMAGE / MIN_CHUNK):
                 raise CaptureError("capture_expired")
             chunk = request("capture_chunk", {"image_ref": ref, "offset": offset}, min(5, remaining))
             if chunk.get("status") != "ok":
                 raise CaptureError("capture_expired")
             data, next_offset = chunk.get("data"), chunk.get("next_offset")
-            if not isinstance(data, str) or not 0 < len(data) <= 48000 or not data.isascii():
+            if not isinstance(data, str) or not 0 < len(data) <= CHUNK_LIMIT or not data.isascii():
                 raise CaptureError("read_unavailable")
             end = offset + len(data)
-            if (end > length or (end < length and len(data) < 16384)
+            if (end > length or (end < length and len(data) < MIN_CHUNK)
                     or not ((type(next_offset) is int and next_offset == end)
                             or (next_offset is None and end == length))):
                 raise CaptureError("read_unavailable")
