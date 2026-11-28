@@ -11,15 +11,18 @@ const url = "https://example.com/";
 const documentId = randomUUID();
 const listener = {addListener() {}};
 const existing = {id: 1, windowId: 7, incognito: false, active: true, url};
+const viewportCrop = {x: 0, y: 0, width: 800, height: 600, viewport_width: 800, viewport_height: 600};
 
 async function harness({windows = [], grant = true, privateAccess = false, ignoreDocumentTarget = false,
   getAll, nativeMessage, checkPrivate, pageResult, captureImage, operationChangedDocument = false,
-  captureChangesSelection = false, redirect} = {}) {
+  captureEvent, redirect} = {}) {
   let scripts = 0, creates = 0, closes = 0, focuses = 0, captures = 0;
   let frameId = documentId;
+  let now = Date.now();
   const updates = [];
   const events = () => ({addListener(callback) { this.fire = callback; }});
   const onRemoved = events(), onActivated = events(), onFocusChanged = events(), onCommitted = events();
+  const onUpdated = events(), onReplaced = events(), onDetached = events(), onAttached = events();
   const profile = randomUUID();
   const window = () => windows[0];
   const browser = {
@@ -27,7 +30,8 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
     extension: {inIncognitoContext: false, isAllowedIncognitoAccess: checkPrivate || (async () => privateAccess)},
     permissions: {contains: async () => grant},
     storage: {local: {get: async () => ({enabledProfile: profile}), remove: async () => {}}},
-    tabs: {onRemoved, onActivated, get: async id => window()?.tabs.find(tab => tab.id === id),
+    tabs: {onRemoved, onActivated, onUpdated, onReplaced, onDetached, onAttached,
+      get: async id => window()?.tabs.find(tab => tab.id === id),
       create: async ({url: target, active}) => {
         creates++;
         const tab = {...existing, id: 2, active, url: target};
@@ -45,9 +49,15 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
         if (properties.active) onActivated.fire({tabId: id});
       },
       remove: async id => { closes++; onRemoved.fire(id); },
-      captureVisibleTab: async () => {
+      captureVisibleTab: async (windowId, options) => {
+        assert.equal(windowId, window().id);
+        assert.equal(options.format, "png");
         captures++;
-        if (captureChangesSelection) onActivated.fire({tabId: 2});
+        if (captureEvent === "activation") onActivated.fire({tabId: 2});
+        if (captureEvent === "focus") onFocusChanged.fire(-1);
+        if (captureEvent === "update") onUpdated.fire(1, {url: `${url}#transient`});
+        if (captureEvent === "attach") onAttached.fire(1);
+        if (captureEvent === "document") frameId = randomUUID();
         return captureImage;
       }},
     windows: {getAll: getAll || (async () => windows), get: async () => window(), onFocusChanged,
@@ -60,7 +70,8 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
       if (target.documentIds[0] !== frameId && !ignoreDocumentTarget) return [];
       const currentFrame = frameId;
       const result = func.name === "noDataMarker" ? true : args?.[0].kind ?
-        (pageResult?.(args[0]) ?? {status: "ok", final_url: args[0].expectedURL}) : {status: "ok", final_url: url, text: "fixture"};
+        (pageResult?.(args[0]) ?? {status: "ok", final_url: args[0].expectedURL,
+          ...(args[0].kind === "capture_geometry" ? {crop: viewportCrop} : {})}) : {status: "ok", final_url: url, text: "fixture"};
       if (operationChangedDocument && args?.[0].kind) {
         frameId = randomUUID();
         onCommitted.fire({tabId: target.tabId, frameId: 0});
@@ -68,15 +79,20 @@ async function harness({windows = [], grant = true, privateAccess = false, ignor
       return [{documentId: currentFrame, frameId: 0, result}];
     }},
   };
-  const context = vm.createContext({browser, crypto: {randomUUID}, URL, setTimeout() { return 1; }, clearTimeout() {}});
+  const delays = [];
+  const context = vm.createContext({browser, crypto: {randomUUID}, URL, Date: {now: () => now},
+    setTimeout(_callback, delay) { delays.push(delay); return 1; }, clearTimeout() {}});
   vm.runInContext(readFileSync(join(__dirname, "../extension/shared/read-page.js"), "utf8"), context);
   vm.runInContext('if (typeof agentBrowserPageOperation !== "function") { globalThis.agentBrowserPageOperation = function agentBrowserPageOperation() {}; }', context);
   vm.runInContext(readFileSync(join(__dirname, "Web/background.js"), "utf8"), context);
   await vm.runInContext("ready", context);
   const execute = vm.runInContext("execute", context);
-  return {call: (operation, payload) => execute({operation, payload, expires: Date.now() + 10000}),
+  return {call: (operation, payload) => execute({operation, payload, expires: now + 10000}),
     poll: () => vm.runInContext("poll(enabledProfile)", context),
-    bound: (result, operation) => vm.runInContext("bound", context)({v: 2, id: "a".repeat(32), ...result}, operation),
+    bound: (result, operation) => vm.runInContext("bound", context)({v: 3, id: "a".repeat(32), ...result}, operation),
+    nextPollDelay: () => { vm.runInContext("timer = undefined; schedule()", context); return delays.at(-1); },
+    advance: ms => { now += ms; },
+    changeProfile: () => vm.runInContext("configure(crypto.randomUUID())", context),
     disable: () => vm.runInContext('setup("disable")', context),
     profile, instance: vm.runInContext("instance", context),
     counters: () => ({scripts, creates, closes, focuses, captures}), updates};
@@ -133,7 +149,7 @@ test("rejects grants routed to another profile or instance", async () => {
     messages.push(message);
     return supplied;
   }});
-  const request = {v: 2, id: "a".repeat(32), operation: "find", payload: {url}, expires: Date.now() + 10000};
+  const request = {v: 3, id: "a".repeat(32), operation: "find", payload: {url}, expires: Date.now() + 10000};
   for (const [profile, instance] of [[randomUUID(), browser.instance], [browser.profile, randomUUID()]]) {
     supplied = {status: "claimed", profile, instance, request};
     await browser.poll();
@@ -234,28 +250,128 @@ test("navigation never returns a redirected target capability", async () => {
   assert.equal(browser.updates.length, 1);
 });
 
-test("capture does not activate tabs, crop, or truncate an oversized image", async () => {
+test("capture returns stable crop geometry and never activates or focuses", async () => {
   const png = "data:image/png;base64,AAAA";
-  const browser = await harness({windows: windowWithTab(), captureImage: png});
+  const crop = {x: 0.5, y: 20, width: 200, height: 49.5, viewport_width: 800, viewport_height: 600};
+  const calls = [];
+  const browser = await harness({windows: windowWithTab(), captureImage: png, pageResult: data => {
+    calls.push(data);
+    return {status: "ok", final_url: data.expectedURL, crop};
+  }});
   const ref = (await browser.call("list", {})).tabs[0].ref;
   const payload = {ref, expected_url: url};
-  assert.equal((await browser.call("capture", {...payload, selector: "button"})).status, "action_unavailable");
-  assert.equal(browser.counters().captures, 0);
   const captured = await browser.call("capture", payload);
   assert.equal(captured.image, png);
-  const tooLarge = browser.bound({...captured, image: png + "A".repeat(65536)}, "capture");
-  assert.equal(tooLarge.status, "response_too_large");
-  assert.equal(tooLarge.image, undefined);
+  assert.equal(captured.crop, undefined);
+  const selected = await browser.call("capture", {...payload, selector: "button"});
+  assert.equal(selected.image, png);
+  assert.deepEqual({...selected.crop}, crop);
+  assert.deepEqual(calls.map(data => [data.kind, data.selector, data.expectedURL]),
+    [["capture_geometry", undefined, url], ["capture_geometry", undefined, url],
+      ["capture_geometry", "button", url], ["capture_geometry", "button", url]]);
   assert.equal(browser.updates.length, 0);
   assert.equal(browser.counters().focuses, 0);
 });
 
-test("capture discards pixels if activation changes during the browser capture", async () => {
-  const browser = await harness({windows: windowWithTab(), captureImage: "data:image/png;base64,AAAA", captureChangesSelection: true});
+test("capture refuses inactive, unfocused or ambiguous targets before retrieving pixels", async () => {
+  for (const change of [windows => { windows[0].focused = false; }, windows => { windows[0].tabs[0].active = false; },
+    windows => { windows[0].tabs.push({...existing, id: 2}); }]) {
+    const windows = windowWithTab();
+    change(windows);
+    const browser = await harness({windows});
+    const ref = (await browser.call("list", {})).tabs[0].ref;
+    assert.equal((await browser.call("capture", {ref, expected_url: url})).status, "action_unavailable");
+    assert.equal(browser.counters().captures, 0);
+  }
+});
+
+test("capture discards pixels on tab selection, focus, navigation, attach, or document changes", async () => {
+  for (const captureEvent of ["activation", "focus", "update", "attach", "document"]) {
+    const browser = await harness({windows: windowWithTab(), captureImage: "data:image/png;base64,AAAA", captureEvent});
+    const ref = (await browser.call("list", {})).tabs[0].ref;
+    const result = await browser.call("capture", {ref, expected_url: url});
+    assert.equal(result.status, "target_changed", captureEvent);
+    assert.equal(result.image, undefined);
+    assert.equal(result.image_ref, undefined);
+  }
+});
+
+test("capture never returns pixels if selector geometry changes or either page gate blocks", async () => {
+  for (const blocking of ["geometry", "verification_required", "login_required", "no_match", "invalid_selector"]) {
+    const beforeGate = ["no_match", "invalid_selector"].includes(blocking);
+    let probes = 0;
+    const browser = await harness({windows: windowWithTab(), captureImage: "data:image/png;base64,AAAA", pageResult: data => {
+      probes++;
+      const status = beforeGate || (probes === 2 && blocking !== "geometry") ? blocking : "ok";
+      return {status, final_url: data.expectedURL, crop: {x: probes, y: 20, width: 200, height: 100,
+        viewport_width: 800, viewport_height: 600}};
+    }});
+    const ref = (await browser.call("list", {})).tabs[0].ref;
+    const result = await browser.call("capture", {ref, expected_url: url, selector: "button"});
+    assert.equal(result.status, blocking === "geometry" ? "target_changed" : blocking);
+    assert.equal(result.image, undefined);
+    assert.equal(result.image_ref, undefined);
+    assert.equal(browser.counters().captures, Number(!beforeGate));
+  }
+});
+
+test("large capture splits ASCII in one-use ordered chunks and fast-polls while buffered", async () => {
+  const png = "data:image/png;base64," + "/".repeat(96000);
+  const browser = await harness({windows: windowWithTab(), captureImage: png});
   const ref = (await browser.call("list", {})).tabs[0].ref;
   const result = await browser.call("capture", {ref, expected_url: url});
-  assert.equal(result.status, "target_changed");
+  assert.equal(result.status, "ok");
   assert.equal(result.image, undefined);
+  assert.equal(result.image_length, png.length);
+  assert.match(result.image_ref, /^[\da-f]{32}$/);
+  const image_ref = result.image_ref;
+  const read = offset => browser.call("capture_chunk", {image_ref, offset});
+  assert.equal(browser.nextPollDelay(), 50);
+  assert.equal((await read(-1)).status, "invalid_request");
+  assert.equal((await read(48000)).status, "read_unavailable");
+  const chunks = [];
+  for (let offset = 0; offset < result.image_length;) {
+    const chunk = await read(offset);
+    assert.equal(chunk.status, "ok");
+    assert.equal(chunk.data.length, Math.min(48000, png.length - offset));
+    assert.equal(chunk.next_offset, offset + chunk.data.length);
+    assert.equal(browser.bound(chunk, "capture_chunk").status, "ok");
+    assert.equal((await read(offset)).status, "read_unavailable");
+    chunks.push(chunk.data);
+    offset = chunk.next_offset;
+  }
+  assert.equal(chunks.join(""), png);
+  assert.equal(browser.nextPollDelay(), 1000);
+});
+
+test("large captures expire, cannot cross profiles or instances, and use one memory slot", async () => {
+  const options = {windows: windowWithTab(), captureImage: "data:image/png;base64," + "A".repeat(48000)};
+  const browser = await harness(options);
+  const ref = (await browser.call("list", {})).tabs[0].ref;
+  const capture = () => browser.call("capture", {ref, expected_url: url});
+  const original = await capture();
+  const other = await harness(options);
+  assert.equal((await other.call("capture_chunk", {image_ref: original.image_ref, offset: 0})).status, "read_unavailable");
+  const replacement = await capture();
+  assert.equal((await browser.call("capture_chunk", {image_ref: original.image_ref, offset: 0})).status, "read_unavailable");
+  browser.advance(60000);
+  assert.equal((await browser.call("capture_chunk", {image_ref: replacement.image_ref, offset: 0})).status, "read_unavailable");
+  assert.equal(browser.nextPollDelay(), 1000);
+  const last = await capture();
+  browser.changeProfile();
+  assert.equal((await browser.call("capture_chunk", {image_ref: last.image_ref, offset: 0})).status, "read_unavailable");
+});
+
+test("capture rejects malformed and over-limit data URLs", async () => {
+  for (const [captureImage, status] of [["data:image/png;base64,AAA\n", "read_unavailable"],
+    ["data:image/png;base64," + "A".repeat(12 * 1024 * 1024), "response_too_large"]]) {
+    const browser = await harness({windows: windowWithTab(), captureImage});
+    const ref = (await browser.call("list", {})).tabs[0].ref;
+    const result = await browser.call("capture", {ref, expected_url: url});
+    assert.equal(result.status, status);
+    assert.equal(result.image, undefined);
+    assert.equal(result.image_ref, undefined);
+  }
 });
 
 test("disable during a claimed operation suppresses the result data", async () => {
@@ -267,7 +383,7 @@ test("disable during a claimed operation suppresses the result data", async () =
   browser = await harness({getAll: async () => { entered(); return blocked; }, nativeMessage: async message => {
     messages.push(message);
     if (message.phase === "pull") return {status: "claimed", profile: browser.profile, instance: browser.instance,
-      request: {v: 2, id: "b".repeat(32), operation: "find", payload: {url}, expires: Date.now() + 10000}};
+      request: {v: 3, id: "b".repeat(32), operation: "find", payload: {url}, expires: Date.now() + 10000}};
   }});
   const pending = browser.poll();
   await started;

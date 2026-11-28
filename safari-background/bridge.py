@@ -11,9 +11,9 @@ from uuid import UUID
 
 
 LIMIT = 65536
-VERSION = 2
+VERSION = 3
 MAX_TIMEOUT = 300
-OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture"}
+OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk"}
 PAGE_MUTATIONS = ("click", "scroll", "fill", "select", "press", "submit")
 DEFAULT_BINARY = Path.home() / "Applications/AgentBrowserSafari.app/Contents/MacOS/AgentBrowserSafari"
 
@@ -70,8 +70,8 @@ def request(operation, payload, timeout):
             reply.get("id") != message_id or not isinstance(reply.get("status"), str)
         ):
             raise ValueError
-        if reply["v"] == 1 and reply["status"] == "invalid_request":
-            # v1 rejects a v2 request before it can publish a lease.
+        if (reply["v"], reply["status"]) in ((1, "invalid_request"), (2, "protocol_mismatch")):
+            # Known old hosts reject a v3 request before they can publish a lease.
             return {"status": "disconnected", "update_required": True}
         if reply["v"] != VERSION:
             raise ValueError

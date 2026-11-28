@@ -19,6 +19,7 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
         (operation == "page" && IPC.pageMutations.contains(kind))
     let backgroundMutation = operation == "open" || operation == "close" || (operation == "tab" && kind == "navigate")
     let foregroundMutation = operation == "front_open" || (operation == "tab" && kind == "activate")
+    let capture = operation == "capture"
     let uncertain = operation == "open" ? "open_unconfirmed" : operation == "close" ? "cleanup_unconfirmed" : "action_unconfirmed"
     let safari = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari")
     guard safari.count == 1, let browser = safari.first, !browser.isTerminated, browser.isFinishedLaunching else {
@@ -32,18 +33,26 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
     let initialFront = workspace.frontmostApplication?.bundleIdentifier
     let focus = FocusEvidence()
     var observer: NSObjectProtocol?
-    if backgroundMutation {
+    if backgroundMutation || capture {
         observer = workspace.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil
         ) { note in
-            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+            if capture { focus.mark() }
+            else if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                app.bundleIdentifier == "com.apple.Safari" { focus.mark() }
         }
     }
     defer { if let observer { workspace.notificationCenter.removeObserver(observer) } }
+    if capture && workspace.frontmostApplication?.processIdentifier != browser.processIdentifier {
+        return response("action_unavailable")
+    }
 
     func checkedResult(_ data: Data) throws -> [String: Any] {
         let result = try IPC.object(data)
+        if capture && result["status"] as? String == "ok" &&
+            (focus.observed || workspace.frontmostApplication?.processIdentifier != browser.processIdentifier) {
+            return response("target_changed")
+        }
         if foregroundMutation && result["status"] as? String == "ok" &&
             workspace.frontmostApplication?.processIdentifier != browser.processIdentifier {
             return response(uncertain)
@@ -79,6 +88,9 @@ func run(_ request: [String: Any], id: String) throws -> [String: Any] {
         do {
             let early: String? = try IPC.access(root) { state, update in
                 guard live() else { return "timeout" }
+                if capture && (focus.observed || workspace.frontmostApplication?.processIdentifier != browser.processIdentifier) {
+                    return "target_changed"
+                }
                 // PID/process discovery is not identity. A write additionally requires a fresh
                 // Safari-authenticated heartbeat for the exact process-local instance nonce.
                 let instance = state.presence.flatMap { presence in
@@ -137,6 +149,10 @@ func verifyGate() -> Bool {
     let wrongProfile = IPC.Binding(profile: UUID(), instance: instance)
     let wrongInstance = IPC.Binding(profile: profile, instance: UUID())
     let id = String(repeating: "a", count: 32)
+    // A slash-only base64 chunk must not expand beyond the native message limit.
+    let chunk = String(repeating: "/", count: 48_000)
+    guard let frame = try? IPC.json(["v": IPC.version, "id": id, "status": "ok", "data": chunk, "next_offset": chunk.count]),
+          let decoded = try? IPC.object(frame), decoded["data"] as? String == chunk else { return false }
     var lease = IPC.Lease(id: id, profile: profile, instance: instance, expires: 200, request: Data(), claim: nil, result: nil)
     guard !lease.take(wrongProfile, now: 100), !lease.take(wrongInstance, now: 100),
           !lease.take(target, now: 200), lease.take(target, now: 100), !lease.take(target, now: 100),

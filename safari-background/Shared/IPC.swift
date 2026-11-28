@@ -5,10 +5,10 @@ import Foundation
 struct IPCError: Error { let status: String; init(_ status: String) { self.status = status } }
 
 enum IPC {
-    static let version: Int64 = 2
+    static let version: Int64 = 3
     static let limit = 65_536
     static let stateLimit = 262_144
-    static let operations: Set<String> = ["status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture"]
+    static let operations: Set<String> = ["status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk"]
     static let pageMutations: Set<String> = ["click", "scroll", "fill", "select", "press", "submit"]
     static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
@@ -49,7 +49,7 @@ enum IPC {
     }
 
     static func json(_ value: [String: Any]) throws -> Data {
-        let data = try JSONSerialization.data(withJSONObject: value)
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes])
         guard data.count <= limit else { throw IPCError("response_too_large") }
         return data
     }
@@ -78,7 +78,7 @@ enum IPC {
               let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) else {
             throw IPCError("app_group_unavailable")
         }
-        // Do not accept a heartbeat or claim from an installed v1 extension.
+        // Do not accept a heartbeat or claim from an older installed extension.
         let parent = group.appendingPathComponent("agent-browser-ipc-v\(version)", isDirectory: true)
         try privateDirectory(parent)
         let root = parent.appendingPathComponent(profile.uuidString, isDirectory: true)

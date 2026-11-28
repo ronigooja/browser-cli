@@ -6,7 +6,12 @@ const origins = ["http://*/*", "https://*/*"];
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const requestID = /^[\da-f]{32}$/;
 const limit = 65536;
-const version = 2;
+const version = 3;
+const imageLimit = 12 * 1024 * 1024;
+const imageChunkSize = 48000;
+const imageLifetime = 60000;
+const imagePollInterval = 50;
+const pngPrefix = "data:image/png;base64,";
 const refPlaceholder = "0".repeat(73);
 const pageFields = new Map([
   ["info", []], ["html", ["selector", "raw"]], ["snapshot", ["selector", "offset"]], ["extract", ["selector", "offset"]],
@@ -24,6 +29,7 @@ let polling = false;
 let selectionEpoch = 0;
 let lastActivation = 0;
 let readPinQualified = false;
+let bufferedImage;
 
 const native = (phase, extra = {}) => browser.runtime.sendNativeMessage(app, {v: version, phase, instance, ...extra});
 const expired = expires => Date.now() >= expires;
@@ -52,6 +58,9 @@ function validPayload(operation, data) {
     ["navigate", "activate", "close"].includes(data.kind) && (data.kind === "navigate" ? !!httpURL(data.url) : !("url" in data));
   if (operation === "capture") return pinned() && only("ref", "expected_url", "selector") &&
     (!("selector" in data) || selector(data.selector));
+  if (operation === "capture_chunk") return only("image_ref", "offset") &&
+    typeof data.image_ref === "string" && data.image_ref.length === 32 && requestID.test(data.image_ref) &&
+    isID(data.offset) && data.offset < imageLimit;
   if (operation === "page") {
     const fields = pageFields.get(data.kind);
     const sizes = {selector: 1000, elementRef: 256, text: 4000, key: 32, value: 1000, direction: 8, condition: 8};
@@ -147,7 +156,8 @@ async function currentTab(entry) {
   const window = await browser.windows.get(entry.window, {populate: true}).catch(() => null);
   if (refs.get(entry.ref) !== entry || !normal(window) || window.id !== entry.window || !Array.isArray(window.tabs)) return null;
   const tab = window.tabs.find(tab => regular(tab) && tab.id === entry.id && tab.windowId === entry.window);
-  return tab ? {...tab, windowFocused: window.focused} : null;
+  return tab ? {...tab, windowFocused: window.focused,
+    windowActiveCount: window.tabs.filter(item => item.active === true).length} : null;
 }
 
 const observed = tab => httpURL(tab?.pendingUrl ?? tab?.url);
@@ -278,6 +288,8 @@ async function runPage(pin, options) {
 }
 
 const wireSize = value => JSON.stringify(value).replace(/[\/<>&\x7f-\uffff]/g, "\\u0000").length;
+// Reserve room for the native envelope; v3 writes the ASCII PNG without escaping slashes.
+const inlineImageFits = (image, metadata) => image.length <= imageChunkSize && wireSize(metadata) + image.length + 128 <= limit;
 
 async function listTabs(expires) {
   const selection = selectionEpoch;
@@ -359,32 +371,89 @@ async function tabOperation(data, expires) {
   } catch (_) { return actionUnconfirmed; }
 }
 
+const cropFields = ["x", "y", "width", "height", "viewport_width", "viewport_height"];
+function captureCrop(crop) {
+  if (!crop || typeof crop !== "object" || Array.isArray(crop) ||
+      !cropFields.every(key => Number.isFinite(crop[key]) && crop[key] >= 0 && crop[key] <= 65536)) return null;
+  const {x, y, width, height, viewport_width, viewport_height} = crop;
+  if (width <= 0 || height <= 0 || x + width > viewport_width || y + height > viewport_height) return null;
+  return {x, y, width, height, viewport_width, viewport_height};
+}
+
+const captureFocused = tab => tab.active === true && tab.windowFocused === true && tab.windowActiveCount === 1;
+
 async function capture(data, expires) {
   const {selector} = data;
-  if (selector !== undefined || !browser.tabs?.captureVisibleTab || !activated?.addListener ||
-      !windowFocusChanged?.addListener) return {status: "action_unavailable"};
+  if (!browser.tabs?.captureVisibleTab || !activated?.addListener || !windowFocusChanged?.addListener ||
+      !browser.tabs?.onUpdated?.addListener || !browser.tabs?.onReplaced?.addListener ||
+      !browser.tabs?.onDetached?.addListener || !browser.tabs?.onAttached?.addListener) return {status: "action_unavailable"};
   const activation = lastActivation;
   const pin = await pinDocument(data, expires);
   if (pin.status) return pin;
-  const gate = await runPage(pin, {kind: "info"});
+  const stale = tab => {
+    if (expired(expires)) return {status: "timeout"};
+    if (lastActivation !== activation || !stillPinned(pin) || (tab && !captureFocused(tab))) return changed();
+    return null;
+  };
+  if (!captureFocused(pin.tab)) return {status: "action_unavailable"};
+  const initialMismatch = stale();
+  if (initialMismatch) return initialMismatch;
+  const options = {kind: "capture_geometry", ...(selector === undefined ? {} : {selector})};
+  const gate = await runPage(pin, options);
+  const gateMismatch = stale();
+  if (gateMismatch) return gateMismatch;
   if (gate.status !== "ok") return gate;
-  const before = await checkPin(pin);
-  if (before.status) return before;
-  if (before.tab.active !== true || before.tab.windowFocused !== true || lastActivation !== activation ||
-      !stillPinned(pin)) return {status: "action_unavailable"};
+  const crop = captureCrop(gate.crop);
+  if (!crop) return {status: "read_unavailable"};
   try {
+    const before = await checkPin(pin);
+    if (before.status) return before;
+    const beforeMismatch = stale(before.tab);
+    if (beforeMismatch) return beforeMismatch;
+    bufferedImage = undefined; // Keep no prior buffer while Safari allocates the next viewport PNG.
     const image = await browser.tabs.captureVisibleTab(pin.entry.window, {format: "png"});
     const after = await checkPin(pin);
     if (after.status) return after;
-    if (after.tab.active !== true || after.tab.windowFocused !== true || lastActivation !== activation || !stillPinned(pin)) return changed();
-    const finalGate = await runPage(pin, {kind: "info"});
-    if (finalGate.status !== "ok") return finalGate;
-    if (lastActivation !== activation || !stillPinned(pin)) return changed();
+    const afterMismatch = stale(after.tab);
+    if (afterMismatch) return afterMismatch;
+    const finalGate = await runPage(pin, options);
+    const finalGateMismatch = stale();
+    if (finalGateMismatch) return finalGateMismatch;
+    if (finalGate.status !== "ok") {
+      // Never publish the first capture if the post-gate detects a challenge or changed geometry.
+      return ["no_match", "no_content", "content_not_ready"].includes(finalGate.status) ? changed() : finalGate;
+    }
+    const finalCrop = captureCrop(finalGate.crop);
+    if (!finalCrop || !cropFields.every(key => crop[key] === finalCrop[key])) return changed();
+    const final = await checkPin(pin);
+    if (final.status) return final;
+    const finalMismatch = stale(final.tab);
+    if (finalMismatch) return finalMismatch;
     if (typeof image !== "string") return {status: "read_unavailable"};
-    if (image.length > limit) return {status: "response_too_large"};
-    if (!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) return {status: "read_unavailable"};
-    return {status: "ok", final_url: pin.expected, image};
+    if (image.length > imageLimit) return {status: "response_too_large"};
+    if ((image.length - pngPrefix.length) % 4 !== 0 ||
+        !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}(?![\s\S])/.test(image)) return {status: "read_unavailable"};
+    const result = {status: "ok", final_url: pin.expected, ...(selector === undefined ? {} : {crop})};
+    if (inlineImageFits(image, result)) return {...result, image};
+    const image_ref = crypto.randomUUID().replace(/-/g, "");
+    bufferedImage = {ref: image_ref, profile: enabledProfile, image, offset: 0, expires: Date.now() + imageLifetime};
+    return {...result, image_ref, image_length: image.length};
   } catch (_) { return {status: "read_unavailable"}; }
+}
+
+function liveImage() {
+  if (bufferedImage && (bufferedImage.profile !== enabledProfile || expired(bufferedImage.expires))) bufferedImage = undefined;
+  return bufferedImage;
+}
+
+function captureChunk({image_ref, offset}) {
+  const buffer = liveImage();
+  if (!buffer || buffer.ref !== image_ref || buffer.offset !== offset) return {status: "read_unavailable"};
+  const next_offset = Math.min(offset + imageChunkSize, buffer.image.length);
+  const data = buffer.image.slice(offset, next_offset);
+  buffer.offset = next_offset;
+  if (next_offset === buffer.image.length) bufferedImage = undefined;
+  return {status: "ok", data, next_offset};
 }
 
 async function read(data, expires) {
@@ -528,13 +597,14 @@ async function execute(request) {
   const selection = selectionEpoch;
   const status = await setupStatus();
   if (selection !== selectionEpoch) return {status: "disconnected"};
-  if (status !== "ok") return {status};
+  if (status !== "ok") { bufferedImage = undefined; return {status}; }
   if (expired(expires)) return {status: "timeout"};
   if (operation === "status") return {status: "ok"};
   if (operation === "list") return listTabs(expires);
   if (operation === "page") return page(payload, expires);
   if (operation === "tab") return tabOperation(payload, expires);
   if (operation === "capture") return capture(payload, expires);
+  if (operation === "capture_chunk") return captureChunk(payload);
   if (operation === "front_open") return frontOpen(payload, expires);
   if (operation === "read") return read(payload, expires);
   if (operation === "close") return closeOwned(payload, expires);
@@ -542,6 +612,12 @@ async function execute(request) {
 }
 
 function bound(answer, operation) {
+  // Swift's v3 framing does not escape slashes; PNG/base64 ASCII needs no JSON escaping.
+  if (operation === "capture_chunk" && typeof answer.data === "string" && answer.data.length <= imageChunkSize) return answer;
+  if (operation === "capture" && typeof answer.image === "string") {
+    const {image, v, id, ...result} = answer;
+    if (inlineImageFits(image, result)) return answer;
+  }
   const size = () => wireSize(answer);
   if (size() <= limit) return answer;
   if (typeof answer.text === "string") {
@@ -556,7 +632,10 @@ function bound(answer, operation) {
 
 async function poll(profile) {
   const selection = selectionEpoch;
-  if (browser.extension?.inIncognitoContext !== false || await browser.extension?.isAllowedIncognitoAccess?.() !== false) return;
+  if (browser.extension?.inIncognitoContext !== false || await browser.extension?.isAllowedIncognitoAccess?.() !== false) {
+    bufferedImage = undefined;
+    return;
+  }
   if (profile !== enabledProfile) return;
   const grant = await native("pull", {selectedProfile: profile});
   const request = grant?.request;
@@ -571,7 +650,7 @@ async function poll(profile) {
     answer: bound({v: version, id: request.id, ...result}, request.operation)});
 }
 
-function schedule(delay = interval) {
+function schedule(delay = liveImage() ? imagePollInterval : interval) {
   if (!enabledProfile || polling || timer !== undefined) return;
   timer = setTimeout(async () => {
     timer = undefined;
@@ -583,8 +662,11 @@ function schedule(delay = interval) {
 }
 
 function configure(profile) {
-  if (enabledProfile !== profile) { selectionEpoch++; readPinQualified = false; refs.clear(); tabs.clear(); }
-  enabledProfile = typeof profile === "string" && uuid.test(profile) ? profile.toLowerCase() : undefined;
+  const selected = typeof profile === "string" && uuid.test(profile) ? profile.toLowerCase() : undefined;
+  if (enabledProfile !== selected) {
+    selectionEpoch++; readPinQualified = false; bufferedImage = undefined; refs.clear(); tabs.clear();
+  }
+  enabledProfile = selected;
   if (!enabledProfile && timer !== undefined) { clearTimeout(timer); timer = undefined; }
   schedule(0);
 }

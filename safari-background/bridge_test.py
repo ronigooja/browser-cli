@@ -13,29 +13,32 @@ class BridgeTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def test_new_operations_use_the_v2_envelope(self):
+    def test_new_operations_use_the_v3_envelope(self):
+        payload = {"image_ref": "a" * 32, "offset": 0}
+
         def host(argv, **kwargs):
             self.assertEqual(argv[1:], ["ipc"])
             message = json.loads(kwargs["input"])
-            self.assertEqual(message["v"], 2)
-            self.assertEqual(message["operation"], "list")
-            self.assertEqual(message["payload"], {})
-            return subprocess.CompletedProcess(argv, 0, json.dumps({"v": 2, "id": message["id"],
-                                                                    "status": "ok", "tabs": []}).encode())
+            self.assertEqual(message["v"], 3)
+            self.assertEqual(message["operation"], "capture_chunk")
+            self.assertEqual(message["payload"], payload)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"v": 3, "id": message["id"],
+                                                                     "status": "ok", "data": "AAAA", "next_offset": 4}).encode())
 
         with patch.object(bridge.subprocess, "run", side_effect=host):
-            self.assertEqual(bridge.request("list", None, 5), {"status": "ok", "tabs": []})
+            self.assertEqual(bridge.request("capture_chunk", payload, 5), {"status": "ok", "data": "AAAA", "next_offset": 4})
 
-    def test_matching_v1_rejection_reports_update_without_retry(self):
-        def old_host(argv, **kwargs):
-            message = json.loads(kwargs["input"])
-            return subprocess.CompletedProcess(argv, 0, json.dumps({"v": 1, "id": message["id"],
-                                                                    "status": "invalid_request"}).encode())
+    def test_matching_v1_or_v2_rejection_reports_update_without_retry(self):
+        for version, status in ((1, "invalid_request"), (2, "protocol_mismatch")):
+            def old_host(argv, **kwargs):
+                message = json.loads(kwargs["input"])
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"v": version, "id": message["id"],
+                                                                         "status": status}).encode())
 
-        with patch.object(bridge.subprocess, "run", side_effect=old_host) as run:
-            self.assertEqual(bridge.request("tab", {"kind": "close"}, 5),
-                             {"status": "disconnected", "update_required": True})
-            run.assert_called_once()
+            with self.subTest(version=version), patch.object(bridge.subprocess, "run", side_effect=old_host) as run:
+                self.assertEqual(bridge.request("status", {}, 5),
+                                 {"status": "disconnected", "update_required": True})
+                run.assert_called_once()
 
     def test_subprocess_timeout_distinguishes_reads_from_possible_writes(self):
         with patch.object(bridge.subprocess, "run", side_effect=subprocess.TimeoutExpired("ipc", 5)):
