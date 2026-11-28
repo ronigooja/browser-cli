@@ -8,7 +8,8 @@ const vm = require("node:vm");
 const script = fs.readFileSync(path.join(__dirname, "../chrome-background/extension/background.js"), "utf8");
 const shared = fs.readFileSync(path.join(__dirname, "../extension/shared/read-page.js"), "utf8");
 const noop = { addListener() {} };
-const protocol = 3;
+const protocol = 4;
+const png = "data:image/png;base64,iVBORw0KGgo=";
 
 function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
   const url = "https://example.com/";
@@ -17,13 +18,19 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
   }]));
   const events = {};
   const listener = name => ({ addListener(fn) { events[name] = fn; } });
-  const calls = { create: [], remove: [], execute: [], snapshot: [] };
+  const calls = { create: [], remove: [], execute: [], snapshot: [], capture: [], grant: [], uninstall: [], update: [] };
   let receive, disconnect, reply;
   let frame = { frameId: 0, documentId: "document-one", documentLifecycle: "active", errorOccurred: false, url };
   let probe = { status: "ok", final_url: url, text: "Visible text", title: "Example" };
   let duringInjection = () => {};
   let failClose = false;
   let allSites = true;
+  let captureAllowed = false;
+  let image = png;
+  let clock = Date.now();
+  let duringCapture = () => {};
+  let timerId = 0;
+  const timers = new Map();
   let windows = [{ id: 1, type: "normal", incognito: false, focused: true }];
   const hooks = {};
   const populate = window => ({ ...window, tabs: [...tabs.values()].filter(tab => tab.windowId === window.id).map(tab => ({ ...tab })) });
@@ -37,10 +44,20 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
       },
       onInstalled: noop, onStartup: noop,
     },
+    management: { uninstallSelf: async options => {
+      calls.uninstall.push({ options: { ...options }, reply });
+      hooks.uninstall?.();
+    } },
+    action: { onClicked: listener("toolbarClick") },
     alarms: { onAlarm: listener("alarm"), create: () => {} },
-    permissions: { contains: async ({ origins }) => {
+    permissions: { onRemoved: listener("permissionsRemoved"), contains: async ({ origins }) => {
+      if (origins.join(",") === "<all_urls>") return captureAllowed;
       assert.equal(origins.join(","), "http://*/*,https://*/*");
       return allSites;
+    }, request: async ({ origins }) => {
+      calls.grant.push(origins.join(","));
+      captureAllowed = true;
+      return true;
     } },
     tabs: {
       query: async options => { assert.equal(options.windowType, "normal"); return [...tabs.values()].map(tab => ({ ...tab })); },
@@ -61,6 +78,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
         return created;
       },
       update: async (id, options) => {
+        calls.update.push({ id, ...options });
         const tab = tabs.get(id);
         if (!tab) throw Error("gone");
         if (options.active) for (const item of tabs.values()) if (item.windowId === tab.windowId) item.active = item.highlighted = false;
@@ -75,14 +93,20 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
         tabs.delete(id);
         events.remove(id);
       },
+      captureVisibleTab: async (windowId, options) => {
+        calls.capture.push({ windowId, ...options });
+        duringCapture();
+        return image;
+      },
       onRemoved: listener("remove"), onReplaced: listener("replace"), onActivated: listener("activate"),
       onHighlighted: listener("highlight"), onAttached: listener("attach"), onDetached: listener("detach"),
       onMoved: listener("move"), onUpdated: listener("update"),
     },
     windows: {
-      get: async id => {
+      get: async (id, options) => {
         hooks.getWindow?.();
-        return windows.find(window => window.id === id);
+        const window = windows.find(window => window.id === id);
+        return window && options?.populate ? populate(window) : window;
       },
       getAll: async options => {
         assert.equal(options.populate, true);
@@ -93,6 +117,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
       },
       getLastFocused: async () => windows[0],
       update: async (id, options) => {
+        calls.update.push({ id, ...options });
         const window = windows.find(item => item.id === id);
         if (!window) throw Error("gone");
         if (options.focused) for (const item of windows) item.focused = false;
@@ -110,7 +135,7 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
         hooks.createWindow?.(window);
         return created;
       },
-      onFocusChanged: listener("focus"),
+      onFocusChanged: listener("focus"), onRemoved: listener("windowRemoved"),
     },
     webNavigation: {
       getFrame: async options => { assert.equal(options.frameId, 0); return frame; },
@@ -122,14 +147,17 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
         calls.execute.push(JSON.parse(JSON.stringify(options)));
         const documentId = frame.documentId;
         duringInjection();
-        return [{ documentId, frameId: 0, result: probe }];
+        const result = options.args[0]?.kind === "capture_geometry" && !options.args[0].selector
+          ? { crop: { x: 0, y: 0, width: 200, height: 100, viewport_width: 200, viewport_height: 100 }, ...probe } : probe;
+        return [{ documentId, frameId: 0, result }];
       },
     },
   };
-  context = vm.createContext({ chrome, URL, crypto: webcrypto, importScripts(name) {
+  context = vm.createContext({ chrome, URL, crypto: webcrypto, Date: { now: () => clock },
+    setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, expires: clock + delay }); return id; },
+    clearTimeout(id) { timers.delete(id); }, importScripts(name) {
     assert.equal(name, "read-page.js");
     vm.runInContext(shared, context);
-    vm.runInContext("function agentBrowserPageOperation() {}", context);
   } });
   vm.runInContext(script, context);
   return {
@@ -137,12 +165,19 @@ function production(initialTabs = [{ id: 1, url: "https://other.test/" }]) {
     frame(next) { frame = { ...frame, ...next }; },
     probe(next) { probe = { ...probe, ...next }; },
     duringInjection(fn) { duringInjection = fn; },
+    duringCapture(fn) { duringCapture = fn; },
+    captureAllowed(next = true) { captureAllowed = next; },
+    image(next) { image = next; },
+    advance(ms) {
+      clock += ms;
+      for (const [id, timer] of timers) if (clock >= timer.expires) { timers.delete(id); timer.fn(); }
+    },
     failClose() { failClose = true; },
     setAllSites(value) { allSites = value; },
     windows(value) { windows = value; },
     reconnect() { disconnect(); events.alarm({ name: "reconnect-native-host" }); },
     async raw(message) { await receive(message); return reply; },
-    async request(operation, payload = {}, expires = Date.now() + 1000) {
+    async request(operation, payload = {}, expires = clock + 1000) {
       reply = undefined;
       await receive({ v: protocol, id: "request", operation, payload, expires });
       assert.equal(reply.id, "request");
@@ -163,6 +198,127 @@ test("setup and page operations refuse missing all-site access without opening a
   assert.deepEqual(browser.calls.create, []);
   browser.setAllSites(true);
   assert.equal((await browser.request("status")).status, "ok");
+});
+
+async function captureTab(browser, extra = {}) {
+  const { tabs } = await browser.request("list");
+  return { ref: tabs[0].ref, expected_url: browser.url, ...extra };
+}
+
+test("optional capture permission requires a toolbar gesture and never changes read permission", async () => {
+  const browser = production([{ id: 1, title: "Example" }]);
+  const capture = await captureTab(browser);
+  const missing = await browser.request("capture", capture);
+  assert.equal(missing.status, "capture_permission_required");
+  assert.match(missing.message, /toolbar.*one-time/);
+  assert.deepEqual(browser.calls.grant, []);
+  assert.deepEqual(browser.calls.capture, []);
+  assert.equal((await browser.request("status")).status, "ok");
+  assert.equal((await browser.request("read", capture)).status, "ok");
+  browser.events.toolbarClick();
+  assert.deepEqual(await browser.request("capture", capture), { status: "ok", final_url: browser.url, image: png });
+  assert.equal((await browser.request("capture", capture)).status, "ok");
+  assert.deepEqual(browser.calls.grant, ["<all_urls>"]);
+  assert.deepEqual(browser.calls.update, []);
+});
+
+test("capture is bound to the active tab in its focused normal window and its top document", async () => {
+  const browser = production([{ id: 1, title: "Example" }]);
+  browser.captureAllowed();
+  const capture = await captureTab(browser, { selector: "main" });
+  const crop = { x: 4, y: 5, width: 22, height: 31, viewport_width: 200, viewport_height: 100 };
+  browser.probe({ crop });
+  assert.deepEqual(await browser.request("capture", capture), { status: "ok", final_url: browser.url, image: png, crop });
+  const injection = { target: { tabId: 1, documentIds: ["document-one"] }, world: "ISOLATED",
+    args: [{ kind: "capture_geometry", expectedURL: browser.url, selector: "main" }] };
+  assert.deepEqual(browser.calls.execute, [injection, injection]);
+  assert.deepEqual(browser.calls.capture, [{ windowId: 1, format: "png" }]);
+  browser.tabs.get(1).active = false;
+  assert.equal((await browser.request("capture", capture)).status, "capture_unavailable");
+  browser.tabs.get(1).active = true;
+  browser.windows([{ id: 1, type: "normal", incognito: false, focused: false }]);
+  assert.equal((await browser.request("capture", capture)).status, "capture_unavailable");
+  assert.equal(browser.calls.capture.length, 1);
+  assert.deepEqual(browser.calls.update, []);
+});
+
+test("navigation, focus and activation races discard pixels, including a switch away and back", async () => {
+  for (const change of [
+    b => b.frame({ documentId: "changed-document" }),
+    b => b.events.history({ tabId: 1, frameId: 0 }),
+    b => { b.events.focus(2); b.events.focus(1); },
+    b => { b.events.activate({ tabId: 2, windowId: 1 }); b.events.activate({ tabId: 1, windowId: 1 }); },
+  ]) {
+    const browser = production([{ id: 1, title: "Example" }]);
+    browser.captureAllowed();
+    const capture = await captureTab(browser);
+    browser.duringCapture(() => change(browser));
+    assert.deepEqual(await browser.request("capture", capture), { status: "target_changed" });
+  }
+});
+
+test("human verification and unstable crop geometry stop pixel delivery", async () => {
+  const browser = production([{ id: 1, title: "Example" }]);
+  browser.captureAllowed();
+  const capture = await captureTab(browser, { selector: "main" });
+  browser.probe({ status: "verification_required" });
+  assert.deepEqual(await browser.request("capture", capture), { status: "verification_required", final_url: browser.url });
+  assert.deepEqual(browser.calls.capture, []);
+  const crop = { x: 4, y: 5, width: 22, height: 31, viewport_width: 200, viewport_height: 100 };
+  browser.probe({ status: "ok", crop });
+  browser.duringCapture(() => browser.probe({ crop: { ...crop, x: 42 } }));
+  assert.equal((await browser.request("capture", capture)).status, "capture_unavailable");
+  browser.duringCapture(() => browser.probe({ status: "verification_required" }));
+  assert.deepEqual(await browser.request("capture", capture), { status: "verification_required", final_url: browser.url });
+});
+
+test("large screenshots stream in ordered, bounded chunks and cannot be replayed after teardown", async () => {
+  const browser = production([{ id: 1, title: "Example" }]);
+  browser.captureAllowed();
+  const capture = await captureTab(browser);
+  const image = png.slice(0, -1) + "a".repeat(100001);
+  browser.image(image);
+  const begin = await browser.request("capture", capture);
+  assert.equal(begin.status, "ok");
+  assert.equal(begin.image, undefined);
+  assert.equal(begin.image_length, image.length);
+  const image_ref = begin.image_ref;
+  assert.equal((await browser.request("capture_chunk", { image_ref, offset: 1 })).status, "capture_transfer_unavailable");
+  let restored = "";
+  while (restored.length < image.length) {
+    const offset = restored.length;
+    const chunk = await browser.request("capture_chunk", { image_ref, offset });
+    assert.equal(chunk.status, "ok");
+    assert.ok(chunk.data.length <= 48000);
+    restored += chunk.data;
+    assert.equal(chunk.next_offset, restored.length);
+    assert.equal((await browser.request("capture_chunk", { image_ref, offset })).status, "capture_transfer_unavailable");
+  }
+  assert.equal(restored, image);
+  const expires = (await browser.request("capture", capture)).image_ref;
+  assert.notEqual(expires, image_ref);
+  browser.advance(30001);
+  assert.equal((await browser.request("capture_chunk", { image_ref: expires, offset: 0 })).status, "capture_transfer_unavailable");
+  const revoked = (await browser.request("capture", capture)).image_ref;
+  browser.captureAllowed(false);
+  browser.events.permissionsRemoved();
+  assert.equal((await browser.request("capture_chunk", { image_ref: revoked, offset: 0 })).status, "capture_transfer_unavailable");
+  browser.captureAllowed();
+  const disconnected = (await browser.request("capture", capture)).image_ref;
+  browser.reconnect();
+  assert.equal((await browser.request("capture_chunk", { image_ref: disconnected, offset: 0 })).status, "capture_transfer_unavailable");
+  browser.image(png + "a".repeat(12 * 1024 * 1024));
+  assert.equal((await browser.request("capture", await captureTab(browser))).status, "capture_unavailable");
+});
+
+test("self-uninstall emits a dispatch marker before invoking the official API and does not retry", async () => {
+  const browser = production();
+  browser.setAllSites(false);
+  assert.equal((await browser.request("uninstall", { extra: true })).status, "invalid_request");
+  assert.equal((await browser.request("uninstall")).status, "uninstall_dispatched");
+  assert.equal((await browser.request("uninstall")).status, "uninstall_unverified");
+  assert.deepEqual(browser.calls.uninstall, [{ options: { showConfirmDialog: false },
+    reply: { v: protocol, id: "request", status: "uninstall_dispatched" } }]);
 });
 
 test("list is bounded and validates regular tab metadata", async () => {

@@ -130,13 +130,14 @@ class BackgroundTest(unittest.TestCase):
         ):
             with self.subTest(operation=operation):
                 response, observed = self.production_round_trip(host, operation, {},
-                    lambda req: [bridge.frame({"v": 1, "id": req["id"], "status": prior_status})])
+                    lambda req: [bridge.frame({"v": 3, "id": req["id"], "status": prior_status})])
                 self.assertEqual(response, expected)
                 self.assertEqual([req["v"] for req in observed], [bridge.PROTOCOL])
                 self.assertEqual(select.select([host.stdout], [], [], 0)[0], [])
 
     def test_request_does_not_retry_uncertain_writes(self):
-        for operation, status in (("open", "open_unconfirmed"), ("close", "cleanup_unconfirmed")):
+        for operation, status in (("open", "open_unconfirmed"), ("close", "cleanup_unconfirmed"),
+                                  ("uninstall", "uninstall_unverified")):
             with self.subTest(operation=operation):
                 client = Mock()
                 with patch.object(bridge, "connected_client", return_value=nullcontext(client)) as connect, \
@@ -144,6 +145,31 @@ class BackgroundTest(unittest.TestCase):
                     self.assertEqual(bridge.request(operation, {}, 3), {"status": status})
                 connect.assert_called_once()
                 client.sendall.assert_called_once()
+
+    def test_uninstall_marker_does_not_verify_removal_or_touch_local_files(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        with patch.object(bridge, "CHROME", Path.home() / "chrome"), \
+                patch.object(bridge, "INSTALL", Path.home() / "install"), \
+                patch.object(sys, "stdout", io.StringIO()):
+            bridge.install()
+            files = [bridge.host_manifest(), bridge.INSTALL / "native-host", bridge.INSTALL / "extension/manifest.json"]
+            original = [file.read_bytes() for file in files]
+            response, observed = self.production_round_trip(host, "uninstall", {},
+                lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], "status": "uninstall_dispatched"})])
+            self.assertEqual(response, {"status": "uninstall_unverified"})
+            self.assertEqual([(req["operation"], req["payload"]) for req in observed], [("uninstall", {})])
+            self.assertEqual([file.read_bytes() for file in files], original)
+
+    def test_capture_chunk_fits_native_frame(self):
+        host = self.start_host()
+        self.wait_for_hosts(1)
+        payload = {"image_ref": "3a552cbc-80f7-4744-b511-17778bbb8c70", "offset": 0}
+        chunk = {"status": "ok", "data": "a" * 48000, "next_offset": 48000}
+        response, observed = self.production_round_trip(host, "capture_chunk", payload,
+            lambda req: [bridge.frame({"v": bridge.PROTOCOL, "id": req["id"], **chunk})])
+        self.assertEqual(response, chunk)
+        self.assertEqual([(req["operation"], req["payload"]) for req in observed], [("capture_chunk", payload)])
 
     def test_status_reports_missing_pending_disconnected_and_update_without_launch(self):
         with patch.object(bridge, "CHROME", Path.home() / "chrome"), \
@@ -338,6 +364,7 @@ class BackgroundTest(unittest.TestCase):
         hosts = [self.start_host(), self.start_host()]
         self.wait_for_hosts(2)
         self.assertEqual(bridge.request("status", None, 3), {"status": "ambiguous"})
+        self.assertEqual(bridge.request("uninstall", {}, 3), {"status": "ambiguous"})
         self.assertEqual(select.select([host.stdout for host in hosts], [], [], 0.1)[0], [])
 
     def test_installer_stages_files_for_single_profile(self):

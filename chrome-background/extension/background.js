@@ -2,11 +2,18 @@ importScripts("read-page.js");
 
 const host = "com.agent_browser.background";
 const reconnect = "reconnect-native-host";
-const version = 3;
+const version = 4;
 const frameLimit = 65536;
+const captureGrant = { origins: ["<all_urls>"] };
+const captureChunkLimit = 48000;
+const captureImageLimit = 12 * 1024 * 1024;
+const captureImageTTL = 30000;
+const pngPrefix = "data:image/png;base64,";
 const pageKinds = new Set(["info", "snapshot", "html", "extract", "wait", "click", "scroll", "fill", "select", "press", "submit"]);
 const pageWrites = new Set(["click", "scroll", "fill", "select", "press", "submit"]);
 let port;
+let uninstallDispatched = false;
+let captureInFlight = false;
 
 function httpURL(value) {
   if (typeof value !== "string" || !/^https?:\/\//i.test(value) || /[\\\s\x00-\x1f\x7f]/u.test(value)) return null;
@@ -31,8 +38,14 @@ function stateFor(connection) {
   const refs = new Map();
   const tabs = new Map();
   const observers = new Set();
+  const captureObservers = new Set();
+  let transfer;
+  function clearImage() {
+    if (transfer) clearTimeout(transfer.timer);
+    transfer = undefined;
+  }
   return {
-    active: () => port === connection,
+    active: () => port === connection && !uninstallDispatched,
     inGeneration: ref => ref.startsWith(generation + "."),
     tab: ref => tabs.get(ref),
     knows: id => refs.has(id),
@@ -40,8 +53,38 @@ function stateFor(connection) {
       observers.add(fn);
       return () => observers.delete(fn);
     },
+    observeCapture(fn) {
+      captureObservers.add(fn);
+      return () => captureObservers.delete(fn);
+    },
+    notify(kind, windowId, tabId) {
+      for (const observe of captureObservers) observe(kind, windowId, tabId);
+    },
+    beginCapture() {
+      if (captureInFlight || transfer) return false;
+      captureInFlight = true;
+      return true;
+    },
+    finishCapture() { captureInFlight = false; },
+    storeImage(image) {
+      const image_ref = crypto.randomUUID();
+      transfer = { image, image_ref, offset: 0, expires: Date.now() + captureImageTTL,
+        timer: setTimeout(clearImage, captureImageTTL) };
+      return { image_ref, image_length: image.length };
+    },
+    chunk({ image_ref, offset }) {
+      if (transfer && Date.now() >= transfer.expires) clearImage();
+      if (!transfer || transfer.image_ref !== image_ref || transfer.offset !== offset) return { status: "capture_transfer_unavailable" };
+      const next_offset = Math.min(offset + captureChunkLimit, transfer.image.length);
+      const data = transfer.image.slice(offset, next_offset);
+      if (next_offset === transfer.image.length) clearImage();
+      else transfer.offset = next_offset;
+      return { status: "ok", data, next_offset };
+    },
+    clearImage,
     changed(kind, windowId, tabId) {
       for (const observe of observers) observe(kind, windowId, tabId);
+      for (const observe of captureObservers) observe(kind, windowId, tabId);
       const entry = refs.get(tabId);
       if (entry) {
         delete entry.ownership;
@@ -59,6 +102,7 @@ function stateFor(connection) {
     },
     forget(id, replaced = false) {
       for (const observe of observers) observe("identity", undefined, id);
+      for (const observe of captureObservers) observe("identity", undefined, id);
       const entry = refs.get(id);
       if (entry) {
         if (replaced) entry.adoption++;
@@ -206,6 +250,110 @@ async function guardedPage(state, data, expires) {
   if (!result || typeof result !== "object" || Array.isArray(result) || typeof result.status !== "string" ||
       (result.final_url !== undefined && result.final_url !== expected)) return uncertain;
   return { ...result, final_url: expected };
+}
+
+function capturePermissionRequired() {
+  return { status: "capture_permission_required", message: "In the intended Chrome profile, open the Extensions toolbar menu, click Agent Browser (or its pinned toolbar button), and approve the one-time permission. No per-site grant is needed." };
+}
+
+function captureCrop(crop) {
+  const keys = ["x", "y", "width", "height", "viewport_width", "viewport_height"];
+  if (!crop || !keys.every(key => Number.isFinite(crop[key]))) return null;
+  const { x, y, width, height, viewport_width, viewport_height } = crop;
+  if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > viewport_width + 0.000001 ||
+      y + height > viewport_height + 0.000001 || viewport_width <= 0 || viewport_height <= 0) return null;
+  return { x, y, width, height, viewport_width, viewport_height };
+}
+
+async function guardedCapture(state, data, expires) {
+  const expected = httpURL(data.expected_url).href;
+  const entry = state.tab(data.ref);
+  if (!entry) return changed();
+  const navigation = entry.navigation;
+  const unavailable = { status: "capture_unavailable", final_url: expected };
+  if (!state.beginCapture()) return unavailable;
+  let invalidated = false;
+  let windowId;
+  // A switch away and back invalidates the capture even if both snapshots match.
+  const stop = state.observeCapture((kind, id, tabId) => {
+    if (kind === "focus" || kind === "permission" || (kind === "window_removed" && id === windowId) ||
+        (kind === "activation" && (windowId === undefined || id === windowId)) || tabId === entry.id) invalidated = true;
+  });
+  const stale = () => invalidated || !state.active() || state.tab(data.ref) !== entry || entry.navigation !== navigation;
+  const expired = () => Date.now() >= expires;
+  let frame;
+  async function pinned() {
+    if (stale()) return changed();
+    if (expired()) return { status: "timeout" };
+    const tab = await chrome.tabs.get(entry.id).catch(() => null);
+    if (!regular(tab) || tab.id !== entry.id || (windowId !== undefined && tab.windowId !== windowId)) return changed();
+    const mismatch = boundary(tab, expected);
+    if (mismatch) return mismatch;
+    if (!Number.isSafeInteger(tab.windowId) || tab.windowId < 0) return unavailable;
+    windowId = tab.windowId;
+    const currentFrame = await topDocument(tab.id);
+    if (currentFrame && currentFrame.url !== expected) return changed(httpURL(currentFrame.url));
+    if (!activeDocument(currentFrame, expected)) return unavailable;
+    if (frame && currentFrame.documentId !== frame.documentId) return changed();
+    frame = currentFrame;
+    const window = await chrome.windows.get(windowId, { populate: true }).catch(() => null);
+    if (stale()) return changed();
+    if (expired()) return { status: "timeout" };
+    if (tab.active !== true || !normalWindow(window) || window.id !== windowId || window.focused !== true ||
+        !Array.isArray(window.tabs)) return unavailable;
+    const selected = window.tabs.filter(item => item.active === true);
+    if (selected.length !== 1 || !regular(selected[0]) || selected[0].id !== tab.id || selected[0].windowId !== windowId) return changed();
+    return boundary(selected[0], expected);
+  }
+  async function geometry() {
+    let results;
+    try {
+      results = await chrome.scripting.executeScript({ target: { tabId: entry.id, documentIds: [frame.documentId] },
+        world: "ISOLATED", func: agentBrowserPageOperation,
+        args: [{ kind: "capture_geometry", expectedURL: expected, ...(data.selector === undefined ? {} : { selector: data.selector }) }] });
+    } catch (_) { return unavailable; }
+    if (stale()) return changed();
+    if (expired()) return { status: "timeout" };
+    if (results?.length !== 1 || results[0].frameId !== 0 || results[0].documentId !== frame.documentId) return changed();
+    const probe = results[0].result;
+    if (probe?.status === "target_changed") return changed(httpURL(probe.final_url));
+    if (probe?.final_url !== expected || typeof probe.status !== "string" || !/^[a-z_]{2,40}$/.test(probe.status)) return unavailable;
+    if (probe.status !== "ok") return { status: probe.status, final_url: expected };
+    const crop = captureCrop(probe.crop);
+    if (!crop) return unavailable;
+    return { status: "ok", crop };
+  }
+  try {
+    if (!await chrome.permissions.contains({ origins: ["http://*/*", "https://*/*"] })) return { status: "permission_required" };
+    if (!await chrome.permissions.contains(captureGrant)) return capturePermissionRequired();
+    const preflight = await pinned();
+    if (preflight) return preflight;
+    const before = await geometry();
+    if (before.status !== "ok") return before;
+    const preCapture = await pinned();
+    if (preCapture) return preCapture;
+    // captureVisibleTab targets a window, not a document. Never release its
+    // pixels until the document, active tab and focus are rechecked.
+    let image;
+    try { image = await chrome.tabs.captureVisibleTab(windowId, { format: "png" }); }
+    catch (_) { return unavailable; }
+    const postCapture = await pinned();
+    if (postCapture) return postCapture;
+    const after = await geometry();
+    if (after.status !== "ok") return after;
+    const postflight = await pinned();
+    if (postflight) return postflight;
+    if (JSON.stringify(before.crop) !== JSON.stringify(after.crop)) return unavailable;
+    if (typeof image !== "string" || image.length > captureImageLimit || !image.startsWith(pngPrefix) ||
+        (image.length - pngPrefix.length) % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.slice(pngPrefix.length))) return unavailable;
+    const result = { status: "ok", final_url: expected, ...(data.selector !== undefined ? { crop: before.crop } : {}) };
+    // Leave room for transport fields and worst-case ASCII JSON URL expansion.
+    if (image.length <= captureChunkLimit && expected.length <= 2048) return { ...result, image };
+    return { ...result, ...state.storeImage(image) };
+  } finally {
+    stop();
+    state.finishCapture();
+  }
 }
 
 async function tabOperation(state, data, expires) {
@@ -428,6 +576,12 @@ function validPayload(operation, data) {
   const validToken = value => typeof value === "string" && token.test(value);
   if (operation === "status") return only();
   if (operation === "list") return only();
+  if (operation === "uninstall") return only();
+  if (operation === "capture") return only("ref", "expected_url", "selector") && validToken(data.ref) &&
+    httpURL(data.expected_url)?.href.length <= 4096 && (!("selector" in data) || selector(data.selector));
+  if (operation === "capture_chunk") return only("image_ref", "offset") && typeof data.image_ref === "string" &&
+    data.image_ref.length === 36 && validToken(data.image_ref) && Number.isSafeInteger(data.offset) &&
+    data.offset >= 0 && data.offset < captureImageLimit;
   if (operation === "page") return only("ref", "expected_url", "kind", "selector", "elementRef", "text", "key", "value", "direction", "pixels", "condition", "offset", "raw") &&
     validToken(data.ref) && !!httpURL(data.expected_url) && pageKinds.has(data.kind) &&
     ["selector", "elementRef", "text", "key", "value", "direction", "condition"].every(key => !(key in data) || (typeof data[key] === "string" && data[key].length <= 10000)) &&
@@ -447,6 +601,16 @@ function validPayload(operation, data) {
 async function operation(state, { operation, payload, expires }) {
   if (!validPayload(operation, payload) || !Number.isSafeInteger(expires)) return { status: "invalid_request" };
   if (Date.now() >= expires) return { status: operation === "close" ? "cleanup_unconfirmed" : "timeout" };
+  if (operation === "uninstall") {
+    if (uninstallDispatched) return { status: "uninstall_unverified" };
+    if (!state.active() || typeof chrome.management?.uninstallSelf !== "function") return { status: "uninstall_unavailable" };
+    uninstallDispatched = true;
+    state.clearImage();
+    return { status: "uninstall_dispatched" };
+  }
+  if (uninstallDispatched) return { status: "disconnected" };
+  if (operation === "capture") return guardedCapture(state, payload, expires);
+  if (operation === "capture_chunk") return state.active() ? state.chunk(payload) : { status: "capture_transfer_unavailable" };
   if (operation !== "close" && !await chrome.permissions.contains({ origins: ["http://*/*", "https://*/*"] })) {
     return { status: "permission_required" };
   }
@@ -480,9 +644,14 @@ function withinBudget(response, operation, kind) {
 let forgetTab = () => {};
 let navigateTab = () => {};
 let changedTab = () => {};
+let observeEvent = () => {};
+let clearCaptureImage = () => {};
 chrome.tabs.onRemoved?.addListener(tabId => forgetTab(tabId));
 chrome.tabs.onReplaced?.addListener((_added, removed) => forgetTab(removed, true));
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => changedTab("selection", windowId, tabId));
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  changedTab("selection", windowId, tabId);
+  observeEvent("activation", windowId, tabId);
+});
 chrome.tabs.onHighlighted.addListener(({ tabIds, windowId }) => {
   if (!tabIds.length) changedTab("selection", windowId);
   for (const tabId of tabIds) changedTab("selection", windowId, tabId);
@@ -492,20 +661,24 @@ for (const name of ["onAttached", "onDetached", "onMoved"]) {
 }
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if ("pinned" in change || "groupId" in change) changedTab("adoption", undefined, tabId);
+  if ("url" in change || "pendingUrl" in change || change.status === "loading" || change.discarded === true) observeEvent("capture_identity", undefined, tabId);
 });
 chrome.windows.onFocusChanged.addListener(windowId => changedTab("focus", windowId));
+chrome.windows.onRemoved?.addListener(windowId => observeEvent("window_removed", windowId));
 for (const name of ["onBeforeNavigate", "onCommitted", "onHistoryStateUpdated", "onReferenceFragmentUpdated"]) {
   chrome.webNavigation?.[name]?.addListener(({tabId, frameId}) => { if (frameId === 0) navigateTab(tabId); });
 }
 
 function connect() {
-  if (port || chrome.extension?.inIncognitoContext) return;
+  if (port || uninstallDispatched || chrome.extension?.inIncognitoContext) return;
   const connection = chrome.runtime.connectNative(host);
   port = connection;
   const state = stateFor(connection);
   forgetTab = state.forget;
   navigateTab = state.navigated;
   changedTab = state.changed;
+  observeEvent = state.notify;
+  clearCaptureImage = state.clearImage;
   connection.onMessage.addListener(async request => {
     let response;
     const id = typeof request?.id === "string" && request.id.length <= 36 ? request.id : "";
@@ -517,17 +690,29 @@ function connect() {
         ["page", "tab"].includes(request?.operation) ? "action_unconfirmed" : "browser_error" };
     }
     response = withinBudget({ v: version, id, ...result }, request?.operation, request?.payload?.kind);
-    if (port === connection) connection.postMessage(response);
+    try {
+      if (port === connection) connection.postMessage(response);
+    } finally {
+      if (result.status === "uninstall_dispatched") {
+        // The official self-uninstall can terminate the worker and host before
+        // anything else can be reported. A sent marker is not proof of removal.
+        try { await chrome.management.uninstallSelf({ showConfirmDialog: false }); }
+        catch (_) { /* The native client reports the result as unverified. */ }
+      }
+    }
   });
   connection.onDisconnect.addListener(() => {
     // Reading lastError suppresses the warning when the host isn't installed yet.
     void chrome.runtime.lastError;
     if (port !== connection) return;
+    state.clearImage();
     port = undefined;
     forgetTab = () => {};
     navigateTab = () => {};
     changedTab = () => {};
-    chrome.alarms.create(reconnect, { delayInMinutes: 0.5 });
+    observeEvent = () => {};
+    clearCaptureImage = () => {};
+    if (!uninstallDispatched) chrome.alarms.create(reconnect, { delayInMinutes: 0.5 });
   });
 }
 
@@ -536,4 +721,12 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
+chrome.permissions.onRemoved?.addListener(() => {
+  observeEvent("permission");
+  clearCaptureImage();
+});
+chrome.action.onClicked.addListener(() => {
+  // Call directly from the toolbar gesture; a native request never opens a prompt.
+  void chrome.permissions.request(captureGrant).catch(() => {});
+});
 connect();

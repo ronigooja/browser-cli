@@ -25,8 +25,8 @@ HOST = "com.agent_browser.background"
 CHROME = Path.home() / "Library/Application Support/Google/Chrome"
 INSTALL = Path.home() / "Library/Application Support/agent-browser/chrome-background"
 LIMIT = 65536
-PROTOCOL = 3
-OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open"}
+PROTOCOL = 4
+OPERATIONS = {"status", "find", "open", "read", "close", "list", "page", "tab", "front_open", "capture", "capture_chunk", "uninstall"}
 WAKE_WAIT = 2
 WAKE_POLL = 0.05
 
@@ -94,6 +94,7 @@ def response_too_large(request):
     operation = request.get("operation")
     status = ("open_unconfirmed" if operation in ("open", "front_open") else
               "action_unconfirmed" if operation in ("page", "tab") else
+              "uninstall_unverified" if operation == "uninstall" else
               "cleanup_unconfirmed" if operation == "close" else "response_too_large")
     return {"v": PROTOCOL, "id": request.get("id"), "status": status}
 
@@ -241,7 +242,7 @@ def request(operation, payload, timeout):
             if type(reply.get("v")) is not int or reply["v"] != PROTOCOL or reply.get("id") != message_id:
                 # A v1 host rejects the request itself; a v1 worker may instead
                 # reject it behind a newer host. Neither needs a replay or probe.
-                old_host_or_worker = (type(reply.get("v")) is int and reply["v"] in (1, 2)
+                old_host_or_worker = (type(reply.get("v")) is int and 1 <= reply["v"] < PROTOCOL
                                       and reply.get("id") == message_id
                                       and reply.get("status") in ("invalid_request", "protocol_mismatch"))
                 if old_host_or_worker or ("v" not in reply and "error" in reply):
@@ -254,6 +255,8 @@ def request(operation, payload, timeout):
             if reply["status"] == "protocol_mismatch":
                 return {"status": "cleanup_instance_changed"} if operation == "close" else {
                     "status": "disconnected", "update_required": True}
+            if operation == "uninstall" and reply["status"] in ("uninstall_dispatched", "uninstall_unverified"):
+                return {"status": "uninstall_unverified"}
             return {key: value for key, value in reply.items() if key not in ("v", "id")}
     except AmbiguousConnection:
         return {"status": "cleanup_unconfirmed" if operation == "close" else "ambiguous"}
@@ -264,6 +267,8 @@ def request(operation, payload, timeout):
             return {"status": "open_unconfirmed"}
         if operation in ("page", "tab") and dispatched:
             return {"status": "action_unconfirmed"}
+        if operation == "uninstall" and dispatched:
+            return {"status": "uninstall_unverified"}
         if operation != "status" and isinstance(error, TimeoutError):
             return {"status": "timeout"}
         return {"status": "disconnected"}
