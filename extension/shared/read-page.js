@@ -207,8 +207,12 @@ function readPage(options) {
       }
       target.click();
     } else if (kind === 'fill') {
-      if (!target.matches('textarea,input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"]') || target.readOnly || typeof options.text !== 'string' || options.text.length > 4000) return result('action_unavailable');
-      target.value = options.text;
+      if (target.readOnly || typeof options.text !== 'string' || options.text.length > 4000) return result('action_unavailable');
+      if (target.matches('textarea,input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="url"],input[type="tel"]')) {
+        target.value = options.text;
+      } else if (target.isContentEditable && target.hasAttribute('contenteditable')) {
+        target.textContent = options.text;
+      } else return result('action_unavailable');
       target.dispatchEvent(new Event('input', {bubbles:true}));
       target.dispatchEvent(new Event('change', {bubbles:true}));
     } else if (kind === 'select') {
@@ -221,7 +225,8 @@ function readPage(options) {
       target.dispatchEvent(new Event('change', {bubbles:true}));
     } else if (kind === 'press') {
       // Synthetic keyboard events do not invoke browser default actions.
-      if (!['Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(options.key)) return result('action_unavailable');
+      if (!['Enter','Tab','Escape','Backspace','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(options.key) &&
+          !(typeof options.key === 'string' && [...options.key].length === 1)) return result('action_unavailable');
       target.dispatchEvent(new KeyboardEvent('keydown', {key:options.key,bubbles:true}));
       target.dispatchEvent(new KeyboardEvent('keyup', {key:options.key,bubbles:true}));
     } else if (kind === 'submit') {

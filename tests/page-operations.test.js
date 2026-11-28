@@ -83,3 +83,15 @@ test('scroll dispatches only the requested movement and does not act on verifica
   assert.equal(p.run({kind:'scroll', direction:'by', pixels:100}).status, 'verification_required');
   assert.deepEqual(coordinates, [[0,-100]]);
 });
+
+test('fill uses literal text and press dispatches only synthetic keyboard events', () => {
+  const p = setup();
+  const events = [];
+  p.node.matches = selector => selector.startsWith('textarea,');
+  p.node.dispatchEvent = event => events.push([event.type,event.key]);
+  p.context.Event = p.context.KeyboardEvent = class { constructor(type, options) { Object.assign(this, {type, ...options}); } };
+  assert.equal(p.run({kind:'fill', selector:'#go', text:'<b>文字</b>'}).status, 'ok');
+  assert.equal(p.node.value, '<b>文字</b>');
+  assert.equal(p.run({kind:'press', selector:'#go', key:'Enter'}).status, 'ok');
+  assert.deepEqual(events, [['input',undefined],['change',undefined],['keydown','Enter'],['keyup','Enter']]);
+});
