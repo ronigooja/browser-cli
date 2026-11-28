@@ -88,7 +88,7 @@ TOOLS = [
         "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 8000},
         "approved": {"type": "boolean", "description": "True only after the user explicitly approves the form submission."},
     }, ["browser", "action", "tab_ref"], openWorldHint=True),
-    tool("capture_tab", "Capture a PNG viewport or the visible portion of a CSS-selected element in Chrome or Safari. The confirmed tab must already be active in its focused window. This tool does not switch tabs or scroll. For Chrome, click the extension toolbar button to grant screenshot access once.", {
+    tool("capture_tab", "Capture a PNG viewport or the visible portion of a CSS-selected element in Chrome or Safari. The confirmed tab must already be active in its focused window. This tool does not switch tabs or scroll. In Chrome, open the extension popup and turn on Screenshot access once.", {
         "browser": enum(BROWSERS), "tab_ref": token("From browser_tabs in this session."),
         "selector": {"type": "string", "maxLength": 1000},
     }, ["browser", "tab_ref"], readOnlyHint=True, destructiveHint=False, openWorldHint=True),
